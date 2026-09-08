@@ -481,11 +481,10 @@ jobs:
           set_secret AWS_BACKEND_APPLICATION_NAME       "$(terraform output -raw github_secret_AWS_BACKEND_APPLICATION_NAME)"
           set_secret AWS_BACKEND_ENVIRONMENT_NAME       "$(terraform output -raw github_secret_AWS_BACKEND_ENVIRONMENT_NAME)"
           set_secret AWS_PROD_BACKEND_ENVIRONMENT_NAME  "$(terraform output -raw github_secret_AWS_PROD_BACKEND_ENVIRONMENT_NAME)"
-          # These are the names staging.yml and production.yml actually read.
-          # Both point at the same stack, matching how the AWS_* / AWS_PROD_*
-          # outputs above already double up on one set of resources.
-          set_secret VITE_PROD_API_URL                  "$(terraform output -raw frontend_url)/api"
-          set_secret VITE_STAGING_API_URL               "$(terraform output -raw frontend_url)/api"
+          # No API URL secret is written on purpose. CloudFront proxies /api/*
+          # to the backend on the same host it serves the app from, so the
+          # frontend uses a relative /api base and needs no build-time URL.
+          # That also means a custom domain needs no frontend rebuild.
 
       # ── 11. Trigger application deployment ───────────────────────────────────
       # Now that infrastructure exists and all secrets are written, kick off
