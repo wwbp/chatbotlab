@@ -10,7 +10,7 @@ const VoiceConversation = () => {
   const dcRef = useRef(null);
   const audioRef = useRef(null);
 
-  const apiUrl = import.meta.env.VITE_API_URL;
+  const apiUrl = import.meta.env.VITE_API_URL || '/api';
   const searchParams = new URLSearchParams(window.location.search);
   const botName = searchParams.get('bot_name');
   const conversationId = searchParams.get('conversation_id');

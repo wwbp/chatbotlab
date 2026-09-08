@@ -38,18 +38,20 @@ jobs:
           cd web
           npm ci
 
-      # The API URL is baked into the bundle at build time. If the secret were
-      # missing the build would still succeed and quietly ship a frontend that
-      # talks to nothing, so fail loudly here instead.
-      - name: Verify VITE_PROD_API_URL is set
+      # The API URL is baked into the bundle at build time. Leaving the secret
+      # unset is a valid configuration: CloudFront proxies /api/* to the
+      # backend on the same host it serves the app from, so the frontend falls
+      # back to a relative /api base. Set it only to point the frontend at an
+      # API somewhere else.
+      - name: Report which API base the bundle will use
         env:
           VITE_API_URL: ${{ secrets.VITE_PROD_API_URL }}
         run: |
           if [ -z "$VITE_API_URL" ]; then
-            echo "::error::VITE_PROD_API_URL is not set. Add it under Settings → Secrets and variables → Actions."
-            exit 1
+            echo "VITE_PROD_API_URL is not set — building against the relative /api base (same origin as CloudFront)."
+          else
+            echo "Building against $VITE_API_URL"
           fi
-          echo "Building against $VITE_API_URL"
 
       - name: Build frontend
         env:

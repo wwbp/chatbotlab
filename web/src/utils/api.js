@@ -1,7 +1,11 @@
 import axios from 'axios';
 
+// CloudFront serves the app and proxies /api/* to the backend on the same
+// host, and the dev server proxies /api the same way, so a relative base
+// works in both. VITE_API_URL stays supported as an override for setups that
+// serve the API from somewhere else.
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL,
+  baseURL: import.meta.env.VITE_API_URL || '/api',
   withCredentials: true,
   headers: {
     'Content-Type': 'application/json',
@@ -60,10 +64,11 @@ export async function sendMessage(sessionId, message, sender) {
 
 export const createWebSocket = (sessionId, isAudioMode) => {
   const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-  const wsUrl = import.meta.env.VITE_API_URL.replace(
-    /^https?/,
-    protocol
-  ).replace('/api/v1', '');
+  // CloudFront routes /ws/* to the backend on the same host that serves the
+  // app, so derive the socket origin from the page. Deriving it from the API
+  // base URL instead breaks as soon as that base is relative, and produced
+  // /api/ws/... — a path CloudFront does not route — when it was absolute.
+  const wsUrl = `${protocol}://${window.location.host}`;
   const endpoint = isAudioMode
     ? `/ws/audio/${sessionId}/`
     : `/ws/chat/${sessionId}/`;
