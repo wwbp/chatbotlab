@@ -113,22 +113,21 @@ cd terraform
 cp terraform.tfvars.example terraform.tfvars
 ```
 
-Open `terraform.tfvars` and fill in every value. The five required secrets are:
+Open `terraform.tfvars` and fill in every value:
 
 | Variable | Where to get it |
 |---|---|
-| `openai_api_key` | platform.openai.com → API keys |
-| `anthropic_api_key` | console.anthropic.com → API keys |
+| `openai_api_key` | platform.openai.com → API keys (or leave empty and use Anthropic) |
+| `anthropic_api_key` | console.anthropic.com → API keys (or leave empty and use OpenAI) |
 | `db_password` | Make up a strong password (letters + numbers, min 8 chars) |
-| `django_secret_key` | Run the command below |
+| `admin_panel_password` | Make up a password — you log into `/api/admin/` with it as user `admin` |
+| `project_name` | A short prefix for every AWS resource (must match `TF_PROJECT_PREFIX`) |
 | `environment` | `"staging"` or `"production"` |
 
-Generate a Django secret key:
-```bash
-cd ../generic_chatbot
-python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
-cd ../terraform
-```
+`django_secret_key` is not in that list on purpose. Leave it empty and Terraform
+generates one and keeps it in state, so it stays stable across re-deploys and
+active sessions survive. Only set it yourself if you need to pin a specific
+value — then it must be at least 50 characters.
 
 ### Step 3 — Deploy everything
 
@@ -339,7 +338,7 @@ After `setup.sh` completes and the infrastructure is up, deploy the app manually
 ### Backend (Django on Elastic Beanstalk)
 
 ```bash
-cd generic_chatbot
+cd api
 pip install awsebcli
 eb init <project-prefix> --platform docker --region us-east-1
 eb use <project-prefix>-staging-env

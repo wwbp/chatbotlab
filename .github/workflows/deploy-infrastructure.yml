@@ -202,6 +202,8 @@ jobs:
           TF_VAR_environment:                 production
           TF_VAR_github_org:                  ${{ github.repository_owner }}
           TF_VAR_github_repo:                 ${{ github.event.repository.name }}
+          TF_VAR_github_org_id:               ${{ github.repository_owner_id }}
+          TF_VAR_github_repo_id:              ${{ github.repository_id }}
           TF_VAR_openai_api_key:              ${{ secrets.OPENAI_API_KEY }}
           TF_VAR_anthropic_api_key:           ${{ secrets.ANTHROPIC_API_KEY }}
           TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}
@@ -400,6 +402,8 @@ jobs:
           TF_VAR_environment:                 production
           TF_VAR_github_org:                  ${{ github.repository_owner }}
           TF_VAR_github_repo:                 ${{ github.event.repository.name }}
+          TF_VAR_github_org_id:               ${{ github.repository_owner_id }}
+          TF_VAR_github_repo_id:              ${{ github.repository_id }}
           TF_VAR_openai_api_key:              ${{ secrets.OPENAI_API_KEY }}
           TF_VAR_anthropic_api_key:           ${{ secrets.ANTHROPIC_API_KEY }}
           TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}
@@ -445,6 +449,8 @@ jobs:
           TF_VAR_environment:                 production
           TF_VAR_github_org:                  ${{ github.repository_owner }}
           TF_VAR_github_repo:                 ${{ github.event.repository.name }}
+          TF_VAR_github_org_id:               ${{ github.repository_owner_id }}
+          TF_VAR_github_repo_id:              ${{ github.repository_id }}
           TF_VAR_openai_api_key:              ${{ secrets.OPENAI_API_KEY }}
           TF_VAR_anthropic_api_key:           ${{ secrets.ANTHROPIC_API_KEY }}
           TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}
@@ -475,12 +481,20 @@ jobs:
           set_secret AWS_BACKEND_APPLICATION_NAME       "$(terraform output -raw github_secret_AWS_BACKEND_APPLICATION_NAME)"
           set_secret AWS_BACKEND_ENVIRONMENT_NAME       "$(terraform output -raw github_secret_AWS_BACKEND_ENVIRONMENT_NAME)"
           set_secret AWS_PROD_BACKEND_ENVIRONMENT_NAME  "$(terraform output -raw github_secret_AWS_PROD_BACKEND_ENVIRONMENT_NAME)"
-          set_secret VITE_API_URL                       "$(terraform output -raw frontend_url)/api"
+          # These are the names staging.yml and production.yml actually read.
+          # Both point at the same stack, matching how the AWS_* / AWS_PROD_*
+          # outputs above already double up on one set of resources.
+          set_secret VITE_PROD_API_URL                  "$(terraform output -raw frontend_url)/api"
+          set_secret VITE_STAGING_API_URL               "$(terraform output -raw frontend_url)/api"
 
       # ── 11. Trigger application deployment ───────────────────────────────────
       # Now that infrastructure exists and all secrets are written, kick off
       # the production deploy so researchers don't need a second manual click.
+      # A failed dispatch must not trip the if:failure() rollback below — by
+      # this point the infrastructure is built and healthy, and destroying it
+      # over a trigger hiccup would throw away a 20-minute apply.
       - name: Trigger application deployment
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
@@ -502,6 +516,8 @@ jobs:
           TF_VAR_environment:                 production
           TF_VAR_github_org:                  ${{ github.repository_owner }}
           TF_VAR_github_repo:                 ${{ github.event.repository.name }}
+          TF_VAR_github_org_id:               ${{ github.repository_owner_id }}
+          TF_VAR_github_repo_id:              ${{ github.repository_id }}
           TF_VAR_openai_api_key:              ${{ secrets.OPENAI_API_KEY }}
           TF_VAR_anthropic_api_key:           ${{ secrets.ANTHROPIC_API_KEY }}
           TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}

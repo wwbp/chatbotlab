@@ -35,12 +35,47 @@ resource "aws_cloudfront_origin_access_control" "frontend_assets" {
 # CloudFront distribution
 # -----------------------------------------------------------------------------
 
+# -----------------------------------------------------------------------------
+# ACM certificate for custom domain (only created when domain_name is set).
+#
+# CloudFront requires ACM certs to be in us-east-1 regardless of the rest of
+# the infrastructure region. We use the aws.us_east_1 provider alias from
+# main.tf for this resource and the validation resource below.
+#
+# On first deploy with a domain: the cert is created and the validation CNAME
+# is printed to the workflow summary. The researcher adds the CNAME at their
+# registrar. aws_acm_certificate_validation then waits (up to 30 min) for DNS
+# to propagate before continuing to wire the cert into CloudFront.
+# -----------------------------------------------------------------------------
+
+resource "aws_acm_certificate" "custom_domain" {
+  count             = var.domain_name != "" ? 1 : 0
+  provider          = aws.us_east_1
+  domain_name       = var.domain_name
+  validation_method = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_acm_certificate_validation" "custom_domain" {
+  count           = var.domain_name != "" ? 1 : 0
+  provider        = aws.us_east_1
+  certificate_arn = aws_acm_certificate.custom_domain[0].arn
+
+  timeouts {
+    create = "30m"
+  }
+}
+
 resource "aws_cloudfront_distribution" "frontend" {
   enabled             = true
   is_ipv6_enabled     = true
   default_root_object = "index.html"
   price_class         = "PriceClass_100"
   comment             = "${local.name_prefix} frontend — managed by Terraform"
+  aliases             = var.domain_name != "" ? [var.domain_name] : []
 
   origin {
     # I use the regional domain name (not the global one) to avoid redirect
@@ -151,10 +186,10 @@ resource "aws_cloudfront_distribution" "frontend" {
   }
 
   viewer_certificate {
-    # I use the default CloudFront certificate (*.cloudfront.net) to keep
-    # setup simple. If you add a custom domain later, replace this block with
-    # an ACM certificate ARN and add the domain to the aliases argument above.
-    cloudfront_default_certificate = true
+    cloudfront_default_certificate = var.domain_name == ""
+    acm_certificate_arn            = var.domain_name != "" ? aws_acm_certificate_validation.custom_domain[0].certificate_arn : null
+    ssl_support_method             = var.domain_name != "" ? "sni-only" : null
+    minimum_protocol_version       = var.domain_name != "" ? "TLSv1.2_2021" : null
   }
 
   tags = local.common_tags

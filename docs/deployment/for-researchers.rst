@@ -192,9 +192,26 @@ Add each of the following secrets one at a time:
    * - ``GH_PAT``
      - From Step 6
      - Yes
+   * - ``TF_PROJECT_PREFIX``
+     - A short name for your deployment (e.g. ``mylab-chatbot``)
+     - Yes
    * - ``DOMAIN_NAME``
      - Your domain (e.g. ``chatbot.mylab.org``)
      - No
+
+.. important::
+
+   ``TF_PROJECT_PREFIX`` is prepended to the name of every AWS resource the
+   deployment creates, so pick something short, lowercase, and recognisable as
+   yours — ``mylab-chatbot`` is a good shape. Use letters, digits and hyphens
+   only.
+
+   **Set it once and never change it.** Changing it later makes the next run
+   look for a differently-named database, cache and storage bucket, find
+   nothing, and build a second complete set alongside the first — which you
+   then pay for twice. There is deliberately no default: a wrong value here
+   would point the deployment at the wrong infrastructure, so the workflow
+   stops rather than guess.
 
 Step 9: Run the deployment
 ---------------------------
