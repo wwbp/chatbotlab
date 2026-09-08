@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+  # Deploy Infrastructure triggers this with `gh workflow run` once the AWS
+  # resources exist, so the first app deploy needs no second manual click.
+  workflow_dispatch:
 
 permissions:
   id-token: write

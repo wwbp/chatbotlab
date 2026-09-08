@@ -4,9 +4,8 @@
 # Copy this file to terraform.tfvars and fill in every value.
 # NEVER commit terraform.tfvars to git — it contains secrets.
 #
-# How to generate the Django secret key:
-#   cd generic_chatbot
-#   python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
+# The Django secret key is auto-generated and kept in Terraform state — you
+# only set it below if you want to pin a specific value.
 # -----------------------------------------------------------------------------
 
 # Which environment am I deploying?
@@ -37,8 +36,13 @@ anthropic_api_key = "sk-ant-..."
 db_password = "REPLACE_with_strong_password_min8chars"
 
 # Django's cryptographic signing key.
-# Rules: must be at least 50 characters. Generate one with the command above.
-django_secret_key = "REPLACE_with_output_of_get_random_secret_key_command"
+# Leave empty (recommended) to auto-generate a stable key that survives every
+# re-deploy. Only set it if you must pin a value — then it needs 50+ characters.
+django_secret_key = ""
+
+# Password for the Django admin panel at /api/admin/. On the first deploy the
+# app creates an "admin" superuser with this password.
+admin_panel_password = "REPLACE_with_admin_panel_password"
 
 # -----------------------------------------------------------------------
 # GitHub — used to create an IAM role that GitHub Actions can assume
@@ -60,3 +64,6 @@ eb_instance_type = "t3.small"
 
 # RDS instance class for the MariaDB database
 db_instance_class = "db.t3.micro"
+
+# Maximum number of app servers the auto-scaling group may launch
+eb_max_instances = 1

@@ -128,9 +128,9 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
   setting {
     namespace = "aws:autoscaling:asg"
     name      = "MaxSize"
-    # I allow up to 3 instances on production to handle traffic spikes.
-    # Staging stays at 1 to keep costs low.
-    value = var.environment == "production" ? "3" : "1"
+    # Caller-controlled: 1 is plenty for most studies, raise it if hundreds of
+    # conversations run at once.
+    value = tostring(var.eb_max_instances)
   }
 
   # ----- Health check --------------------------------------------------------
@@ -168,7 +168,7 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
   setting {
     namespace = "aws:elasticbeanstalk:application:environment"
     name      = "SECRET_KEY"
-    value     = var.django_secret_key
+    value     = local.django_secret_key
   }
   setting {
     namespace = "aws:elasticbeanstalk:application:environment"
@@ -241,5 +241,25 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
     namespace = "aws:elasticbeanstalk:application:environment"
     name      = "ANTHROPIC_API_KEY"
     value     = var.anthropic_api_key
+  }
+
+  # ----- Admin panel ---------------------------------------------------------
+  # DJANGO_SUPERUSER_* env vars trigger superuser creation on first deploy.
+  # api/entrypoint.sh calls `manage.py createsuperuser --noinput` when these
+  # are present. Idempotent — subsequent deploys leave the existing user alone.
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "DJANGO_SUPERUSER_USERNAME"
+    value     = "admin"
+  }
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "DJANGO_SUPERUSER_EMAIL"
+    value     = "admin@example.com"
+  }
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "DJANGO_SUPERUSER_PASSWORD"
+    value     = var.admin_panel_password
   }
 }
