@@ -69,6 +69,43 @@ resource "aws_acm_certificate_validation" "custom_domain" {
   }
 }
 
+# SPA routing — React Router handles navigation client-side, so a visit or
+# refresh on /dashboard must return index.html rather than a missing object.
+#
+# This used to be done with custom_error_response mapping 403 and 404 to
+# /index.html with a 200. Those apply to the whole distribution, not to one
+# behavior, so they also swallowed every error the API returned: a Django 403
+# reached the browser as a 200 serving the React page. That silently broke
+# the frontend's error handling — fetch received HTML and a success status —
+# and made failures like a rejected admin login impossible to diagnose.
+#
+# A viewer-request function attached only to the S3 behavior rewrites the URL
+# before the request is made, so nothing has to fail for SPA routing to work
+# and the API's own status codes reach the browser untouched. It never runs
+# for /api/*, /static/admin/* or /ws/*, which are separate behaviors.
+resource "aws_cloudfront_function" "spa_router" {
+  name    = "${local.name_prefix}-spa-router"
+  runtime = "cloudfront-js-2.0"
+  comment = "Rewrite extensionless paths to /index.html for React Router"
+  publish = true
+  code    = <<-JS
+    function handler(event) {
+      var request = event.request;
+      var uri = request.uri;
+
+      // Anything with a file extension in its last segment is a real asset
+      // (/assets/index-abc123.js, /favicon.ico) — leave it alone. Everything
+      // else is a client-side route, so serve the app shell and let React
+      // Router read the original URL from the address bar.
+      var lastSegment = uri.substring(uri.lastIndexOf('/') + 1);
+      if (lastSegment.indexOf('.') === -1) {
+        request.uri = '/index.html';
+      }
+      return request;
+    }
+  JS
+}
+
 resource "aws_cloudfront_distribution" "frontend" {
   enabled             = true
   is_ipv6_enabled     = true
@@ -149,6 +186,13 @@ resource "aws_cloudfront_distribution" "frontend" {
     cached_methods         = ["GET", "HEAD"]
     compress               = true
 
+    # SPA routing happens here, on the S3 behavior only, so that an error from
+    # the API is still an error. See the function's own comment.
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.spa_router.arn
+    }
+
     forwarded_values {
       query_string = false
       cookies {
@@ -159,24 +203,6 @@ resource "aws_cloudfront_distribution" "frontend" {
     min_ttl     = 0
     default_ttl = 3600  # 1 hour default cache for HTML
     max_ttl     = 86400 # 24 hour max cache for hashed JS/CSS assets
-  }
-
-  # SPA routing — React Router handles all navigation client-side.
-  # When a user visits /dashboard or refreshes on any route, S3 returns
-  # a 403 (no such object). I rewrite that to a 200 with index.html so
-  # React Router can parse the URL and render the right component.
-  custom_error_response {
-    error_code            = 403
-    response_code         = 200
-    response_page_path    = "/index.html"
-    error_caching_min_ttl = 10
-  }
-
-  custom_error_response {
-    error_code            = 404
-    response_code         = 200
-    response_page_path    = "/index.html"
-    error_caching_min_ttl = 10
   }
 
   restrictions {

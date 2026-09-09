@@ -142,6 +142,30 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
     name      = "Application Healthcheck URL"
     value     = "/health/"
   }
+
+  # The setting above is the legacy one, and on a load-balanced environment it
+  # does not reach the load balancer: the target group reads its health check
+  # from this namespace instead, and left unset it defaults to "/". Django
+  # serves no route at "/" — the React app is served from S3, and Django only
+  # answers /api/, /health/ and /static/admin/ — so the target group health
+  # checked a path that always 404s and every instance sat permanently
+  # unhealthy with Target.ResponseCodeMismatch.
+  #
+  # This is easy to miss because the environment still serves traffic: an ALB
+  # falls open and routes to all targets when none are healthy. With a single
+  # instance everything looks fine while the environment reports Severe; the
+  # moment there is more than one instance, or an instance is replaced, the
+  # load balancer has no healthy target to shift traffic to.
+  setting {
+    namespace = "aws:elasticbeanstalk:environment:process:default"
+    name      = "HealthCheckPath"
+    value     = "/health/"
+  }
+  setting {
+    namespace = "aws:elasticbeanstalk:environment:process:default"
+    name      = "MatcherHTTPCode"
+    value     = "200"
+  }
   setting {
     namespace = "aws:elasticbeanstalk:healthreporting:system"
     name      = "SystemType"
@@ -176,6 +200,31 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
     # Wildcard lets the EB health checker reach the app without knowing the
     # exact hostname. Tighten this to your domain after DNS is configured.
     value = "*"
+  }
+
+  # Browsers send Origin on every admin POST. Django compares it against the
+  # request's own origin, which here is http://<eb-cname> — CloudFront reaches
+  # this environment over HTTP and forwards every viewer header except Host —
+  # while the browser sends https://<cloudfront-domain>. Without the real
+  # front-end origin listed, every admin login fails with
+  # "CSRF verification failed" and settings.py falls back to the wwbp domains,
+  # which no other deployment is served from.
+  #
+  # This cannot name the distribution directly: CloudFront's origin is this
+  # environment, so referencing aws_cloudfront_distribution here would make
+  # the two resources depend on each other. The wildcard form Django supports
+  # covers the generated *.cloudfront.net name without creating that cycle.
+  # It only relaxes the origin check — the CSRF token itself is still required
+  # and is unreadable cross-origin, so the protection still holds.
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "CSRF_TRUSTED_ORIGINS"
+    value     = local.frontend_origins
+  }
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "CORS_ALLOWED_ORIGINS"
+    value     = local.frontend_origins
   }
 
   # ----- Database ------------------------------------------------------------
