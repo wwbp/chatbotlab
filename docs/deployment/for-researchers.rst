@@ -51,6 +51,14 @@ Step 1: Fork the repository
 
 Go to the ChatbotLab repository on GitHub and click **Fork** (top right). Accept the defaults and click **Create fork**. All subsequent steps happen inside your fork.
 
+Then **turn on Actions**, which GitHub disables on every new fork:
+
+1. In your fork, click the **Actions** tab
+2. You will see a banner reading *"Workflows aren't being run on this forked repository"*
+3. Click **I understand my workflows, go ahead and enable them**
+
+Until you do this the fork has no workflows at all, so the **Deploy Infrastructure** button in Step 9 will not exist.
+
 Step 2: Create an AWS account
 -----------------------------
 
@@ -131,18 +139,29 @@ This lets the deployment automatically configure your repository after the infra
 3. Click **Personal access tokens** → **Fine-grained tokens** → **Generate new token**
 4. Give it a name (e.g. ``chatbot-deploy``)
 5. Set **Expiration** to 90 days or longer
-6. Under **Repository access**, select **Only select repositories** and choose your fork
-7. Under **Permissions → Repository permissions**:
+6. At the top, set **Resource owner** to **your own account** — not the organisation the project came from. A token owned by the wrong account cannot see your fork at all, and GitHub reports that as a confusing ``Not Found``.
+7. Under **Repository access**, select **Only select repositories** and choose your fork
+8. Under **Permissions → Repository permissions**, set **both** of these:
 
-   - Find **Secrets** and set it to **Read and write**
-   - (Actions and Metadata are already Read by default. Leave them.)
+   - **Secrets** → **Read and write** — lets the workflow save your infrastructure details back to the repository
+   - **Actions** → **Read and write** — lets the workflow start the application deployment for you
 
-8. Click **Generate token**
-9. Copy the token → ``GH_PAT``
+   (Metadata is Read by default and is required. Leave it.)
+
+9. Click **Generate token**
+10. Copy the token → ``GH_PAT``
+
+.. warning::
+
+   **Actions must be Read and write, not Read.** Read is the default and looks
+   sufficient, but starting a workflow needs write access. With Read only, your
+   infrastructure is built correctly and then the application is never deployed.
 
 .. note::
 
-   **Alternative:** If you prefer a simpler setup, generate a **Classic token** instead (Personal access tokens → Tokens (classic)) and check just the ``repo`` scope. One checkbox covers everything.
+   **Alternative:** If you prefer a simpler setup, generate a **Classic token** instead (Personal access tokens → Tokens (classic)) and check the top-level ``repo`` box. One checkbox covers everything.
+
+   Tick the **parent** ``repo`` box, not ``public_repo`` on its own. ``public_repo`` looks like the right choice for a public fork, but it cannot write repository secrets, and the deployment stops at its first check.
 
 .. important::
 
@@ -198,6 +217,24 @@ Add each of the following secrets one at a time:
    * - ``DOMAIN_NAME``
      - Your domain (e.g. ``chatbot.mylab.org``)
      - No
+   * - ``CREATE_GITHUB_OIDC_PROVIDER``
+     - ``false``, only if your AWS account already connects to GitHub Actions
+     - No
+
+.. note::
+
+   **Only if your AWS account is not brand new.** An AWS account can hold a
+   single GitHub Actions identity provider, and some accounts already have one
+   from earlier work. If yours does, add ``CREATE_GITHUB_OIDC_PROVIDER`` set to
+   ``false`` — the deployment will then use the existing provider instead of
+   managing it, so tearing this deployment down later cannot remove something
+   your other projects depend on.
+
+   Check with::
+
+     aws iam list-open-id-connect-providers
+
+   An empty list means you can skip this secret entirely.
 
 .. important::
 
