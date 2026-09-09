@@ -61,7 +61,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_ROLE_NAME }}
-          aws-region: us-west-2
+          aws-region: us-east-1
 
       - name: Sync S3 bucket
         run: |
@@ -85,7 +85,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_ROLE_NAME }}
-          aws-region: us-west-2
+          aws-region: us-east-1
 
       - name: Install AWS Elastic Beanstalk CLI
         run: |
