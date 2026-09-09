@@ -248,41 +248,26 @@ resource "aws_iam_role_policy" "github_actions_deployment_permissions" {
         Action   = ["cloudfront:CreateInvalidation"]
         Resource = aws_cloudfront_distribution.frontend.arn
       },
-      {
-        # Deploy the Django backend to Elastic Beanstalk.
-        # EB deployment internally uses S3, CloudFormation, EC2, and AutoScaling
-        # — I grant the EB managed policy which covers all of these correctly.
-        Sid    = "DeployBackendToElasticBeanstalk"
-        Effect = "Allow"
-        Action = ["elasticbeanstalk:*"]
-        Resource = [
-          "arn:aws:elasticbeanstalk:${var.aws_region}:${data.aws_caller_identity.current.account_id}:application/${local.name_prefix}",
-          "arn:aws:elasticbeanstalk:${var.aws_region}:${data.aws_caller_identity.current.account_id}:environment/${local.name_prefix}/${local.name_prefix}-env",
-          "arn:aws:elasticbeanstalk:${var.aws_region}:${data.aws_caller_identity.current.account_id}:applicationversion/${local.name_prefix}/*",
-          "arn:aws:elasticbeanstalk:${var.aws_region}::platform/*",
-          "arn:aws:elasticbeanstalk:${var.aws_region}::solutionstack/*",
-        ]
-      },
-      {
-        # EB deployment needs to write the application bundle to S3, describe
-        # EC2 resources, manage CloudFormation stacks, and update the ALB.
-        # These are all internal to the `eb deploy` command.
-        Sid    = "ElasticBeanstalkSupportingServices"
-        Effect = "Allow"
-        Action = [
-          "s3:*",
-          "cloudformation:*",
-          "ec2:Describe*",
-          "autoscaling:Describe*",
-          "autoscaling:UpdateAutoScalingGroup",
-          "elasticloadbalancing:Describe*",
-          "cloudwatch:PutMetricData",
-          "logs:CreateLogGroup",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents",
-        ]
-        Resource = "*"
-      },
     ]
   })
+}
+
+# Elastic Beanstalk deployment permissions.
+#
+# `eb deploy` drives a rolling update, so it acts on far more than Elastic
+# Beanstalk's own API: it uploads a bundle to the account-wide EB S3 bucket,
+# updates a CloudFormation stack, and suspends and resumes Auto Scaling
+# processes while instances are replaced. Many of the actions involved accept
+# no resource ARN at all, so they cannot be scoped.
+#
+# This used to be hand-enumerated inline, which meant every deploy discovered
+# one more missing action — elasticbeanstalk:ListPlatformBranches, then
+# CreateStorageLocation, then autoscaling:SuspendProcesses — each one a failed
+# deploy. AWS publishes a managed policy for exactly this principal, so use it
+# rather than maintaining that list by trial and error. The inline policy above
+# keeps the two grants that are genuinely ours to scope: writing the frontend
+# bucket and invalidating our distribution.
+resource "aws_iam_role_policy_attachment" "github_actions_elastic_beanstalk" {
+  role       = aws_iam_role.github_actions_deployment.name
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess-AWSElasticBeanstalk"
 }
