@@ -111,7 +111,8 @@ jobs:
           export GH_TOKEN="$GH_PAT"
           if ! gh secret set __PREFLIGHT_TEST__ --body "ok" --repo "${{ github.repository }}" 2>/dev/null; then
             echo "::error::GH_PAT cannot write repository secrets on ${{ github.repository }}."
-            echo "::error::Re-generate it as a classic token with the full 'repo' scope checked (not just public_repo)."
+            echo "::error::Classic token: tick the top-level 'repo' scope. 'public_repo' is NOT enough, even for a public repository."
+            echo "::error::Fine-grained token: it must list ${{ github.repository }} under 'Only select repositories', with Repository permissions -> Secrets: Read and write."
             exit 1
           fi
           gh secret delete __PREFLIGHT_TEST__ --repo "${{ github.repository }}" 2>/dev/null || true
@@ -507,9 +508,12 @@ jobs:
       # managed to create so no half-built resources are left running.
       # The bootstrap S3 state bucket is NOT destroyed — it is managed by a
       # separate config and will be reused on the next attempt.
+      # No working-directory here on purpose: an early failure (a missing
+      # secret, a bad token) happens before checkout, so infra/terraform does
+      # not exist yet and declaring it would fail the step before the
+      # nothing-to-roll-back guard below could run.
       - name: Rollback on failure
         if: failure()
-        working-directory: infra/terraform
         env:
           TF_VAR_project_name:                ${{ secrets.TF_PROJECT_PREFIX }}
           TF_VAR_environment:                 production
@@ -527,10 +531,11 @@ jobs:
           TF_VAR_domain_name:                 ${{ secrets.DOMAIN_NAME }}
           TF_VAR_create_github_oidc_provider: ${{ secrets.CREATE_GITHUB_OIDC_PROVIDER || 'true' }}
         run: |
-          if [[ ! -d .terraform ]]; then
+          if [[ ! -d infra/terraform/.terraform ]]; then
             echo "Terraform was not initialised — nothing to roll back."
             exit 0
           fi
+          cd infra/terraform
           echo "Rolling back — destroying all resources created during this run..."
           terraform destroy -auto-approve -input=false \
             || echo "::warning::Destroy encountered errors. Some resources may need manual cleanup in the AWS console."
