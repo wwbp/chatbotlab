@@ -27,6 +27,16 @@ locals {
     "${var.aws_region}b",
   ]
 
+  # Origins the browser actually loads the app from, for Django's
+  # CSRF_TRUSTED_ORIGINS and CORS_ALLOWED_ORIGINS. The CloudFront domain is
+  # matched by wildcard rather than named directly, because CloudFront's
+  # origin is the Elastic Beanstalk environment and naming it here would make
+  # the two resources depend on each other.
+  frontend_origins = join(",", compact([
+    var.domain_name != "" ? "https://${var.domain_name}" : "",
+    "https://*.cloudfront.net",
+  ]))
+
   # Use the caller-supplied key if provided; otherwise use the auto-generated
   # one from random_password.django_secret_key (stored in state, stable across
   # re-deploys so active user sessions are never invalidated).

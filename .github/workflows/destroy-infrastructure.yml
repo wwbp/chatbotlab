@@ -112,21 +112,58 @@ jobs:
             -input=false
 
       # ── 7. Empty S3 buckets ───────────────────────────────────────────────────
-      # Terraform cannot delete a non-empty S3 bucket. We empty both buckets
-      # (frontend assets and application data) before running destroy.
+      # Terraform cannot delete a non-empty S3 bucket, so both the frontend and
+      # data buckets have to be emptied first.
+      #
+      # Buckets are discovered by listing S3, not by rebuilding their names.
+      # The rebuilt names used to carry an -${ACCOUNT_ID} suffix that s3.tf
+      # does not use, so head-bucket missed both buckets, the step reported
+      # "does not exist — skipping" for each, and destroy then failed on
+      # BucketNotEmpty having emptied nothing.
+      #
+      # Terraform's own outputs are not usable here either. A retried teardown
+      # runs against a partly destroyed state, where `terraform output -raw`
+      # prints "Warning: No outputs found" to stdout and still exits 0 — so
+      # the warning text itself ends up used as the bucket name. Listing is
+      # the only source that stays correct no matter what state is in.
+      #
+      # `aws s3 rm` is also not enough on its own: the frontend bucket has
+      # versioning enabled, so deleting an object only writes a delete marker
+      # and leaves every noncurrent version in place, which still blocks
+      # DeleteBucket. Delete versions and delete markers explicitly, in pages,
+      # until the listing comes back empty.
       - name: Empty S3 buckets
         env:
-          ACCOUNT_ID: ${{ steps.state.outputs.account_id }}
+          PREFIX: ${{ steps.state.outputs.prefix }}
+          STATE_BUCKET: ${{ steps.state.outputs.bucket }}
         run: |
-          P="${{ steps.state.outputs.prefix }}-production"
-          for bucket in "${P}-frontend-${ACCOUNT_ID}" "${P}-data-${ACCOUNT_ID}"; do
-            if aws s3api head-bucket --bucket "$bucket" 2>/dev/null; then
-              echo "Emptying s3://$bucket ..."
-              aws s3 rm "s3://$bucket" --recursive
-              echo "  Done."
-            else
-              echo "Bucket $bucket does not exist — skipping."
+          empty_bucket() {
+            local b="$1" n
+            if ! aws s3api head-bucket --bucket "$b" 2>/dev/null; then
+              echo "Bucket $b does not exist — skipping."
+              return 0
             fi
+            echo "Emptying s3://$b ..."
+            while :; do
+              aws s3api list-object-versions --bucket "$b" --max-keys 500 --output json \
+                | jq -c '{Objects: ((.Versions // []) + (.DeleteMarkers // []) | map({Key, VersionId})), Quiet: true}' \
+                > /tmp/delete.json
+              n=$(jq '.Objects | length' /tmp/delete.json)
+              [ "$n" -eq 0 ] && break
+              aws s3api delete-objects --bucket "$b" --delete "file:///tmp/delete.json" >/dev/null
+              echo "  removed $n object versions"
+            done
+            echo "  Done — s3://$b is empty."
+          }
+
+          # Everything this deployment owns, minus the state bucket, which has
+          # to survive: the destroy running right after this reads state from
+          # it. It is managed separately and is deliberately left behind.
+          for b in $(aws s3api list-buckets \
+                       --query "Buckets[?starts_with(Name, '${PREFIX}-')].Name" \
+                       --output text); do
+            [ "$b" = "$STATE_BUCKET" ] && { echo "Keeping state bucket $b."; continue; }
+            empty_bucket "$b"
           done
 
       # ── 8. Disable RDS deletion protection ───────────────────────────────────
