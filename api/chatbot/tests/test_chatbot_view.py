@@ -172,6 +172,39 @@ class TestChatbotView:
         finally:
             await sync_to_async(self.tearDown)()
 
+    @pytest.mark.django_db
+    @pytest.mark.asyncio
+    async def test_nonexistent_bot_returns_404(self):
+        # A chat naming a bot with no DB row must return a clean 404 — the same
+        # status /api/initialize_conversation/ gives for this condition — not a
+        # generic 500. Regression: Bot.DoesNotExist used to fall through to the
+        # catch-all handler, so any mistyped bot_name looked like a server fault.
+        await sync_to_async(self.setUp)()
+        try:
+            import json
+
+            client = AsyncClient()
+            with patch(
+                "chatbot.services.runchat.moderate_message",
+                return_value=ModerationResult(),
+            ):
+                r = await client.post(
+                    URL,
+                    data=json.dumps(
+                        {
+                            "message": "Hi",
+                            "bot_name": "no-such-bot-xyz",
+                            "conversation_id": self.conv.conversation_id,
+                            "participant_id": "p_test",
+                        }
+                    ),
+                    content_type="application/json",
+                )
+            assert r.status_code == 404
+            assert "no-such-bot-xyz" in r.json()["error"]
+        finally:
+            await sync_to_async(self.tearDown)()
+
     # ── Happy path ────────────────────────────────────────────────────────────
 
     @pytest.mark.django_db
