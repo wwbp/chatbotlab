@@ -30,6 +30,20 @@ class ConversationNotFound(Exception):
     """
 
 
+class BotNotFound(Exception):
+    """
+    Raised when a chat round names a bot that has no row in the DB — renamed,
+    deleted, or simply a typo in the client's bot_name. The view turns this into
+    a 404, which is what /api/initialize_conversation/ and the avatar endpoints
+    already return for the same condition; a retry can't help, the bot genuinely
+    isn't there.
+
+    Without this the ORM's Bot.DoesNotExist fell through to the view's generic
+    handler and every mistyped bot name became a 500, which reads as a broken
+    deployment rather than a bad request.
+    """
+
+
 async def _recycle_db_connections():
     """
     Release the request's DB connection on the thread-sensitive thread.
@@ -188,10 +202,15 @@ async def run_chat_round(bot_name, conversation_id, participant_id, message):
     await _recycle_db_connections()
 
     # Fetch bot object with personas and ai_model prefetched
-    bot = await _db_call(
-        Bot.objects.prefetch_related("personas", "ai_model__provider").get,
-        name=bot_name,
-    )
+    try:
+        bot = await _db_call(
+            Bot.objects.prefetch_related("personas", "ai_model__provider").get,
+            name=bot_name,
+        )
+    except Bot.DoesNotExist:
+        # Distinct from a stale connection (which _db_call retries): the row
+        # isn't there, so surface a clean 404 rather than a generic 500.
+        raise BotNotFound(bot_name) from None
 
     # Moderate incoming message
     # Run in thread to avoid blocking
