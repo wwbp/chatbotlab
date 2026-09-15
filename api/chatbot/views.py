@@ -11,7 +11,7 @@ from .services.post_processing import (
     calculate_typing_delays,
     human_like_chunks,
 )
-from .services.runchat import ConversationNotFound, run_chat_round
+from .services.runchat import BotNotFound, ConversationNotFound, run_chat_round
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +119,25 @@ class ChatbotAPIView(View):
                     "delay_config": delay_config,
                 },
                 status=200,
+            )
+
+        except BotNotFound:
+            # A bot_name with no row is a client error, not a server fault.
+            # 404 matches what /api/initialize_conversation/ and the avatar
+            # endpoints already return for exactly this condition. Imported as
+            # an exception rather than caught as Bot.DoesNotExist so this module
+            # still does not import the Bot model — see
+            # test_views_does_not_import_bot_model.
+            logger.warning(
+                "ChatbotAPIView: bot not found "
+                "[conversation_id=%s bot_name=%s participant_id=%s]",
+                conversation_id,
+                bot_name,
+                participant_id,
+            )
+            return JsonResponse(
+                {"error": f"No bot found with the name '{bot_name}'."},
+                status=404,
             )
 
         except ConversationNotFound:

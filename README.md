@@ -198,7 +198,7 @@ All configuration is environment variables, loaded from `api/.env` and `web/.env
 
 | Variable | Purpose |
 |---|---|
-| `VITE_API_URL` | Backend base URL, e.g. `http://localhost:8000/api` |
+| `VITE_API_URL` | Optional backend base URL, e.g. `http://localhost:8000/api`. Unset uses a relative `/api`, which the dev server and CloudFront both proxy to the backend. |
 
 Everything about a study — prompts, personas, model choice, typing delays, moderation thresholds — is configured per bot in the admin, not in environment variables.
 

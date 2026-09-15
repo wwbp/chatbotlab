@@ -161,6 +161,11 @@ ROOT_URLCONF = "generic_chatbot.urls"
 ASGI_APPLICATION = "generic_chatbot.asgi.application"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Shared secret the survey tool sends as the X-Survey-Token header when
+# POSTing participant answers to /api/survey_response/. Unset means the
+# endpoint rejects every request (fail closed).
+SURVEY_INGEST_TOKEN = os.getenv("SURVEY_INGEST_TOKEN", "")
 MODERATION_VALUES_FOR_BLOCKED = json.loads(
     os.environ.get(
         "MODERATION_VALUES_FOR_BLOCKED",

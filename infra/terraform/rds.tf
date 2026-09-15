@@ -44,6 +44,19 @@ resource "aws_db_parameter_group" "mariadb" {
 # RDS instance
 # -----------------------------------------------------------------------------
 
+# Suffix for the final snapshot name, so a redeployed stack does not collide
+# with the snapshot left behind by the previous one. Kept in state, so it is
+# stable for the life of a deployment: re-applying an existing stack never
+# renames its pending snapshot, while a stack stood up after a teardown gets a
+# fresh value. keepers ties it to the deployment identity for the same reason.
+resource "random_id" "final_snapshot_suffix" {
+  byte_length = 4
+
+  keepers = {
+    name_prefix = local.name_prefix
+  }
+}
+
 resource "aws_db_instance" "main" {
   identifier = "${local.name_prefix}-database"
 
@@ -82,8 +95,18 @@ resource "aws_db_instance" "main" {
   # On staging: skip the final snapshot so I can destroy and recreate freely.
   # On production: take a final snapshot and block deletion until I explicitly
   # disable deletion_protection — this prevents accidental data loss.
+  #
+  # The snapshot name carries a per-deployment suffix. A fixed name cannot be
+  # reused: the snapshot outlives the database it came from, so the *second*
+  # teardown of a redeployed stack fails with
+  #   DBSnapshotAlreadyExists: Cannot create the snapshot because a snapshot
+  #   with the identifier <prefix>-final-snapshot already exists.
+  # leaving the database running and the destroy half-finished. The suffix is
+  # held in state, so it is stable for the life of a deployment and only
+  # changes when a new one is stood up — which is exactly when a new name is
+  # needed.
   skip_final_snapshot       = var.environment != "production"
-  final_snapshot_identifier = var.environment == "production" ? "${local.name_prefix}-final-snapshot" : null
+  final_snapshot_identifier = var.environment == "production" ? "${local.name_prefix}-final-snapshot-${random_id.final_snapshot_suffix.hex}" : null
   deletion_protection       = var.environment == "production"
 
   tags = {

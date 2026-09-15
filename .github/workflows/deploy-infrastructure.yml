@@ -111,7 +111,8 @@ jobs:
           export GH_TOKEN="$GH_PAT"
           if ! gh secret set __PREFLIGHT_TEST__ --body "ok" --repo "${{ github.repository }}" 2>/dev/null; then
             echo "::error::GH_PAT cannot write repository secrets on ${{ github.repository }}."
-            echo "::error::Re-generate it as a classic token with the full 'repo' scope checked (not just public_repo)."
+            echo "::error::Classic token: tick the top-level 'repo' scope. 'public_repo' is NOT enough, even for a public repository."
+            echo "::error::Fine-grained token: it must list ${{ github.repository }} under 'Only select repositories', with Repository permissions -> Secrets: Read and write."
             exit 1
           fi
           gh secret delete __PREFLIGHT_TEST__ --repo "${{ github.repository }}" 2>/dev/null || true
@@ -202,10 +203,13 @@ jobs:
           TF_VAR_environment:                 production
           TF_VAR_github_org:                  ${{ github.repository_owner }}
           TF_VAR_github_repo:                 ${{ github.event.repository.name }}
+          TF_VAR_github_org_id:               ${{ github.repository_owner_id }}
+          TF_VAR_github_repo_id:              ${{ github.repository_id }}
           TF_VAR_openai_api_key:              ${{ secrets.OPENAI_API_KEY }}
           TF_VAR_anthropic_api_key:           ${{ secrets.ANTHROPIC_API_KEY }}
           TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}
           TF_VAR_admin_panel_password:        ${{ secrets.ADMIN_PANEL_PASSWORD }}
+          TF_VAR_survey_ingest_token:         ${{ secrets.SURVEY_INGEST_TOKEN }}
           TF_VAR_eb_instance_type:            ${{ inputs.eb_instance_type }}
           TF_VAR_eb_max_instances:            ${{ inputs.eb_max_instances }}
           TF_VAR_db_instance_class:           ${{ inputs.db_instance_class }}
@@ -400,10 +404,13 @@ jobs:
           TF_VAR_environment:                 production
           TF_VAR_github_org:                  ${{ github.repository_owner }}
           TF_VAR_github_repo:                 ${{ github.event.repository.name }}
+          TF_VAR_github_org_id:               ${{ github.repository_owner_id }}
+          TF_VAR_github_repo_id:              ${{ github.repository_id }}
           TF_VAR_openai_api_key:              ${{ secrets.OPENAI_API_KEY }}
           TF_VAR_anthropic_api_key:           ${{ secrets.ANTHROPIC_API_KEY }}
           TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}
           TF_VAR_admin_panel_password:        ${{ secrets.ADMIN_PANEL_PASSWORD }}
+          TF_VAR_survey_ingest_token:         ${{ secrets.SURVEY_INGEST_TOKEN }}
           TF_VAR_eb_instance_type:            ${{ inputs.eb_instance_type }}
           TF_VAR_eb_max_instances:            ${{ inputs.eb_max_instances }}
           TF_VAR_db_instance_class:           ${{ inputs.db_instance_class }}
@@ -445,10 +452,13 @@ jobs:
           TF_VAR_environment:                 production
           TF_VAR_github_org:                  ${{ github.repository_owner }}
           TF_VAR_github_repo:                 ${{ github.event.repository.name }}
+          TF_VAR_github_org_id:               ${{ github.repository_owner_id }}
+          TF_VAR_github_repo_id:              ${{ github.repository_id }}
           TF_VAR_openai_api_key:              ${{ secrets.OPENAI_API_KEY }}
           TF_VAR_anthropic_api_key:           ${{ secrets.ANTHROPIC_API_KEY }}
           TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}
           TF_VAR_admin_panel_password:        ${{ secrets.ADMIN_PANEL_PASSWORD }}
+          TF_VAR_survey_ingest_token:         ${{ secrets.SURVEY_INGEST_TOKEN }}
           TF_VAR_eb_instance_type:            ${{ inputs.eb_instance_type }}
           TF_VAR_eb_max_instances:            ${{ inputs.eb_max_instances }}
           TF_VAR_db_instance_class:           ${{ inputs.db_instance_class }}
@@ -475,12 +485,19 @@ jobs:
           set_secret AWS_BACKEND_APPLICATION_NAME       "$(terraform output -raw github_secret_AWS_BACKEND_APPLICATION_NAME)"
           set_secret AWS_BACKEND_ENVIRONMENT_NAME       "$(terraform output -raw github_secret_AWS_BACKEND_ENVIRONMENT_NAME)"
           set_secret AWS_PROD_BACKEND_ENVIRONMENT_NAME  "$(terraform output -raw github_secret_AWS_PROD_BACKEND_ENVIRONMENT_NAME)"
-          set_secret VITE_API_URL                       "$(terraform output -raw frontend_url)/api"
+          # No API URL secret is written on purpose. CloudFront proxies /api/*
+          # to the backend on the same host it serves the app from, so the
+          # frontend uses a relative /api base and needs no build-time URL.
+          # That also means a custom domain needs no frontend rebuild.
 
       # ── 11. Trigger application deployment ───────────────────────────────────
       # Now that infrastructure exists and all secrets are written, kick off
       # the production deploy so researchers don't need a second manual click.
+      # A failed dispatch must not trip the if:failure() rollback below — by
+      # this point the infrastructure is built and healthy, and destroying it
+      # over a trigger hiccup would throw away a 20-minute apply.
       - name: Trigger application deployment
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
@@ -494,28 +511,35 @@ jobs:
       # managed to create so no half-built resources are left running.
       # The bootstrap S3 state bucket is NOT destroyed — it is managed by a
       # separate config and will be reused on the next attempt.
+      # No working-directory here on purpose: an early failure (a missing
+      # secret, a bad token) happens before checkout, so infra/terraform does
+      # not exist yet and declaring it would fail the step before the
+      # nothing-to-roll-back guard below could run.
       - name: Rollback on failure
         if: failure()
-        working-directory: infra/terraform
         env:
           TF_VAR_project_name:                ${{ secrets.TF_PROJECT_PREFIX }}
           TF_VAR_environment:                 production
           TF_VAR_github_org:                  ${{ github.repository_owner }}
           TF_VAR_github_repo:                 ${{ github.event.repository.name }}
+          TF_VAR_github_org_id:               ${{ github.repository_owner_id }}
+          TF_VAR_github_repo_id:              ${{ github.repository_id }}
           TF_VAR_openai_api_key:              ${{ secrets.OPENAI_API_KEY }}
           TF_VAR_anthropic_api_key:           ${{ secrets.ANTHROPIC_API_KEY }}
           TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}
           TF_VAR_admin_panel_password:        ${{ secrets.ADMIN_PANEL_PASSWORD }}
+          TF_VAR_survey_ingest_token:         ${{ secrets.SURVEY_INGEST_TOKEN }}
           TF_VAR_eb_instance_type:            ${{ inputs.eb_instance_type }}
           TF_VAR_eb_max_instances:            ${{ inputs.eb_max_instances }}
           TF_VAR_db_instance_class:           ${{ inputs.db_instance_class }}
           TF_VAR_domain_name:                 ${{ secrets.DOMAIN_NAME }}
           TF_VAR_create_github_oidc_provider: ${{ secrets.CREATE_GITHUB_OIDC_PROVIDER || 'true' }}
         run: |
-          if [[ ! -d .terraform ]]; then
+          if [[ ! -d infra/terraform/.terraform ]]; then
             echo "Terraform was not initialised — nothing to roll back."
             exit 0
           fi
+          cd infra/terraform
           echo "Rolling back — destroying all resources created during this run..."
           terraform destroy -auto-approve -input=false \
             || echo "::warning::Destroy encountered errors. Some resources may need manual cleanup in the AWS console."

@@ -6,6 +6,7 @@ from .services.bots import BotDetailAPIView, ListBotsAPIView
 from .services.conversation import InitializeConversationAPIView
 from .services.followup import FollowupAPIView
 from .services.keystroke import update_keystrokes
+from .services.survey import survey_response
 from .services.upload import get_presigned_url
 from .services.voicechat import get_realtime_session, upload_voice_utterance
 from .views import ChatbotAPIView, health_check, test_upload
@@ -22,6 +23,7 @@ urlpatterns = [
     path("api/bots/", ListBotsAPIView.as_view(), name="list_bots"),
     path("api/bots/<int:pk>/", BotDetailAPIView.as_view(), name="bot-detail"),
     path("api/update_keystrokes/", update_keystrokes, name="update_keystrokes"),
+    path("api/survey_response/", survey_response, name="survey_response"),
     path("api/session/", get_realtime_session, name="get_realtime_session"),
     path(
         "api/upload_voice_utterance/",

@@ -15,6 +15,7 @@ from server.engine import get_or_create_engine_from_model
 from ..models import Bot, Conversation, Utterance
 from .db import db_retry
 from .moderation import moderate_message
+from .survey import context_for_prompt, render_survey_context
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,20 @@ class ConversationNotFound(Exception):
     (e.g. the client never called /api/initialize_conversation/, or it was
     deleted). The view turns this into a 400 instead of a generic 500 — a retry
     can't help, the conversation genuinely isn't there.
+    """
+
+
+class BotNotFound(Exception):
+    """
+    Raised when a chat round names a bot that has no row in the DB — renamed,
+    deleted, or simply a typo in the client's bot_name. The view turns this into
+    a 404, which is what /api/initialize_conversation/ and the avatar endpoints
+    already return for the same condition; a retry can't help, the bot genuinely
+    isn't there.
+
+    Without this the ORM's Bot.DoesNotExist fell through to the view's generic
+    handler and every mistyped bot name became a 500, which reads as a broken
+    deployment rather than a bad request.
     """
 
 
@@ -74,7 +89,7 @@ _MOCK_LLM = os.getenv("MOCK_LLM", "false").lower() == "true"
 _MOCK_LLM_P50_MS = int(os.getenv("MOCK_LLM_P50_MS", "900"))
 
 
-def generate_system_prompt(bot, selected_persona=None):
+def generate_system_prompt(bot, selected_persona=None, survey_context=None):
     """
     Generate a dynamic system prompt by combining the bot's base prompt
     with instructions from the selected persona for this conversation.
@@ -101,6 +116,17 @@ def generate_system_prompt(bot, selected_persona=None):
                 system_prompt += "\n\n"
 
             system_prompt += f"Additional personality instructions:\nPersona '{selected_persona.name}': {selected_persona.instructions}"
+
+        # Add the participant's pre-conversation survey answers, when this
+        # bot is configured to use them. Renders to "" otherwise, which covers
+        # both an opted-out bot and a participant whose answers never arrived.
+        survey_block = render_survey_context(
+            bot.survey_context_preamble, survey_context
+        )
+        if survey_block:
+            if system_prompt:
+                system_prompt += "\n\n"
+            system_prompt += survey_block
 
         return system_prompt
     except Exception as e:
@@ -188,10 +214,15 @@ async def run_chat_round(bot_name, conversation_id, participant_id, message):
     await _recycle_db_connections()
 
     # Fetch bot object with personas and ai_model prefetched
-    bot = await _db_call(
-        Bot.objects.prefetch_related("personas", "ai_model__provider").get,
-        name=bot_name,
-    )
+    try:
+        bot = await _db_call(
+            Bot.objects.prefetch_related("personas", "ai_model__provider").get,
+            name=bot_name,
+        )
+    except Bot.DoesNotExist:
+        # Distinct from a stale connection (which _db_call retries): the row
+        # isn't there, so surface a clean 404 rather than a generic 500.
+        raise BotNotFound(bot_name) from None
 
     # Moderate incoming message
     # Run in thread to avoid blocking
@@ -299,7 +330,9 @@ async def run_chat_round(bot_name, conversation_id, participant_id, message):
     selected_persona = conversation.selected_persona
 
     # Generate dynamic system prompt combining bot prompt with selected persona
-    system_prompt = generate_system_prompt(bot, selected_persona)
+    system_prompt = generate_system_prompt(
+        bot, selected_persona, context_for_prompt(bot, conversation)
+    )
 
     # Log the generated prompt for debugging
     logger.info(f"Bot '{bot.name}' system prompt:")

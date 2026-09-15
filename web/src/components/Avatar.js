@@ -5,7 +5,7 @@ function Avatar() {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadSuccess, setUploadSuccess] = useState(false);
 
-  const BASE_URL = import.meta.env.VITE_API_URL;
+  const BASE_URL = import.meta.env.VITE_API_URL || '/api';
   const allowedTypes = {
     'image/png': 'png',
     'image/jpeg': 'jpeg',
