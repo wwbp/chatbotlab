@@ -121,20 +121,37 @@ were stressed about — send them to ChatbotLab's survey endpoint instead.
 This path has no length limit and no fixed number of questions, and the
 answers never appear in the participant's URL.
 
-Step 1 — Set the shared secret
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Step 1 — Issue a token
+^^^^^^^^^^^^^^^^^^^^^^
 
 The endpoint is authenticated, and **rejects every request unless a token is
-configured**. Generate one:
+configured**. Issue one from the admin panel — no redeploy or AWS access
+needed:
 
-   .. code-block:: bash
+1. Open **Survey ingest tokens** in the admin panel and click **Add**.
+2. Write a note saying which study the token is for, e.g.
+   ``Stress study, wave 1``. The note is only for your own reference.
+3. Save. The token is generated for you and shown under **Token** on the
+   next screen — copy it from there.
 
-      openssl rand -hex 32
+Issue a separate token per study. When a study finishes, open its token and
+untick **is active** to revoke it immediately; the record stays for your audit
+trail.
 
-Set it as ``SURVEY_INGEST_TOKEN`` on the server. For a Terraform deployment,
-set ``survey_ingest_token`` in ``terraform.tfvars`` (or the
-``SURVEY_INGEST_TOKEN`` GitHub Actions secret) and re-run the Deploy
-Infrastructure workflow. For local development, set it in ``api/.env``.
+.. warning::
+
+   Anyone holding a token can submit survey answers for any participant, so
+   treat it like a password. Do not paste it into anything participants can
+   see — it belongs in the Qualtrics Web Service header, which runs
+   server-side, never in survey JavaScript.
+
+.. note::
+
+   Deployments that would rather manage the secret as infrastructure can set
+   the ``SURVEY_INGEST_TOKEN`` environment variable instead (for Terraform,
+   ``survey_ingest_token`` in ``terraform.tfvars`` or the matching GitHub
+   Actions secret; for local development, ``api/.env``). Both work at the same
+   time, so an environment-managed token and admin-issued tokens can coexist.
 
 Step 2 — Add a Web Service element to your survey flow
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

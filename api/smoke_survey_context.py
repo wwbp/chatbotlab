@@ -113,9 +113,10 @@ def main():
     )
     if status == 403:
         fail(
-            "rejected the token. Either SURVEY_INGEST_TOKEN is not set on the "
-            "server, or it does not match --token. Note the server fails "
-            "closed: unset means every request is refused.",
+            "rejected the token. Issue one under 'Survey ingest tokens' in the "
+            "admin panel (or set SURVEY_INGEST_TOKEN on the server), and check "
+            "it matches --token and is still active. The server fails closed: "
+            "with no token configured, every request is refused.",
             body,
         )
     if status != 200:

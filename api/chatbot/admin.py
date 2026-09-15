@@ -21,6 +21,7 @@ from .models import (
     Keystroke,
     ModerationSettings,
     Persona,
+    SurveyIngestToken,
     SurveyResponse,
     Utterance,
     moderation_field_name,
@@ -1339,6 +1340,66 @@ class KeystrokeAdmin(BaseAdmin):
             },
         ),
     )
+
+
+@admin.register(SurveyIngestToken)
+class SurveyIngestTokenAdmin(BaseAdmin):
+    """
+    Issue a token per study, so starting a study needs no redeploy.
+
+    Add a token, write a note saying what it is for, save, and copy the
+    generated value into your survey tool. The token itself is never typed by
+    hand — it is generated with secrets.token_hex on first save.
+    """
+
+    list_display = ("note", "masked_token", "is_active", "created_at")
+    list_display_links = ("note",)
+    list_filter = ("is_active", "created_at")
+    search_fields = ("note",)
+    readonly_fields = ("token_for_copying", "created_at")
+    list_per_page = 25
+
+    fieldsets = (
+        (
+            None,
+            {
+                "fields": ("note", "is_active"),
+                "description": (
+                    "Give the token a note describing which study it belongs to, "
+                    "then save. The token is generated for you."
+                ),
+            },
+        ),
+        (
+            "Token",
+            {
+                "fields": ("token_for_copying", "created_at"),
+                "description": (
+                    "Copy this into your survey tool as the <code>X-Survey-Token</code> "
+                    "request header, alongside a POST to <code>/api/survey_response/</code>. "
+                    "Untick 'is active' above to revoke it immediately without losing the record."
+                ),
+            },
+        ),
+    )
+
+    @admin.display(description="Token")
+    def masked_token(self, obj):
+        """Only the last 6 characters, so the list page is not a secret dump."""
+        return format_html("<code>…{}</code>", obj.token[-6:])
+
+    @admin.display(description="Token (copy this)")
+    def token_for_copying(self, obj):
+        if not obj.pk:
+            return "Save to generate the token."
+        return format_html(
+            '<code style="font-size:1.1em; user-select:all;">{}</code>'
+            '<p style="margin-top:.5em; color:#666;">'
+            "Send as the <code>X-Survey-Token</code> header. Anyone holding this "
+            "can submit survey answers for any participant, so treat it like a "
+            "password and revoke it when the study ends.</p>",
+            obj.token,
+        )
 
 
 @admin.register(SurveyResponse)

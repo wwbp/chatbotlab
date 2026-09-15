@@ -1,3 +1,5 @@
+import secrets
+
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
 
@@ -729,6 +731,49 @@ class Keystroke(models.Model):
         return (
             f"Keystroke log for conversation {self.conversation_id} at {self.timestamp}"
         )
+
+
+def generate_survey_token():
+    """A fresh ingest token. 64 hex characters from the OS random source."""
+    return secrets.token_hex(32)
+
+
+class SurveyIngestToken(models.Model):
+    """
+    A shared secret the survey tool sends to /api/survey_response/.
+
+    Issued from the admin panel so a researcher can start a study without an
+    AWS console or a redeploy. The token is stored in readable form because
+    whoever configures the survey has to copy it into the survey tool — the
+    protection is that only admin users can see this table.
+
+    The SURVEY_INGEST_TOKEN environment variable keeps working alongside these,
+    for deployments that prefer to manage the secret as infrastructure.
+    """
+
+    token = models.CharField(
+        max_length=64,
+        unique=True,
+        default=generate_survey_token,
+        editable=False,
+        help_text="Generated automatically. Copy this into your survey tool as the X-Survey-Token header.",
+    )
+    note = models.CharField(
+        max_length=255,
+        help_text="What this token is for, e.g. 'Stress study, wave 1'. Only for your own reference.",
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Untick to revoke this token without deleting the record. A revoked token is rejected immediately.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Survey ingest token"
+        ordering = ("-created_at",)
+
+    def __str__(self):
+        return f"{self.note} ({'active' if self.is_active else 'revoked'})"
 
 
 class SurveyResponse(models.Model):

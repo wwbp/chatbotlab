@@ -27,7 +27,7 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
-from ..models import SurveyResponse
+from ..models import SurveyIngestToken, SurveyResponse
 
 logger = logging.getLogger(__name__)
 
@@ -125,16 +125,35 @@ def _token_is_valid(request):
     Fails closed: a deployment that never set SURVEY_INGEST_TOKEN rejects every
     request rather than accepting anonymous participant data.
     """
-    expected = getattr(settings, "SURVEY_INGEST_TOKEN", "") or ""
-    if not expected:
+    provided = request.META.get("HTTP_X_SURVEY_TOKEN", "")
+    if not provided:
+        return False
+
+    # Two sources, either of which is enough: the environment variable, for
+    # deployments that manage the secret as infrastructure, and tokens issued
+    # from the admin panel, so a researcher can start a study without a
+    # redeploy. compare_digest keeps the check constant-time either way.
+    candidates = [getattr(settings, "SURVEY_INGEST_TOKEN", "") or ""]
+    candidates += SurveyIngestToken.objects.filter(is_active=True).values_list(
+        "token", flat=True
+    )
+    candidates = [c for c in candidates if c]
+
+    if not candidates:
         logger.error(
-            "SURVEY_INGEST_TOKEN is not configured — rejecting survey response. "
-            "Set it in the environment before running a study that uses survey context.",
+            "No survey ingest token is configured — rejecting survey response. "
+            "Issue one under 'Survey ingest tokens' in the admin panel, or set "
+            "the SURVEY_INGEST_TOKEN environment variable.",
         )
         return False
 
-    provided = request.META.get("HTTP_X_SURVEY_TOKEN", "")
-    return hmac.compare_digest(provided.encode(), expected.encode())
+    provided_bytes = provided.encode()
+    # Check every candidate rather than short-circuiting, so the time taken
+    # does not reveal which token matched.
+    return any(
+        hmac.compare_digest(provided_bytes, candidate.encode())
+        for candidate in candidates
+    )
 
 
 @csrf_exempt
