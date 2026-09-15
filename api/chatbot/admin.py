@@ -21,6 +21,7 @@ from .models import (
     Keystroke,
     ModerationSettings,
     Persona,
+    SurveyResponse,
     Utterance,
     moderation_field_name,
 )
@@ -354,7 +355,12 @@ class ConversationAdmin(ExportMixin, BaseAdmin):
         (
             "Metadata",
             {
-                "fields": ("survey_meta_data", "started_time", "bot_config"),
+                "fields": (
+                    "survey_meta_data",
+                    "survey_context",
+                    "started_time",
+                    "bot_config",
+                ),
                 "classes": ("collapse",),
             },
         ),
@@ -669,6 +675,17 @@ class BotAdmin(ExportMixin, BaseAdmin):
                     "max_transcript_length",
                 ),
                 "description": "Control how bot responses are formatted and displayed. Max transcript length controls how many previous messages to include in chat history. 0 = no chat history (only current message), 1+ = include that many most recent messages.",
+            },
+        ),
+        (
+            "Survey Context",
+            {
+                "fields": (
+                    "survey_context_preamble",
+                    "survey_context_in_followup",
+                ),
+                "classes": ("collapse",),
+                "description": "Feed answers the participant gave in your survey tool (e.g. Qualtrics) to this bot as context. LEAVE THE PREAMBLE BLANK to append nothing — that is how a control condition is configured. See docs/survey-integration/qualtrics.rst.",
             },
         ),
         (
@@ -1322,6 +1339,33 @@ class KeystrokeAdmin(BaseAdmin):
             },
         ),
     )
+
+
+@admin.register(SurveyResponse)
+class SurveyResponseAdmin(BaseAdmin):
+    """
+    Answers delivered by the survey tool before the participant reaches a bot.
+
+    Read-only on purpose: these rows are a record of what an external system
+    sent us. Editing them here would not change any conversation that already
+    snapshotted them (see Conversation.survey_context).
+    """
+
+    list_display = ("participant_id", "survey_id", "answer_count", "received_at")
+    list_display_links = ("participant_id",)
+    search_fields = ("participant_id", "survey_id")
+    list_filter = ("survey_id", "received_at")
+    ordering = ("-received_at",)
+    readonly_fields = ("survey_id", "participant_id", "answers", "received_at")
+    list_per_page = 25
+
+    def answer_count(self, obj):
+        return len(obj.answers or [])
+
+    answer_count.short_description = "Answers"
+
+    def has_add_permission(self, request):
+        return False
 
 
 @admin.register(ModerationSettings)

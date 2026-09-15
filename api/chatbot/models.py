@@ -67,6 +67,11 @@ class Conversation(models.Model):
         related_name="conversations",
         help_text="The persona randomly selected for this conversation",
     )
+    survey_context = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Snapshot of the participant's survey answers as used by THIS conversation, copied from SurveyResponse at init. A copy rather than a link, so the record stays reproducible if the survey tool later overwrites the answers. Null means no answers were found for this participant.",
+    )
 
     def __str__(self):
         return f"Conversation {self.conversation_id} started at {self.started_time}"
@@ -552,6 +557,18 @@ class Bot(models.Model):
         help_text="If true, bot will keep sending follow-up messages while user is idle. If false, bot will only send one follow-up per idle period.",
     )
 
+    # Survey context — answers collected before the conversation (see
+    # chatbot/services/survey.py and docs/survey-integration/qualtrics.rst)
+    survey_context_preamble = models.TextField(
+        blank=True,
+        default="",
+        help_text="Sentence introducing the participant's pre-conversation survey answers to the model, e.g. 'The participant answered these questions before talking to you:'. LEAVE BLANK to append nothing — that is how a control condition is configured.",
+    )
+    survey_context_in_followup = models.BooleanField(
+        default=True,
+        help_text="If true, survey context is also included when generating idle follow-up messages. Only has an effect when a survey context preamble is set.",
+    )
+
     # Transcript length control
     max_transcript_length = models.IntegerField(
         default=-1,
@@ -711,6 +728,37 @@ class Keystroke(models.Model):
     def __str__(self):
         return (
             f"Keystroke log for conversation {self.conversation_id} at {self.timestamp}"
+        )
+
+
+class SurveyResponse(models.Model):
+    """
+    Answers a participant gave in the survey tool before reaching the chatbot.
+
+    Like Keystroke, this deliberately holds no ForeignKey: the survey tool
+    POSTs these answers while the participant is still mid-survey, so the
+    Conversation does not exist yet. initialize_conversation looks the row up
+    by (survey_id, participant_id) and snapshots it onto the conversation.
+    """
+
+    survey_id = models.CharField(max_length=255)
+    participant_id = models.CharField(max_length=255)
+    answers = models.JSONField(
+        default=list,
+        help_text="List of {'question': ..., 'answer': ...} in the order asked. Neither the number of questions nor the length of an answer is capped.",
+    )
+    received_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        # One row per participant per survey: the survey tool may retry, and a
+        # participant may restart the survey. Both overwrite rather than
+        # accumulate ambiguous duplicates.
+        unique_together = ("survey_id", "participant_id")
+
+    def __str__(self):
+        return (
+            f"Survey response for participant {self.participant_id} "
+            f"in survey {self.survey_id} ({len(self.answers or [])} answers)"
         )
 
 

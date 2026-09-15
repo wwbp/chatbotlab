@@ -40,6 +40,12 @@ db_password = "REPLACE_with_strong_password_min8chars"
 # re-deploy. Only set it if you must pin a value — then it needs 50+ characters.
 django_secret_key = ""
 
+# Shared secret the survey tool sends as the X-Survey-Token header when it
+# POSTs participant answers to /api/survey_response/. Leave empty unless your
+# study feeds survey answers to the bot — the endpoint rejects all traffic when
+# this is unset. Generate one with: openssl rand -hex 32
+survey_ingest_token = ""
+
 # Password for the Django admin panel at /api/admin/. On the first deploy the
 # app creates an "admin" superuser with this password.
 admin_panel_password = "REPLACE_with_admin_panel_password"

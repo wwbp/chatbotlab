@@ -55,6 +55,13 @@ variable "anthropic_api_key" {
   default     = ""
 }
 
+variable "survey_ingest_token" {
+  description = "Shared secret the survey tool (e.g. a Qualtrics Web Service element) sends as the X-Survey-Token header when POSTing participant answers to /api/survey_response/. Leave empty to disable the endpoint entirely — it fails closed and rejects every request when unset, so only set this for studies that feed survey answers to the bot. Generate one with: openssl rand -hex 32"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "db_password" {
   description = "The master password for the MariaDB database I create on RDS. Use letters and numbers only — special characters can break the MySQL connection string."
   type        = string

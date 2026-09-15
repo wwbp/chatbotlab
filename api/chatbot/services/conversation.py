@@ -10,7 +10,7 @@ from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 
-from ..models import Bot, Conversation, Utterance
+from ..models import Bot, Conversation, SurveyResponse, Utterance
 from .runchat import save_chat_to_db
 
 logger = logging.getLogger(__name__)
@@ -103,6 +103,34 @@ async def load_conversation_history(conversation_id):
         return None, []
 
 
+async def _load_survey_context(survey_id, participant_id):
+    """
+    Fetch the answers the participant gave in the survey tool before arriving.
+
+    Returns the list of {"question": ..., "answer": ...} entries, or None when
+    no answers were delivered for this participant. None is a normal outcome,
+    not an error: the bot simply gets no survey context appended, and the null
+    column marks the conversation for whoever analyses the study.
+    """
+    if not survey_id or not participant_id:
+        return None
+
+    row = await SurveyResponse.objects.filter(
+        survey_id=survey_id,
+        participant_id=participant_id,
+    ).afirst()
+
+    if row is None:
+        logger.info(
+            "No survey response found for participant %s in survey %s",
+            participant_id,
+            survey_id,
+        )
+        return None
+
+    return row.answers
+
+
 @method_decorator(csrf_exempt, name="dispatch")
 class InitializeConversationAPIView(View):
     async def post(self, request, *args, **kwargs):
@@ -171,6 +199,11 @@ class InitializeConversationAPIView(View):
                     status=200,
                 )
 
+            # Snapshot any survey answers collected before this conversation.
+            # A copy, not a link: if the survey tool later overwrites the row,
+            # this conversation must still show what the bot actually saw.
+            survey_context = await _load_survey_context(survey_id, participant_id)
+
             # Randomly select a persona for this conversation
             selected_persona = await randomly_select_persona(bot)
 
@@ -197,6 +230,7 @@ class InitializeConversationAPIView(View):
                     user_group=user_group,
                     survey_id=survey_id,
                     survey_meta_data=survey_meta_data,
+                    survey_context=survey_context,
                     started_time=datetime.now(),
                     selected_persona=selected_persona,
                 )
