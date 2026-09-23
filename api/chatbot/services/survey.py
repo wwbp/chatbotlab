@@ -94,6 +94,49 @@ def context_for_prompt(bot, conversation, *, is_followup=False):
     return conversation.survey_context
 
 
+def normalize_answers(answers):
+    """
+    Accept either supported answers shape and return the canonical one.
+
+    Pure. Two shapes are accepted because survey tools differ:
+
+      canonical  [{"question": ..., "answer": ...}, ...]
+      flat       {"<question>": "<answer>", ...}
+
+    The flat mapping exists for Qualtrics, whose Web Service body is a list of
+    flat key/value rows — a nested array of objects is painful to build there,
+    while a single JSON object is straightforward. Both carry the same
+    information, and normalizing here means everything downstream (storage,
+    rendering, the admin, analysis) only ever sees one shape.
+
+    Returns the canonical list, or None if the input is neither shape.
+    Question order is preserved: JSON objects keep their insertion order, and
+    that is the order the questions were asked in.
+    """
+    if isinstance(answers, list):
+        return answers
+
+    if not isinstance(answers, dict):
+        return None
+
+    # A single canonical entry sent unwrapped — {"question": ..., "answer": ...}
+    # — would otherwise parse as a flat mapping with two questions literally
+    # named "question" and "answer". That is almost certainly a caller who
+    # forgot the enclosing list, so refuse rather than store nonsense.
+    if set(answers) == {"question", "answer"}:
+        return None
+
+    normalized = []
+    for question, answer in answers.items():
+        # A nested value has no sensible rendering, so refuse rather than guess.
+        if isinstance(answer, (dict, list)):
+            return None
+        # A survey tool may send a number for a rating; the prompt needs text.
+        normalized.append({"question": str(question), "answer": str(answer)})
+
+    return normalized
+
+
 def validate_answers(answers):
     """
     Check the shape of an incoming answers payload.
@@ -106,7 +149,11 @@ def validate_answers(answers):
     An empty list is valid: a participant may have skipped every question.
     """
     if not isinstance(answers, list):
-        return "'answers' must be a list of {'question': ..., 'answer': ...} objects."
+        return (
+            "'answers' must be either a list of {'question': ..., 'answer': ...} "
+            "objects, or a flat {'<question>': '<answer>'} mapping. Nested values "
+            "inside a flat mapping are not supported."
+        )
 
     for i, entry in enumerate(answers):
         if not isinstance(entry, dict):
@@ -192,7 +239,9 @@ def survey_response(request):
             status=400,
         )
 
-    answers = data.get("answers", [])
+    # Normalize first, so the stored shape is canonical no matter which form
+    # the survey tool was able to send.
+    answers = normalize_answers(data.get("answers", []))
     error = validate_answers(answers)
     if error:
         return JsonResponse({"error": error}, status=400)

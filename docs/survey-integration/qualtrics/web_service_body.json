@@ -1,14 +1,8 @@
 {
   "survey_id": "<SURVEY-ID>",
   "participant_id": "${e://Field/ResponseID}",
-  "answers": [
-    {
-      "question": "How stressed have you felt this week?",
-      "answer": "${q://QID1/ChoiceGroup/SelectedChoices}"
-    },
-    {
-      "question": "What's been on your mind?",
-      "answer": "${q://QID2/ChoiceTextEntryValue}"
-    }
-  ]
+  "answers": {
+    "How stressed have you felt this week?": "${q://QID1/ChoiceGroup/SelectedChoices}",
+    "What's been on your mind?": "${q://QID2/ChoiceTextEntryValue}"
+  }
 }
