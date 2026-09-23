@@ -162,3 +162,42 @@ def test_answers_posted_to_the_endpoint_reach_the_conversation(
         Conversation.objects.get(conversation_id=conversation_id).survey_context
         == ANSWERS
     )
+
+
+# ── Linkage reported back to the caller ───────────────────────────────────────
+
+
+@pytest.mark.django_db
+def test_init_reports_survey_context_linked(client, make_bot, survey_row):
+    """
+    The init response says whether answers were found for this participant.
+
+    Deterministic, unlike inferring it from what the bot says: during survey
+    setup the common failure is a survey_id/participant_id mismatch, which
+    otherwise looks like a perfectly successful 200.
+    """
+    response, _ = post_init(client, make_bot().name)
+
+    assert response.json()["survey_context_linked"] is True
+
+
+@pytest.mark.django_db
+def test_init_reports_not_linked_when_no_answers_found(client, make_bot):
+    response, _ = post_init(client, make_bot().name)
+
+    assert response.json()["survey_context_linked"] is False
+
+
+@pytest.mark.django_db
+def test_linkage_is_independent_of_whether_the_bot_uses_it(
+    client, make_bot, survey_row
+):
+    """
+    A control-condition bot still reports linked=True. The flag says the survey
+    data arrived; the preamble decides whether the bot reads it. Keeping them
+    separate is what makes a failed study setup diagnosable.
+    """
+    control_bot = make_bot(survey_context_preamble="")
+    response, _ = post_init(client, control_bot.name)
+
+    assert response.json()["survey_context_linked"] is True

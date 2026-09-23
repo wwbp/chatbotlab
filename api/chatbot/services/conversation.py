@@ -195,6 +195,9 @@ class InitializeConversationAPIView(View):
                         "existing_messages": existing_messages,
                         "is_existing": True,
                         "bot_config": _bot_public_config(bot),
+                        "survey_context_linked": bool(
+                            existing_conversation.survey_context
+                        ),
                     },
                     status=200,
                 )
@@ -274,6 +277,11 @@ class InitializeConversationAPIView(View):
                     "existing_messages": initial_messages,
                     "is_existing": False,
                     "bot_config": _bot_public_config(bot),
+                    # Whether survey answers were found for this participant.
+                    # Says the data arrived, not that the bot uses it — the
+                    # preamble decides that. Keeping the two separate is what
+                    # makes a mis-wired survey diagnosable during setup.
+                    "survey_context_linked": bool(survey_context),
                 },
                 status=200,
             )
