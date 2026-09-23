@@ -184,6 +184,25 @@ Both the question text and the answer are sent, because the bot reads the
 question wording as part of the context. Add as many entries as your study
 needs — the number of questions and the length of each answer are uncapped.
 
+In Qualtrics' Web Service editor this goes in **Body Parameters** with the
+content type set to ``application/json``:
+
+- ``survey_id`` — type *String*
+- ``participant_id`` — type *String*, piped from ``ResponseID``
+- ``answers`` — type *JSON*, set to the flat object above
+
+.. note::
+
+   ``answers`` is a flat ``{question: answer}`` object because Qualtrics'
+   Body Parameters are flat key/value rows, which makes a nested array
+   awkward to build. The API also accepts the equivalent list form —
+   ``[{"question": ..., "answer": ...}, ...]`` — which is easier for scripts
+   and is the shape everything is stored as. Send whichever your tool can
+   express; both end up identical in the database.
+
+   Two questions with identical wording would collide in the flat form. Use
+   the list form if your study needs that.
+
 .. note::
 
    ``survey_id`` and ``participant_id`` must match the ``survey_id`` and
