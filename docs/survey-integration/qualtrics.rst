@@ -195,6 +195,34 @@ Configure it as:
 
 The JSON body:
 
+   .. important::
+
+      **Put each question in its own String body parameter.** Qualtrics escapes
+      a String parameter correctly, but substitutes piped text *verbatim* into
+      a raw JSON value — so the moment a participant's answer contains a double
+      quote or a line break, the request body stops being valid JSON and the
+      endpoint replies ``400 Invalid JSON format``. Open-ended answers contain
+      quotes eventually, so this will bite during a real study rather than
+      during your pilot.
+
+      In **Body Parameters**, with the content type set to
+      ``application/json``:
+
+      ===================================== ======== ==============================
+      Parameter                             Type     Value
+      ===================================== ======== ==============================
+      ``survey_id``                         String   your study identifier
+      ``participant_id``                    String   piped ``ResponseID``
+      *the question text, written out*      String   the piped answer
+      ===================================== ======== ==============================
+
+      Add one more row per question. Any parameter that is not ``survey_id``,
+      ``participant_id`` or ``answers`` is read as a question, and its value as
+      the answer. Nothing has to be escaped by hand.
+
+   For a tool that can build nested JSON safely, the ``answers`` field is still
+   accepted in either of these shapes:
+
    .. literalinclude:: qualtrics/web_service_body.json
       :language: json
 
