@@ -32,7 +32,18 @@ const Conversation = () => {
   // Initialize conversation on mount.
   // bot_config comes from the init response — no separate GET /api/bots/ call needed.
   useEffect(() => {
-    if (!botName || !participantId) return;
+    if (!botName || !participantId) {
+      // Say so loudly. Returning quietly here renders an empty chat with no
+      // clue why, which is what a survey tool sends when its piping does not
+      // resolve — the commonest way an embedded chatbot silently does nothing.
+      console.error(
+        'Cannot start conversation: the page URL is missing bot_name or ' +
+          'participant_id. Check the parameters your survey tool is piping ' +
+          'into the chatbot URL.',
+        { bot_name: botName, participant_id: participantId }
+      );
+      return;
+    }
 
     const initConv = async () => {
       try {
@@ -70,7 +81,7 @@ const Conversation = () => {
           }
           avatar_data = await avatar_response.json();
         } catch (avatarErr) {
-          // console.warn('Failed to fetch avatar. Using none.');
+          console.warn('Failed to fetch avatar. Using none.');
           avatar_data = {
             image_url: null, // <-- your default image path
             bot_id: '',
@@ -92,7 +103,7 @@ const Conversation = () => {
           setMessages(data.existing_messages);
         }
       } catch (err) {
-        // console.error('Failed to initialize conversation:', err);
+        console.error('Failed to initialize conversation:', err);
       }
     };
     initConv();
@@ -173,13 +184,12 @@ const Conversation = () => {
               revealChunks(chunks, 0, useHumanlikeDelay, delayConfig);
             }
           } else {
-            // const error = await res.json();
-            // console.warn('Follow-up request failed:', error.error);
+            console.warn('Follow-up request failed:', res.status);
             isFollowupRequested = false;
             setFollowupRequested(false); // Reset flag on error
           }
         } catch (err) {
-          // console.error('Error requesting follow-up:', err);
+          console.error('Error requesting follow-up:', err);
           isFollowupRequested = false;
           setFollowupRequested(false); // Reset flag on error
         }
@@ -454,7 +464,7 @@ const Conversation = () => {
         }, readingDelayMs);
       }
     } catch (err) {
-      // console.error('Error sending message:', err);
+      console.error('Error sending message:', err);
       alert('An error occurred. Please try again.');
       setIsTyping(false);
     }
