@@ -43,7 +43,7 @@ const VoiceConversation = () => {
       // console.log('✅ Saved utterance:', data);
       await res.json(); // Keep the response to avoid unused variable warning
     } catch (err) {
-      // console.error('❌ Failed to save utterance:', err);
+      console.error('Failed to save utterance:', err);
     }
   };
 
@@ -67,7 +67,7 @@ const VoiceConversation = () => {
         });
         // console.log('✅ Conversation initialized');
       } catch (err) {
-        // console.error('Failed to initialize conversation:', err);
+        console.error('Failed to initialize conversation:', err);
       }
     };
 
@@ -167,7 +167,7 @@ const VoiceConversation = () => {
       setIsConnected(true);
       setIsStreaming(true);
     } catch (err) {
-      // console.error('❌ Failed to start voice session:', err);
+      console.error('Failed to start voice session:', err);
     }
   };
 
