@@ -83,6 +83,14 @@ Embedding ChatbotLab
    ``docs/survey-integration/qualtrics/embed_chatbot.js`` so you can copy it
    directly.
 
+   .. warning::
+
+      Use ``addOnReady``, not ``addOnload``. ``addOnload`` runs before the
+      question is fully displayed, and an iframe appended there is discarded
+      when Qualtrics renders the question — it never appears, and no error is
+      logged. If the chatbot does not show up but the URL printed to the
+      browser console works when opened in its own tab, this is why.
+
 5. Replace the placeholders:
 
    - ``<BOT-NAME>``: your bot's name

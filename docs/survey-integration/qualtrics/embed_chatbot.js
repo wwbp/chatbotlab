@@ -6,19 +6,20 @@
 //
 // Replace every <PLACEHOLDER> below. Values that live in Embedded Data can be
 // pulled in with Qualtrics piping, e.g. "${e://Field/pid}".
+//
+// NOTE: this uses addOnReady, not addOnload. addOnload runs before the
+// question is fully displayed, and an element appended there is lost when
+// Qualtrics renders the question — the iframe simply never appears, with no
+// error. addOnReady runs once the page is displayed, which is where DOM work
+// belongs.
 
-Qualtrics.SurveyEngine.addOnload(function () {
+Qualtrics.SurveyEngine.addOnReady(function () {
   var studyName = "<STUDY-NAME>"; // your label for this study
   var botName = "<BOT-NAME>"; // must match a Bot name in the admin panel
   var surveyID = "<SURVEY-ID>"; // your Qualtrics survey identifier
-  var participantID = "<PARTICIPANT-ID>"; // e.g. "${e://Field/pid}"
+  var participantID = "${e://Field/ResponseID}"; // or your own embedded data field
   var userGroup = "<USER-GROUP>"; // condition label, e.g. "treatment"
   var conversationID = "${e://Field/ResponseID}"; // Qualtrics response ID
-
-  window.totalTimeOnPage = 0;
-  window.totalTimeAwayFromPage = 0;
-  window.pageStartTime = new Date();
-  window.awayStartTime = null;
 
   // Construct chatbot URL with encoded parameters.
   // IMPORTANT: surveyID and participantID must match the values sent to
@@ -31,37 +32,25 @@ Qualtrics.SurveyEngine.addOnload(function () {
   botURL += "&user_group=" + encodeURIComponent(userGroup);
   botURL += "&survey_id=" + encodeURIComponent(surveyID);
 
-  console.log("Generated botURL:", botURL); // Debugging
+  // Check this in the browser console: an empty participant_id means the
+  // piping above did not resolve, and the chat will silently never start.
+  console.log("Generated botURL:", botURL);
 
-  var container = this.getQuestionTextContainer();
-  if (container) {
-    var iframe = jQuery("<iframe>", {
-      src: botURL,
-      width: "100%",
-      height: "100vh",
-      frameborder: "0",
-    });
-    jQuery(container).append(iframe);
-  } else {
-    alert("Error: No valid container found.");
+  var container = this.getQuestionTextContainer() || this.questionContainer;
+  if (!container) {
+    console.error("ChatbotLab: no container found to append the iframe to.");
+    return;
   }
 
-  function handleVisibilityChange() {
-    var currentTime = new Date();
-    if (document.hidden) {
-      // User switched to a different tab
-      window.awayStartTime = currentTime;
-      window.totalTimeOnPage += currentTime - window.pageStartTime;
-    } else {
-      // User returned to the tab
-      if (window.awayStartTime) {
-        window.totalTimeAwayFromPage += currentTime - window.awayStartTime;
-        window.awayStartTime = null;
-      }
-      window.pageStartTime = currentTime;
-    }
-  }
-
-  handleVisibilityChange();
-  document.addEventListener("visibilitychange", handleVisibilityChange, false);
+  // Plain DOM rather than jQuery: width/height set as HTML attributes are
+  // ignored when given CSS units, which renders a zero-height iframe that
+  // looks identical to the script not running at all.
+  var iframe = document.createElement("iframe");
+  iframe.src = botURL;
+  iframe.setAttribute("frameborder", "0");
+  iframe.style.width = "100%";
+  iframe.style.height = "700px";
+  iframe.style.border = "0";
+  iframe.style.display = "block";
+  container.appendChild(iframe);
 });
