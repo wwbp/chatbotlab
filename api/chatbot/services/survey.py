@@ -94,6 +94,30 @@ def context_for_prompt(bot, conversation, *, is_followup=False):
     return conversation.survey_context
 
 
+# Top-level keys that are the request's own fields rather than a question.
+RESERVED_KEYS = frozenset({"survey_id", "participant_id", "answers"})
+
+
+def answers_from_payload(data):
+    """
+    Pull the answers out of a request body, in whichever shape it arrived.
+
+    Pure. Prefers an explicit "answers" field. Failing that, treats every other
+    top-level key as a question and its value as the answer.
+
+    The fallback exists for Qualtrics. Its Web Service editor escapes a String
+    body parameter correctly, but substitutes piped text verbatim into a raw
+    JSON value — so an answer containing a double quote or a line break
+    produces a malformed request. Sending each question as its own parameter
+    sidesteps that: the survey tool does the escaping it is good at, and we
+    never ask it to build nested JSON around text it does not control.
+    """
+    if "answers" in data:
+        return data["answers"]
+
+    return {k: v for k, v in data.items() if k not in RESERVED_KEYS}
+
+
 def normalize_answers(answers):
     """
     Accept either supported answers shape and return the canonical one.
@@ -223,8 +247,30 @@ def survey_response(request):
 
     try:
         data = json.loads(request.body)
-    except json.JSONDecodeError:
-        return JsonResponse({"error": "Invalid JSON format"}, status=400)
+    except json.JSONDecodeError as e:
+        # Survey tools do not escape piped answers, so an answer containing a
+        # quote or a newline arrives as broken JSON. Report where it broke:
+        # "Invalid JSON format" alone leaves whoever configured the survey with
+        # nothing to act on, and this is the failure they are most likely to
+        # hit. The parser's message carries a position and a reason but never
+        # the body, so participant answers stay out of responses and logs.
+        logger.warning(
+            "Malformed JSON from survey tool: %s (body %d bytes, content-type %s)",
+            e.msg,
+            len(request.body or b""),
+            request.META.get("CONTENT_TYPE", "unset"),
+        )
+        return JsonResponse(
+            {
+                "error": (
+                    f"Invalid JSON format: {e.msg} at line {e.lineno} column "
+                    f"{e.colno}. If an answer contains a double quote or a line "
+                    "break, your survey tool has not escaped it — see the "
+                    "Qualtrics integration guide."
+                ),
+            },
+            status=400,
+        )
 
     if not isinstance(data, dict):
         return JsonResponse(
@@ -241,7 +287,7 @@ def survey_response(request):
 
     # Normalize first, so the stored shape is canonical no matter which form
     # the survey tool was able to send.
-    answers = normalize_answers(data.get("answers", []))
+    answers = normalize_answers(answers_from_payload(data))
     error = validate_answers(answers)
     if error:
         return JsonResponse({"error": error}, status=400)

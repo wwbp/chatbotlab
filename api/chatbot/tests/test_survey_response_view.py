@@ -195,3 +195,100 @@ def test_different_participants_get_separate_rows(client):
 def test_get_is_rejected(client):
     r = client.get(URL, HTTP_X_SURVEY_TOKEN=TOKEN)
     assert r.status_code == 405
+
+
+# ── Diagnosing a malformed body ───────────────────────────────────────────────
+
+
+@pytest.mark.django_db
+def test_invalid_json_explains_what_is_wrong(client):
+    """
+    A survey tool that cannot escape its own piped text sends broken JSON, and
+    "Invalid JSON format" alone leaves whoever configured it with nothing to
+    act on. The parser already knows the position and reason, so say so.
+    """
+    broken = '{"survey_id": "SV_1", "participant_id": "R_1", "answers": [{"question": "Q", "answer": "she said "hi" to me"}]}'
+    r = client.post(
+        URL, data=broken, content_type="application/json", HTTP_X_SURVEY_TOKEN=TOKEN
+    )
+
+    assert r.status_code == 400
+    detail = r.json()["error"]
+    assert "JSON" in detail
+    # Points at the failure: a position, and the parser's own reason.
+    assert "line" in detail or "char" in detail
+
+
+@pytest.mark.django_db
+def test_invalid_json_does_not_echo_the_participant_answer(client):
+    """
+    The body carries participant answers. The diagnosis must be useful without
+    quoting their text back into a response or a log file.
+    """
+    broken = '{"answers": [{"answer": "my therapist said "burnout" last week"}]}'
+    r = client.post(
+        URL, data=broken, content_type="application/json", HTTP_X_SURVEY_TOKEN=TOKEN
+    )
+
+    assert r.status_code == 400
+    assert "therapist" not in r.json()["error"]
+    assert "burnout" not in r.json()["error"]
+
+
+# ── Top-level parameters, for survey tools that cannot build nested JSON ──────
+
+
+@pytest.mark.django_db
+def test_questions_can_be_sent_as_top_level_parameters(client):
+    """
+    Qualtrics escapes a String body parameter correctly, but substitutes piped
+    text verbatim into a raw JSON value — so an answer containing a quote
+    breaks the request. Sending each question as its own parameter avoids the
+    problem entirely: the survey tool does the escaping it is good at.
+    """
+    r = post(
+        client,
+        {
+            "survey_id": "SV_abc123",
+            "participant_id": "R_xyz789",
+            "What's been on your mind lately?": 'She said "burnout" and I agree',
+            "How stressed have you felt?": "Very",
+        },
+    )
+
+    assert r.status_code == 200
+    assert SurveyResponse.objects.get().answers == [
+        {
+            "question": "What's been on your mind lately?",
+            "answer": 'She said "burnout" and I agree',
+        },
+        {"question": "How stressed have you felt?", "answer": "Very"},
+    ]
+
+
+@pytest.mark.django_db
+def test_explicit_answers_take_precedence_over_top_level_parameters(client):
+    """An explicit answers field is never second-guessed."""
+    r = post(
+        client,
+        {
+            "survey_id": "SV_abc123",
+            "participant_id": "R_xyz789",
+            "answers": [{"question": "Real", "answer": "Yes"}],
+            "Stray key": "ignored",
+        },
+    )
+
+    assert r.status_code == 200
+    assert SurveyResponse.objects.get().answers == [
+        {"question": "Real", "answer": "Yes"},
+    ]
+
+
+@pytest.mark.django_db
+def test_no_questions_at_all_is_still_accepted(client):
+    """Only the identifiers: a participant who answered nothing."""
+    r = post(client, {"survey_id": "SV_abc123", "participant_id": "R_xyz789"})
+
+    assert r.status_code == 200
+    assert SurveyResponse.objects.get().answers == []
