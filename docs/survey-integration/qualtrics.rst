@@ -85,11 +85,24 @@ Embedding ChatbotLab
 
    .. warning::
 
-      Use ``addOnReady``, not ``addOnload``. ``addOnload`` runs before the
-      question is fully displayed, and an iframe appended there is discarded
-      when Qualtrics renders the question — it never appears, and no error is
-      logged. If the chatbot does not show up but the URL printed to the
-      browser console works when opened in its own tab, this is why.
+      **Do not use jQuery.** Qualtrics does not load it in every theme, and
+      where it is missing the script dies with
+      ``ReferenceError: jQuery is not defined`` before the iframe is created.
+      The page then looks exactly as though no JavaScript ran at all. The
+      snippet above uses plain DOM for this reason.
+
+      If the chatbot does not appear, open the browser console. The snippet
+      logs the URL it builds, and there are three common outcomes:
+
+      - ``ReferenceError: jQuery is not defined`` — an older snippet is still
+        in the question. Replace it with the one above.
+      - The URL is logged with an empty ``participant_id`` — the piping did
+        not resolve, so the chat never starts. Check the field name, and note
+        that ``ResponseID`` may be empty in Preview; use a real survey link.
+      - The URL is logged and works when opened in its own browser tab, but no
+        iframe appears on the page — the element was appended too early. The
+        snippet uses ``addOnReady`` rather than ``addOnload`` to avoid this,
+        since Qualtrics discards elements added before the question renders.
 
 5. Replace the placeholders:
 
