@@ -67,10 +67,15 @@ def render_survey_context(preamble, answers):
             )
         return ""
 
+    # Blank entries are stored but not rendered: an unresolved pipe in the
+    # survey tool sends an empty value, and "Q:" with nothing after it tells
+    # the model nothing while reading as a mistake.
     blocks = [
-        f"Q: {entry['question']}\nA: {entry['answer']}"
+        f"Q: {str(entry['question']).strip()}\nA: {str(entry['answer']).strip()}"
         for entry in answers
-        if isinstance(entry, dict) and "question" in entry and "answer" in entry
+        if isinstance(entry, dict)
+        and str(entry.get("question", "")).strip()
+        and str(entry.get("answer", "")).strip()
     ]
     if not blocks:
         return ""
@@ -95,6 +100,45 @@ def context_for_prompt(bot, conversation, *, is_followup=False):
 
 
 # Top-level keys that are the request's own fields rather than a question.
+def parse_request_body(content_type, body, form_data):
+    """
+    Read the request body as a flat mapping, whatever encoding it arrived in.
+
+    Returns (data, error). Survey tools differ, and the difference is not the
+    researcher's fault: Qualtrics' Web Service posts
+    application/x-www-form-urlencoded, while a script will usually send JSON.
+    Form encoding is in fact the safer of the two here, because the tool
+    percent-encodes every value, so quotes and newlines in a participant's
+    answer survive without anyone hand-escaping anything.
+    """
+    if "application/x-www-form-urlencoded" in content_type or (
+        "multipart/form-data" in content_type
+    ):
+        data = dict(form_data.items())
+    else:
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as e:
+            return None, (
+                f"Invalid JSON format: {e.msg} at line {e.lineno} column "
+                f"{e.colno}. If an answer contains a double quote or a line "
+                "break, your survey tool has not escaped it — sending the body "
+                "as form parameters avoids the problem entirely."
+            )
+
+    if not isinstance(data, dict):
+        return None, "Request body must be a JSON object or form parameters."
+
+    # A form body cannot nest, so an explicit answers field arrives as text.
+    if isinstance(data.get("answers"), str):
+        try:
+            data["answers"] = json.loads(data["answers"])
+        except json.JSONDecodeError as e:
+            return None, f"'answers' is not valid JSON: {e.msg}."
+
+    return data, None
+
+
 RESERVED_KEYS = frozenset({"survey_id", "participant_id", "answers"})
 
 
@@ -245,37 +289,16 @@ def survey_response(request):
     if not _token_is_valid(request):
         return JsonResponse({"error": "Invalid or missing survey token."}, status=403)
 
-    try:
-        data = json.loads(request.body)
-    except json.JSONDecodeError as e:
-        # Survey tools do not escape piped answers, so an answer containing a
-        # quote or a newline arrives as broken JSON. Report where it broke:
-        # "Invalid JSON format" alone leaves whoever configured the survey with
-        # nothing to act on, and this is the failure they are most likely to
-        # hit. The parser's message carries a position and a reason but never
-        # the body, so participant answers stay out of responses and logs.
+    content_type = request.META.get("CONTENT_TYPE", "")
+    data, error = parse_request_body(content_type, request.body, request.POST)
+    if error:
         logger.warning(
-            "Malformed JSON from survey tool: %s (body %d bytes, content-type %s)",
-            e.msg,
+            "Rejected survey response: %s (body %d bytes, content-type %s)",
+            error,
             len(request.body or b""),
-            request.META.get("CONTENT_TYPE", "unset"),
+            content_type or "unset",
         )
-        return JsonResponse(
-            {
-                "error": (
-                    f"Invalid JSON format: {e.msg} at line {e.lineno} column "
-                    f"{e.colno}. If an answer contains a double quote or a line "
-                    "break, your survey tool has not escaped it — see the "
-                    "Qualtrics integration guide."
-                ),
-            },
-            status=400,
-        )
-
-    if not isinstance(data, dict):
-        return JsonResponse(
-            {"error": "Request body must be a JSON object."}, status=400
-        )
+        return JsonResponse({"error": error}, status=400)
 
     survey_id = data.get("survey_id")
     participant_id = data.get("participant_id")

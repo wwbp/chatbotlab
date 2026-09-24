@@ -292,3 +292,91 @@ def test_no_questions_at_all_is_still_accepted(client):
 
     assert r.status_code == 200
     assert SurveyResponse.objects.get().answers == []
+
+
+# ── Form-encoded bodies, which is what Qualtrics actually sends ───────────────
+
+
+def post_form(client, payload, token=TOKEN):
+    return client.post(URL, data=payload, HTTP_X_SURVEY_TOKEN=token)
+
+
+@pytest.mark.django_db
+def test_form_encoded_body_is_accepted(client):
+    """
+    Qualtrics' Web Service posts application/x-www-form-urlencoded. Requiring
+    JSON meant a correctly configured survey was rejected outright.
+    """
+    r = post_form(
+        client,
+        {
+            "survey_id": "SV_abc123",
+            "participant_id": "R_xyz789",
+            "What's been on your mind lately?": 'She said "burnout" and I agree',
+        },
+    )
+
+    assert r.status_code == 200
+    assert SurveyResponse.objects.get().answers == [
+        {
+            "question": "What's been on your mind lately?",
+            "answer": 'She said "burnout" and I agree',
+        },
+    ]
+
+
+@pytest.mark.django_db
+def test_form_encoded_handles_characters_that_break_raw_json(client):
+    """
+    The whole point of accepting this encoding: the survey tool percent-encodes
+    each value, so quotes, newlines and ampersands survive intact where hand
+    -built JSON would not.
+    """
+    messy = 'He said "hello" &\nthen left; 100% sure'
+    r = post_form(
+        client,
+        {
+            "survey_id": "SV_abc123",
+            "participant_id": "R_xyz789",
+            "Anything else?": messy,
+        },
+    )
+
+    assert r.status_code == 200
+    assert SurveyResponse.objects.get().answers[0]["answer"] == messy
+
+
+@pytest.mark.django_db
+def test_form_encoded_answers_field_may_carry_json_as_a_string(client):
+    """A form body cannot nest, so an explicit answers field arrives as text."""
+    r = post_form(
+        client,
+        {
+            "survey_id": "SV_abc123",
+            "participant_id": "R_xyz789",
+            "answers": json.dumps([{"question": "Q", "answer": "A"}]),
+        },
+    )
+
+    assert r.status_code == 200
+    assert SurveyResponse.objects.get().answers == [{"question": "Q", "answer": "A"}]
+
+
+@pytest.mark.django_db
+def test_form_encoded_still_requires_the_identifiers(client):
+    r = post_form(client, {"Some question?": "Some answer"})
+
+    assert r.status_code == 400
+    assert not SurveyResponse.objects.exists()
+
+
+@pytest.mark.django_db
+def test_form_encoded_still_requires_a_token(client):
+    r = post_form(
+        client,
+        {"survey_id": "SV_1", "participant_id": "R_1", "Q?": "A"},
+        token="wrong",
+    )
+
+    assert r.status_code == 403
+    assert not SurveyResponse.objects.exists()

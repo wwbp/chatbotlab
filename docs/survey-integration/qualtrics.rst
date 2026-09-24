@@ -205,8 +205,12 @@ The JSON body:
       quotes eventually, so this will bite during a real study rather than
       during your pilot.
 
-      In **Body Parameters**, with the content type set to
-      ``application/json``:
+      The endpoint accepts whichever encoding your survey tool sends —
+      Qualtrics posts ``application/x-www-form-urlencoded``, a script will
+      usually send JSON, and both are handled. Form encoding is the safer of
+      the two, because Qualtrics escapes every value itself.
+
+      In **Body Parameters**:
 
       ===================================== ======== ==============================
       Parameter                             Type     Value
@@ -216,9 +220,15 @@ The JSON body:
       *the question text, written out*      String   the piped answer
       ===================================== ======== ==============================
 
-      Add one more row per question. Any parameter that is not ``survey_id``,
-      ``participant_id`` or ``answers`` is read as a question, and its value as
-      the answer. Nothing has to be escaped by hand.
+      Add one more row per question — as many as your study has. Any
+      parameter that is not ``survey_id``, ``participant_id`` or ``answers``
+      is read as a question, and its value as the answer. Nothing has to be
+      escaped by hand, and ChatbotLab needs no configuration per study: it
+      stores whatever questions you send.
+
+      A parameter whose value does not resolve is stored but left out of the
+      bot's prompt, so a broken pipe cannot produce a dangling ``Q:`` with no
+      answer.
 
    For a tool that can build nested JSON safely, the ``answers`` field is still
    accepted in either of these shapes:

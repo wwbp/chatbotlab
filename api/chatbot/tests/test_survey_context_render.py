@@ -75,7 +75,8 @@ def test_long_answers_are_not_truncated():
         PREAMBLE,
         [{"question": "Tell us more", "answer": long_answer}],
     )
-    assert long_answer in rendered
+    # Surrounding whitespace is trimmed; the content itself is untouched.
+    assert long_answer.strip() in rendered
 
 
 def test_preamble_is_stripped():
@@ -171,3 +172,27 @@ def test_a_single_unwrapped_entry_is_refused_as_ambiguous():
     forgotten enclosing list, and guessing would store nonsense silently.
     """
     assert normalize_answers({"question": "Pets?", "answer": "A goldfish"}) is None
+
+
+def test_entries_with_a_blank_question_or_answer_are_not_rendered():
+    """
+    A survey tool whose piping does not resolve sends an empty value. Storing
+    it keeps the record faithful, but putting "Q:" with nothing after it into a
+    prompt tells the model nothing and reads as a mistake.
+    """
+    rendered = render_survey_context(
+        PREAMBLE,
+        [
+            {"question": "Answered", "answer": "Yes"},
+            {"question": "Skipped by the participant", "answer": "   "},
+            {"question": "", "answer": "orphaned answer"},
+        ],
+    )
+
+    assert "Answered" in rendered
+    assert "Skipped by the participant" not in rendered
+    assert "orphaned answer" not in rendered
+
+
+def test_nothing_usable_renders_nothing():
+    assert render_survey_context(PREAMBLE, [{"question": "", "answer": ""}]) == ""
