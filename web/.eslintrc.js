@@ -24,7 +24,12 @@ module.exports = {
     'react/react-in-jsx-scope': 'off',
     'react/prop-types': 'off',
     'no-unused-vars': 'warn',
-    'no-console': 'warn',
+    // console.warn and console.error are how a browser-side failure explains
+    // itself. Warning on them is what led to every error handler in the
+    // conversation components being commented out, which made a blank chat
+    // indistinguishable from a script that never ran. console.log stays a
+    // warning, since that is the one that is usually debris.
+    'no-console': ['warn', { allow: ['warn', 'error'] }],
   },
   settings: {
     react: {

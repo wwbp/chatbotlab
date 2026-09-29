@@ -292,6 +292,15 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
     value     = var.anthropic_api_key
   }
 
+  # Shared secret for /api/survey_response/, the endpoint the survey tool POSTs
+  # participant answers to. Empty means the endpoint rejects everything, which
+  # is the right default for studies that do not use survey context.
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "SURVEY_INGEST_TOKEN"
+    value     = var.survey_ingest_token
+  }
+
   # ----- Admin panel ---------------------------------------------------------
   # DJANGO_SUPERUSER_* env vars trigger superuser creation on first deploy.
   # api/entrypoint.sh calls `manage.py createsuperuser --noinput` when these

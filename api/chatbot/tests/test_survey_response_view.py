@@ -1,0 +1,382 @@
+"""
+Tests for survey_response  (POST /api/survey_response/)
+
+The endpoint the survey tool calls to hand us a participant's answers before
+they reach the chatbot. Unlike the other endpoints in this project it takes
+participant data from the open internet, so it is authenticated with a shared
+secret and validates its payload strictly.
+
+Coverage:
+  - Authentication: missing, wrong, and correct token
+  - Payload validation: bad JSON, missing fields, malformed answers
+  - Storage: a row is created with answers and order intact
+  - Idempotency: a repeat POST overwrites rather than duplicating
+  - Method: anything other than POST is rejected
+"""
+
+import json
+
+import pytest
+from django.test import Client
+
+from chatbot.models import SurveyResponse
+
+URL = "/api/survey_response/"
+TOKEN = "test-survey-token"
+
+ANSWERS = [
+    {"question": "How stressed have you felt this week?", "answer": "Very stressed"},
+    {"question": "What's been on your mind?", "answer": "Mostly work deadlines."},
+]
+
+
+@pytest.fixture
+def client():
+    return Client()
+
+
+@pytest.fixture(autouse=True)
+def _token(settings):
+    """Every test in this module runs with a known ingest token configured."""
+    settings.SURVEY_INGEST_TOKEN = TOKEN
+
+
+def post(client, payload, token=TOKEN, **kwargs):
+    headers = {"HTTP_X_SURVEY_TOKEN": token} if token is not None else {}
+    return client.post(
+        URL,
+        data=json.dumps(payload),
+        content_type="application/json",
+        **headers,
+        **kwargs,
+    )
+
+
+def valid_payload(**overrides):
+    return {
+        "survey_id": "SV_abc123",
+        "participant_id": "R_xyz789",
+        "answers": ANSWERS,
+        **overrides,
+    }
+
+
+# ── Authentication ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.django_db
+def test_missing_token_is_rejected(client):
+    r = post(client, valid_payload(), token=None)
+    assert r.status_code == 403
+    assert not SurveyResponse.objects.exists()
+
+
+@pytest.mark.django_db
+def test_wrong_token_is_rejected(client):
+    r = post(client, valid_payload(), token="not-the-token")
+    assert r.status_code == 403
+    assert not SurveyResponse.objects.exists()
+
+
+@pytest.mark.django_db
+def test_unconfigured_token_rejects_everything(client, settings):
+    """
+    Fail closed: if the deployment has no token set, the endpoint refuses all
+    traffic rather than silently accepting anonymous participant data.
+    """
+    settings.SURVEY_INGEST_TOKEN = ""
+    r = post(client, valid_payload(), token="")
+    assert r.status_code == 403
+    assert not SurveyResponse.objects.exists()
+
+
+# ── Payload validation ────────────────────────────────────────────────────────
+
+
+@pytest.mark.django_db
+def test_bad_json_returns_400(client):
+    r = client.post(
+        URL,
+        data="not valid json",
+        content_type="application/json",
+        HTTP_X_SURVEY_TOKEN=TOKEN,
+    )
+    assert r.status_code == 400
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("field", ["survey_id", "participant_id"])
+def test_missing_required_field_returns_400(client, field):
+    payload = valid_payload()
+    del payload[field]
+    r = post(client, payload)
+    assert r.status_code == 400
+    assert not SurveyResponse.objects.exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "answers",
+    [
+        {"question": "q", "answer": "a"},  # dict, not a list
+        "q: a",  # string
+        [{"question": "orphan question"}],  # entry missing 'answer'
+        [{"answer": "orphan answer"}],  # entry missing 'question'
+        ["not a dict"],
+    ],
+)
+def test_malformed_answers_returns_400(client, answers):
+    """
+    Malformed data is rejected at the boundary, while the survey tool can still
+    see the error — rather than being discovered mid-conversation.
+    """
+    r = post(client, valid_payload(answers=answers))
+    assert r.status_code == 400
+    assert not SurveyResponse.objects.exists()
+
+
+@pytest.mark.django_db
+def test_empty_answers_list_is_accepted(client):
+    """A participant who skipped every question is valid, not an error."""
+    r = post(client, valid_payload(answers=[]))
+    assert r.status_code == 200
+    assert SurveyResponse.objects.get().answers == []
+
+
+# ── Storage ───────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.django_db
+def test_stores_answers_in_order(client):
+    r = post(client, valid_payload())
+    assert r.status_code == 200
+
+    row = SurveyResponse.objects.get(survey_id="SV_abc123", participant_id="R_xyz789")
+    assert row.answers == ANSWERS
+
+
+@pytest.mark.django_db
+def test_accepts_many_long_answers(client):
+    """Question count and answer length are deliberately uncapped."""
+    answers = [
+        {"question": f"Question {i}", "answer": "word " * 2000} for i in range(40)
+    ]
+    r = post(client, valid_payload(answers=answers))
+    assert r.status_code == 200
+    assert len(SurveyResponse.objects.get().answers) == 40
+
+
+# ── Idempotency ───────────────────────────────────────────────────────────────
+
+
+@pytest.mark.django_db
+def test_repeat_post_overwrites_rather_than_duplicating(client):
+    """The survey tool may retry, and participants may restart a survey."""
+    post(client, valid_payload())
+    updated = [{"question": "Changed?", "answer": "Yes"}]
+    r = post(client, valid_payload(answers=updated))
+
+    assert r.status_code == 200
+    assert SurveyResponse.objects.count() == 1
+    assert SurveyResponse.objects.get().answers == updated
+
+
+@pytest.mark.django_db
+def test_different_participants_get_separate_rows(client):
+    post(client, valid_payload(participant_id="R_one"))
+    post(client, valid_payload(participant_id="R_two"))
+    assert SurveyResponse.objects.count() == 2
+
+
+# ── Method ────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.django_db
+def test_get_is_rejected(client):
+    r = client.get(URL, HTTP_X_SURVEY_TOKEN=TOKEN)
+    assert r.status_code == 405
+
+
+# ── Diagnosing a malformed body ───────────────────────────────────────────────
+
+
+@pytest.mark.django_db
+def test_invalid_json_explains_what_is_wrong(client):
+    """
+    A survey tool that cannot escape its own piped text sends broken JSON, and
+    "Invalid JSON format" alone leaves whoever configured it with nothing to
+    act on. The parser already knows the position and reason, so say so.
+    """
+    broken = '{"survey_id": "SV_1", "participant_id": "R_1", "answers": [{"question": "Q", "answer": "she said "hi" to me"}]}'
+    r = client.post(
+        URL, data=broken, content_type="application/json", HTTP_X_SURVEY_TOKEN=TOKEN
+    )
+
+    assert r.status_code == 400
+    detail = r.json()["error"]
+    assert "JSON" in detail
+    # Points at the failure: a position, and the parser's own reason.
+    assert "line" in detail or "char" in detail
+
+
+@pytest.mark.django_db
+def test_invalid_json_does_not_echo_the_participant_answer(client):
+    """
+    The body carries participant answers. The diagnosis must be useful without
+    quoting their text back into a response or a log file.
+    """
+    broken = '{"answers": [{"answer": "my therapist said "burnout" last week"}]}'
+    r = client.post(
+        URL, data=broken, content_type="application/json", HTTP_X_SURVEY_TOKEN=TOKEN
+    )
+
+    assert r.status_code == 400
+    assert "therapist" not in r.json()["error"]
+    assert "burnout" not in r.json()["error"]
+
+
+# ── Top-level parameters, for survey tools that cannot build nested JSON ──────
+
+
+@pytest.mark.django_db
+def test_questions_can_be_sent_as_top_level_parameters(client):
+    """
+    Qualtrics escapes a String body parameter correctly, but substitutes piped
+    text verbatim into a raw JSON value — so an answer containing a quote
+    breaks the request. Sending each question as its own parameter avoids the
+    problem entirely: the survey tool does the escaping it is good at.
+    """
+    r = post(
+        client,
+        {
+            "survey_id": "SV_abc123",
+            "participant_id": "R_xyz789",
+            "What's been on your mind lately?": 'She said "burnout" and I agree',
+            "How stressed have you felt?": "Very",
+        },
+    )
+
+    assert r.status_code == 200
+    assert SurveyResponse.objects.get().answers == [
+        {
+            "question": "What's been on your mind lately?",
+            "answer": 'She said "burnout" and I agree',
+        },
+        {"question": "How stressed have you felt?", "answer": "Very"},
+    ]
+
+
+@pytest.mark.django_db
+def test_explicit_answers_take_precedence_over_top_level_parameters(client):
+    """An explicit answers field is never second-guessed."""
+    r = post(
+        client,
+        {
+            "survey_id": "SV_abc123",
+            "participant_id": "R_xyz789",
+            "answers": [{"question": "Real", "answer": "Yes"}],
+            "Stray key": "ignored",
+        },
+    )
+
+    assert r.status_code == 200
+    assert SurveyResponse.objects.get().answers == [
+        {"question": "Real", "answer": "Yes"},
+    ]
+
+
+@pytest.mark.django_db
+def test_no_questions_at_all_is_still_accepted(client):
+    """Only the identifiers: a participant who answered nothing."""
+    r = post(client, {"survey_id": "SV_abc123", "participant_id": "R_xyz789"})
+
+    assert r.status_code == 200
+    assert SurveyResponse.objects.get().answers == []
+
+
+# ── Form-encoded bodies, which is what Qualtrics actually sends ───────────────
+
+
+def post_form(client, payload, token=TOKEN):
+    return client.post(URL, data=payload, HTTP_X_SURVEY_TOKEN=token)
+
+
+@pytest.mark.django_db
+def test_form_encoded_body_is_accepted(client):
+    """
+    Qualtrics' Web Service posts application/x-www-form-urlencoded. Requiring
+    JSON meant a correctly configured survey was rejected outright.
+    """
+    r = post_form(
+        client,
+        {
+            "survey_id": "SV_abc123",
+            "participant_id": "R_xyz789",
+            "What's been on your mind lately?": 'She said "burnout" and I agree',
+        },
+    )
+
+    assert r.status_code == 200
+    assert SurveyResponse.objects.get().answers == [
+        {
+            "question": "What's been on your mind lately?",
+            "answer": 'She said "burnout" and I agree',
+        },
+    ]
+
+
+@pytest.mark.django_db
+def test_form_encoded_handles_characters_that_break_raw_json(client):
+    """
+    The whole point of accepting this encoding: the survey tool percent-encodes
+    each value, so quotes, newlines and ampersands survive intact where hand
+    -built JSON would not.
+    """
+    messy = 'He said "hello" &\nthen left; 100% sure'
+    r = post_form(
+        client,
+        {
+            "survey_id": "SV_abc123",
+            "participant_id": "R_xyz789",
+            "Anything else?": messy,
+        },
+    )
+
+    assert r.status_code == 200
+    assert SurveyResponse.objects.get().answers[0]["answer"] == messy
+
+
+@pytest.mark.django_db
+def test_form_encoded_answers_field_may_carry_json_as_a_string(client):
+    """A form body cannot nest, so an explicit answers field arrives as text."""
+    r = post_form(
+        client,
+        {
+            "survey_id": "SV_abc123",
+            "participant_id": "R_xyz789",
+            "answers": json.dumps([{"question": "Q", "answer": "A"}]),
+        },
+    )
+
+    assert r.status_code == 200
+    assert SurveyResponse.objects.get().answers == [{"question": "Q", "answer": "A"}]
+
+
+@pytest.mark.django_db
+def test_form_encoded_still_requires_the_identifiers(client):
+    r = post_form(client, {"Some question?": "Some answer"})
+
+    assert r.status_code == 400
+    assert not SurveyResponse.objects.exists()
+
+
+@pytest.mark.django_db
+def test_form_encoded_still_requires_a_token(client):
+    r = post_form(
+        client,
+        {"survey_id": "SV_1", "participant_id": "R_1", "Q?": "A"},
+        token="wrong",
+    )
+
+    assert r.status_code == 403
+    assert not SurveyResponse.objects.exists()

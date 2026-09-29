@@ -76,70 +76,33 @@ Embedding ChatbotLab
 3. Open the JavaScript editor. This is typically on the left under Edit Question -> Question Behavior
 4. Add the following code in the editor under Edit Question JavaScript:
 
-   .. code-block:: javascript
+   .. literalinclude:: qualtrics/embed_chatbot.js
+      :language: javascript
 
-      Qualtrics.SurveyEngine.addOnload(function() {
-         var studyName = "<STUDY-NAME>";  
-         var botName = "<BOT-NAME>";  // Match expected value
-         var surveyID = "<SURVEY-ID>";  //unique survey ID
-         var participantID = "<PARTICIPANT-ID>";  // Unique prolific participant ID
-         var conversationID = "${e://Field/ResponseID}";  // qualtrics session Id
+   This file also lives in the repository at
+   ``docs/survey-integration/qualtrics/embed_chatbot.js`` so you can copy it
+   directly.
 
-         window.totalTimeOnPage = 0;
-         window.totalTimeAwayFromPage = 0;
-         window.pageStartTime = new Date();
-         window.awayStartTime = null;
+   .. warning::
 
-         // Construct chatbot URL with encoded parameters
-         var botURL = "https://<YOUR-CHATLAB-DOMAIN>/conversation";
-         botURL += "?bot_name=" + encodeURIComponent(botName);
-         botURL += "&conversation_id=" + encodeURIComponent(conversationID);
-         botURL += "&participant_id=" + encodeURIComponent(participantID);
-         botURL += "&study_name=" + encodeURIComponent(studyName);
-         botURL += "&user_group=" + encodeURIComponent(userGroup);
-         botURL += "&survey_id=" + encodeURIComponent(surveyID);
+      **Do not use jQuery.** Qualtrics does not load it in every theme, and
+      where it is missing the script dies with
+      ``ReferenceError: jQuery is not defined`` before the iframe is created.
+      The page then looks exactly as though no JavaScript ran at all. The
+      snippet above uses plain DOM for this reason.
 
-         console.log("Generated botURL:", botURL);  // Debugging
+      If the chatbot does not appear, open the browser console. The snippet
+      logs the URL it builds, and there are three common outcomes:
 
-         var container = this.getQuestionTextContainer();  // Ensure valid container
-         if (container) {
-            var iframe = jQuery("<iframe>", {
-                  src: botURL,
-                  width: "100%",
-                  height: "100vh",
-                  frameborder: "0"
-            });
-            jQuery(container).append(iframe);  // Insert iframe
-         } else {
-            alert("Error: No valid container found.");
-         }
-
-         function handleVisibilityChange() {
-            var currentTime = new Date();
-            if (document.hidden) {
-                  // User switched to a different tab
-                  window.awayStartTime = currentTime;
-                  window.totalTimeOnPage += (currentTime - window.pageStartTime);
-                  console.log("User is not looking at the page");
-            } else {
-                  // User returned to the tab
-                  if (window.awayStartTime) {
-                     window.totalTimeAwayFromPage += (currentTime - window.awayStartTime);
-                     window.awayStartTime = null;
-                  }
-                  window.pageStartTime = currentTime;
-                  console.log("User is looking at the page");
-            }
-         }         
-
-         // Set initial state
-         handleVisibilityChange();
-
-         // Listen for visibility change events
-         document.addEventListener("visibilitychange", handleVisibilityChange, false);
-
-      });
-
+      - ``ReferenceError: jQuery is not defined`` — an older snippet is still
+        in the question. Replace it with the one above.
+      - The URL is logged with an empty ``participant_id`` — the piping did
+        not resolve, so the chat never starts. Check the field name, and note
+        that ``ResponseID`` may be empty in Preview; use a real survey link.
+      - The URL is logged and works when opened in its own browser tab, but no
+        iframe appears on the page — the element was appended too early. The
+        snippet uses ``addOnReady`` rather than ``addOnload`` to avoid this,
+        since Qualtrics discards elements added before the question renders.
 
 5. Replace the placeholders:
 
@@ -166,6 +129,221 @@ appending them to ``botURL``.
 Note that the entirety of ``botURL`` is saved as a raw string in ChatbotLab's backend,
 which allows you to send arbitrary amounts of data from your survey without modifying
 the database structure (i.e., you can parse variables from the raw string at a later date).
+
+Sending Survey Answers to the Bot
+---------------------------------
+
+The ``Passing Data`` section above appends values to the chatbot URL, which
+stores them for later analysis but does not show them to the bot. If you want
+the bot to *read* a participant's earlier answers during the conversation —
+for example, a condition where the bot knows what the participant said they
+were stressed about — send them to ChatbotLab's survey endpoint instead.
+
+This path has no length limit and no fixed number of questions, and the
+answers never appear in the participant's URL.
+
+Step 1 — Issue a token
+^^^^^^^^^^^^^^^^^^^^^^
+
+The endpoint is authenticated, and **rejects every request unless a token is
+configured**. Issue one from the admin panel — no redeploy or AWS access
+needed:
+
+1. Open **Survey ingest tokens** in the admin panel and click **Add**.
+2. Write a note saying which study the token is for, e.g.
+   ``Stress study, wave 1``. The note is only for your own reference.
+3. Save. The token is generated for you and shown under **Token** on the
+   next screen — copy it from there.
+
+Issue a separate token per study. When a study finishes, open its token and
+untick **is active** to revoke it immediately; the record stays for your audit
+trail.
+
+.. warning::
+
+   Anyone holding a token can submit survey answers for any participant, so
+   treat it like a password. Do not paste it into anything participants can
+   see — it belongs in the Qualtrics Web Service header, which runs
+   server-side, never in survey JavaScript.
+
+.. note::
+
+   Deployments that would rather manage the secret as infrastructure can set
+   the ``SURVEY_INGEST_TOKEN`` environment variable instead (for Terraform,
+   ``survey_ingest_token`` in ``terraform.tfvars`` or the matching GitHub
+   Actions secret; for local development, ``api/.env``). Both work at the same
+   time, so an environment-managed token and admin-issued tokens can coexist.
+
+Step 2 — Add a Web Service element to your survey flow
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+In Qualtrics, open **Survey Flow** and add a **Web Service** element.
+
+.. important::
+
+   Place the Web Service element **after** the questions you want to send and
+   **before** the block containing the chatbot. Qualtrics executes flow
+   elements in order, so a Web Service placed after the chatbot will deliver
+   the answers too late for the conversation to use them.
+
+Configure it as:
+
+- **URL:** ``https://<your-chatbotlab-domain>/api/survey_response/``
+- **Method:** ``POST``
+- **Body:** ``application/json``
+- **Header:** ``X-Survey-Token`` set to the token from Step 1
+
+The JSON body:
+
+   .. important::
+
+      **Put each question in its own String body parameter.** Qualtrics escapes
+      a String parameter correctly, but substitutes piped text *verbatim* into
+      a raw JSON value — so the moment a participant's answer contains a double
+      quote or a line break, the request body stops being valid JSON and the
+      endpoint replies ``400 Invalid JSON format``. Open-ended answers contain
+      quotes eventually, so this will bite during a real study rather than
+      during your pilot.
+
+      The endpoint accepts whichever encoding your survey tool sends —
+      Qualtrics posts ``application/x-www-form-urlencoded``, a script will
+      usually send JSON, and both are handled. Form encoding is the safer of
+      the two, because Qualtrics escapes every value itself.
+
+      In **Body Parameters**:
+
+      ===================================== ======== ==============================
+      Parameter                             Type     Value
+      ===================================== ======== ==============================
+      ``survey_id``                         String   your study identifier
+      ``participant_id``                    String   piped ``ResponseID``
+      *the question text, written out*      String   the piped answer
+      ===================================== ======== ==============================
+
+      Add one more row per question — as many as your study has. Any
+      parameter that is not ``survey_id``, ``participant_id`` or ``answers``
+      is read as a question, and its value as the answer. Nothing has to be
+      escaped by hand, and ChatbotLab needs no configuration per study: it
+      stores whatever questions you send.
+
+      A parameter whose value does not resolve is stored but left out of the
+      bot's prompt, so a broken pipe cannot produce a dangling ``Q:`` with no
+      answer.
+
+   For a tool that can build nested JSON safely, the ``answers`` field is still
+   accepted in either of these shapes:
+
+   .. literalinclude:: qualtrics/web_service_body.json
+      :language: json
+
+   This file also lives in the repository at
+   ``docs/survey-integration/qualtrics/web_service_body.json``.
+
+Both the question text and the answer are sent, because the bot reads the
+question wording as part of the context. Add as many entries as your study
+needs — the number of questions and the length of each answer are uncapped.
+
+In Qualtrics' Web Service editor this goes in **Body Parameters** with the
+content type set to ``application/json``:
+
+- ``survey_id`` — type *String*
+- ``participant_id`` — type *String*, piped from ``ResponseID``
+- ``answers`` — type *JSON*, set to the flat object above
+
+.. note::
+
+   ``answers`` is a flat ``{question: answer}`` object because Qualtrics'
+   Body Parameters are flat key/value rows, which makes a nested array
+   awkward to build. The API also accepts the equivalent list form —
+   ``[{"question": ..., "answer": ...}, ...]`` — which is easier for scripts
+   and is the shape everything is stored as. Send whichever your tool can
+   express; both end up identical in the database.
+
+   Two questions with identical wording would collide in the flat form. Use
+   the list form if your study needs that.
+
+.. note::
+
+   ``survey_id`` and ``participant_id`` must match the ``survey_id`` and
+   ``participant_id`` you put in the chatbot URL (see ``Embedding ChatbotLab``
+   above). That pair is how ChatbotLab finds the answers again.
+
+Sending the same participant's answers twice overwrites the stored copy rather
+than creating a duplicate, so retries and survey restarts are safe.
+
+Step 3 — Turn it on for a bot
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+In the admin panel, open the bot and find **Survey Context**:
+
+``Survey context preamble``
+   The sentence that introduces the answers to the model, for example
+   ``The participant answered these questions before talking to you:``.
+   The answers are appended underneath it as ``Q:``/``A:`` pairs.
+
+   **Leave this blank to append nothing.** This is how you configure a control
+   condition: point the control condition at a bot with an empty preamble and
+   the treatment condition at a bot with one set. Both bots can otherwise be
+   identical, and both still receive the answers — only the treatment bot
+   reads them.
+
+``Survey context in followup``
+   Whether the answers are also included when the bot sends an idle follow-up
+   message. On by default. Turn it off if follow-ups should not reference the
+   survey.
+
+Step 4 — Verify before running participants
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Before involving Qualtrics at all, confirm the server side works on its own:
+
+   .. code-block:: bash
+
+      python api/smoke_survey_context.py \
+          --base-url https://dev.bot.wwbp.org \
+          --token "$SURVEY_INGEST_TOKEN" \
+          --bot-name my_test_bot
+
+This performs the same three calls a real study makes and asks the bot to
+recall one of the answers, so a pass proves the whole chain end to end. Running
+it first separates a server problem from a survey-flow problem, which are
+otherwise hard to tell apart. It needs a bot that has a preamble set, and a
+server not running with ``MOCK_LLM=true``.
+
+Then take the survey yourself, and in the admin panel check:
+
+1. **Survey responses** — a row for your participant ID with the expected
+   number of answers.
+2. **Conversations** → your conversation → **Metadata** → ``survey context`` —
+   the answers the conversation actually used.
+3. **Utterances** → any bot message → ``instruction prompt`` — the full prompt
+   sent to the model, with your preamble and the ``Q:``/``A:`` pairs in it.
+
+If ``survey context`` is empty but the survey response row exists, the two
+``participant_id``/``survey_id`` pairs do not match, or the Web Service ran
+after the chatbot block.
+
+.. warning::
+
+   A participant whose answers never arrive is **not** an error — the bot
+   simply receives no extra context, which silently makes them behave like a
+   control participant. Those conversations have an empty ``survey context``
+   column, so check it for nulls before trusting your condition assignment in
+   analysis.
+
+How it is recorded
+^^^^^^^^^^^^^^^^^^
+
+Four records make a conversation reproducible after the fact:
+
+- ``SurveyResponse.answers`` — what Qualtrics sent, and when
+- ``Conversation.survey_context`` — a snapshot of what *this* conversation
+  used, copied at conversation start. It is a copy, not a link, so it stays
+  accurate even if Qualtrics later sends new answers for that participant.
+- ``Conversation.bot_config`` — the bot's full configuration at the time,
+  including the preamble, so you can prove which condition was live
+- ``Utterance.instruction_prompt`` — the exact prompt behind every single
+  message
 
 Data Linking
 ------------

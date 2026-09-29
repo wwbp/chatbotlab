@@ -209,6 +209,7 @@ jobs:
           TF_VAR_anthropic_api_key:           ${{ secrets.ANTHROPIC_API_KEY }}
           TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}
           TF_VAR_admin_panel_password:        ${{ secrets.ADMIN_PANEL_PASSWORD }}
+          TF_VAR_survey_ingest_token:         ${{ secrets.SURVEY_INGEST_TOKEN }}
           TF_VAR_eb_instance_type:            ${{ inputs.eb_instance_type }}
           TF_VAR_eb_max_instances:            ${{ inputs.eb_max_instances }}
           TF_VAR_db_instance_class:           ${{ inputs.db_instance_class }}
@@ -409,6 +410,7 @@ jobs:
           TF_VAR_anthropic_api_key:           ${{ secrets.ANTHROPIC_API_KEY }}
           TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}
           TF_VAR_admin_panel_password:        ${{ secrets.ADMIN_PANEL_PASSWORD }}
+          TF_VAR_survey_ingest_token:         ${{ secrets.SURVEY_INGEST_TOKEN }}
           TF_VAR_eb_instance_type:            ${{ inputs.eb_instance_type }}
           TF_VAR_eb_max_instances:            ${{ inputs.eb_max_instances }}
           TF_VAR_db_instance_class:           ${{ inputs.db_instance_class }}
@@ -456,6 +458,7 @@ jobs:
           TF_VAR_anthropic_api_key:           ${{ secrets.ANTHROPIC_API_KEY }}
           TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}
           TF_VAR_admin_panel_password:        ${{ secrets.ADMIN_PANEL_PASSWORD }}
+          TF_VAR_survey_ingest_token:         ${{ secrets.SURVEY_INGEST_TOKEN }}
           TF_VAR_eb_instance_type:            ${{ inputs.eb_instance_type }}
           TF_VAR_eb_max_instances:            ${{ inputs.eb_max_instances }}
           TF_VAR_db_instance_class:           ${{ inputs.db_instance_class }}
@@ -525,6 +528,7 @@ jobs:
           TF_VAR_anthropic_api_key:           ${{ secrets.ANTHROPIC_API_KEY }}
           TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}
           TF_VAR_admin_panel_password:        ${{ secrets.ADMIN_PANEL_PASSWORD }}
+          TF_VAR_survey_ingest_token:         ${{ secrets.SURVEY_INGEST_TOKEN }}
           TF_VAR_eb_instance_type:            ${{ inputs.eb_instance_type }}
           TF_VAR_eb_max_instances:            ${{ inputs.eb_max_instances }}
           TF_VAR_db_instance_class:           ${{ inputs.db_instance_class }}

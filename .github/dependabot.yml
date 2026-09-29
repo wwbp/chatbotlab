@@ -1,0 +1,54 @@
+# Dependabot keeps dependencies current so security fixes arrive as reviewable
+# pull requests rather than as a scramble after an advisory lands.
+#
+# The repository already had 97 alerts resolved by hand before this file
+# existed. Grouping the routine updates keeps that from becoming a flood of
+# single-dependency pull requests, while security updates stay ungrouped so
+# they are never buried.
+#
+# Note the api/ Pipfile pins security floors that api/chatbot/tests/
+# test_dependency_security.py asserts at runtime. If Dependabot raises one of
+# those, that test is what proves the running image actually got the new
+# version rather than a stale layer.
+version: 2
+
+updates:
+  # ── Backend: Pipfile / Pipfile.lock ────────────────────────────────────────
+  - package-ecosystem: pip
+    directory: /api
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    labels: ["dependencies", "backend"]
+
+  # ── Frontend: package.json / package-lock.json ─────────────────────────────
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      js-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    labels: ["dependencies", "frontend"]
+
+  # ── CI: the actions used by the workflows ──────────────────────────────────
+  # CI currently warns that actions/checkout@v4, actions/setup-node@v4 and
+  # aws-actions/configure-aws-credentials@v4 target a deprecated Node version.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns: ["*"]
+    labels: ["dependencies", "ci"]

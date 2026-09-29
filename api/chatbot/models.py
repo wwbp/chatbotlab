@@ -1,3 +1,5 @@
+import secrets
+
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
 
@@ -66,6 +68,11 @@ class Conversation(models.Model):
         blank=True,
         related_name="conversations",
         help_text="The persona randomly selected for this conversation",
+    )
+    survey_context = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Snapshot of the participant's survey answers as used by THIS conversation, copied from SurveyResponse at init. A copy rather than a link, so the record stays reproducible if the survey tool later overwrites the answers. Null means no answers were found for this participant.",
     )
 
     def __str__(self):
@@ -552,6 +559,18 @@ class Bot(models.Model):
         help_text="If true, bot will keep sending follow-up messages while user is idle. If false, bot will only send one follow-up per idle period.",
     )
 
+    # Survey context — answers collected before the conversation (see
+    # chatbot/services/survey.py and docs/survey-integration/qualtrics.rst)
+    survey_context_preamble = models.TextField(
+        blank=True,
+        default="",
+        help_text="Sentence introducing the participant's pre-conversation survey answers to the model, e.g. 'The participant answered these questions before talking to you:'. LEAVE BLANK to append nothing — that is how a control condition is configured.",
+    )
+    survey_context_in_followup = models.BooleanField(
+        default=True,
+        help_text="If true, survey context is also included when generating idle follow-up messages. Only has an effect when a survey context preamble is set.",
+    )
+
     # Transcript length control
     max_transcript_length = models.IntegerField(
         default=-1,
@@ -711,6 +730,80 @@ class Keystroke(models.Model):
     def __str__(self):
         return (
             f"Keystroke log for conversation {self.conversation_id} at {self.timestamp}"
+        )
+
+
+def generate_survey_token():
+    """A fresh ingest token. 64 hex characters from the OS random source."""
+    return secrets.token_hex(32)
+
+
+class SurveyIngestToken(models.Model):
+    """
+    A shared secret the survey tool sends to /api/survey_response/.
+
+    Issued from the admin panel so a researcher can start a study without an
+    AWS console or a redeploy. The token is stored in readable form because
+    whoever configures the survey has to copy it into the survey tool — the
+    protection is that only admin users can see this table.
+
+    The SURVEY_INGEST_TOKEN environment variable keeps working alongside these,
+    for deployments that prefer to manage the secret as infrastructure.
+    """
+
+    token = models.CharField(
+        max_length=64,
+        unique=True,
+        default=generate_survey_token,
+        editable=False,
+        help_text="Generated automatically. Copy this into your survey tool as the X-Survey-Token header.",
+    )
+    note = models.CharField(
+        max_length=255,
+        help_text="What this token is for, e.g. 'Stress study, wave 1'. Only for your own reference.",
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Untick to revoke this token without deleting the record. A revoked token is rejected immediately.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Survey ingest token"
+        ordering = ("-created_at",)
+
+    def __str__(self):
+        return f"{self.note} ({'active' if self.is_active else 'revoked'})"
+
+
+class SurveyResponse(models.Model):
+    """
+    Answers a participant gave in the survey tool before reaching the chatbot.
+
+    Like Keystroke, this deliberately holds no ForeignKey: the survey tool
+    POSTs these answers while the participant is still mid-survey, so the
+    Conversation does not exist yet. initialize_conversation looks the row up
+    by (survey_id, participant_id) and snapshots it onto the conversation.
+    """
+
+    survey_id = models.CharField(max_length=255)
+    participant_id = models.CharField(max_length=255)
+    answers = models.JSONField(
+        default=list,
+        help_text="List of {'question': ..., 'answer': ...} in the order asked. Neither the number of questions nor the length of an answer is capped.",
+    )
+    received_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        # One row per participant per survey: the survey tool may retry, and a
+        # participant may restart the survey. Both overwrite rather than
+        # accumulate ambiguous duplicates.
+        unique_together = ("survey_id", "participant_id")
+
+    def __str__(self):
+        return (
+            f"Survey response for participant {self.participant_id} "
+            f"in survey {self.survey_id} ({len(self.answers or [])} answers)"
         )
 
 

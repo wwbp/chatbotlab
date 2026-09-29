@@ -312,3 +312,74 @@ describe('Conversation — handleSubmit', () => {
     });
   });
 });
+
+describe('Conversation — failures are reported, not swallowed', () => {
+  // These paths were silent: a failed init produced a blank chat with nothing
+  // in the console, which is indistinguishable from the script never running.
+  // Diagnosing a mis-wired survey depends on the browser saying something.
+  let errorSpy;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  it('reports an initialization failure rejected by the server', async () => {
+    stubLocation();
+    global.fetch = vi.fn(() =>
+      Promise.resolve({
+        ok: false,
+        json: () => Promise.resolve({ error: 'No bot found' }),
+      })
+    );
+
+    render(<Conversation />);
+
+    await waitFor(() => expect(errorSpy).toHaveBeenCalled());
+    expect(errorSpy.mock.calls.flat().join(' ')).toMatch(/initialize/i);
+  });
+
+  it('reports an initialization failure caused by the network', async () => {
+    stubLocation();
+    global.fetch = vi.fn(() => Promise.reject(new Error('network down')));
+
+    render(<Conversation />);
+
+    await waitFor(() => expect(errorSpy).toHaveBeenCalled());
+  });
+
+  it('reports a failure to send a message', async () => {
+    stubLocation();
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(makeInitResponse())
+      .mockResolvedValueOnce(makeAvatarResponse())
+      .mockRejectedValueOnce(new Error('network down'));
+
+    render(<Conversation />);
+    await screen.findByText('Hello from bot!');
+
+    fireEvent.change(screen.getByPlaceholderText(/type your message/i), {
+      target: { value: 'hi' },
+    });
+    fireEvent.click(screen.getByText(/send/i));
+
+    await waitFor(() => expect(errorSpy).toHaveBeenCalled());
+  });
+
+  it('reports missing URL parameters rather than rendering an empty chat', async () => {
+    // The exact failure from a live Qualtrics survey: participant_id piped
+    // empty, init returned early, and the page sat blank with no explanation.
+    stubLocation('?bot_name=TestBot&conversation_id=conv1');
+    global.fetch = vi.fn();
+
+    render(<Conversation />);
+
+    await waitFor(() => expect(errorSpy).toHaveBeenCalled());
+    expect(errorSpy.mock.calls.flat().join(' ')).toMatch(/participant_id/);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+});

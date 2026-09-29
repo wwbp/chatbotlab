@@ -7,7 +7,7 @@ from django import forms
 from django.contrib import admin
 from django.core.exceptions import ValidationError
 from django.urls import reverse
-from django.utils.html import format_html
+from django.utils.html import format_html, format_html_join
 from django.utils.safestring import mark_safe
 from import_export import resources
 from import_export.admin import ExportMixin
@@ -21,6 +21,8 @@ from .models import (
     Keystroke,
     ModerationSettings,
     Persona,
+    SurveyIngestToken,
+    SurveyResponse,
     Utterance,
     moderation_field_name,
 )
@@ -283,6 +285,7 @@ class ConversationAdmin(ExportMixin, BaseAdmin):
         "study_name",
         "user_group",
         "started_time",
+        "survey_answers",
     )
     list_display_links = ("conversation_id",)
     search_fields = (
@@ -305,9 +308,51 @@ class ConversationAdmin(ExportMixin, BaseAdmin):
         "utterance_count",
         "selected_persona",
         "bot_config",
+        "survey_context_readable",
     )
     ordering = ("-started_time",)
     list_per_page = 25
+
+    @admin.display(description="Survey answers")
+    def survey_answers(self, obj):
+        """
+        How many pre-conversation survey answers this conversation received.
+
+        "none" is the one worth scanning for: the participant reached the bot
+        but their answers never arrived, so they behaved like a control
+        participant whatever condition they were assigned to.
+        """
+        answers = obj.survey_context or []
+        if not answers:
+            return format_html('<span style="color:#999;">none</span>')
+        return format_html(
+            '<span style="color:#2e7d32;">{} linked</span>', len(answers)
+        )
+
+    @admin.display(description="Survey answers (as the bot received them)")
+    def survey_context_readable(self, obj):
+        """The snapshot as question/answer pairs rather than raw JSON."""
+        answers = obj.survey_context or []
+        if not answers:
+            return format_html(
+                '<span style="color:#999;">No survey answers were linked to this '
+                "conversation. If this study feeds survey answers to the bot, this "
+                "participant did not receive any — check that the survey tool sent "
+                "a matching survey_id and participant_id.</span>",
+            )
+
+        rows = format_html_join(
+            "",
+            "<tr><th style='text-align:left; padding:.3em .8em .3em 0; "
+            "vertical-align:top; white-space:nowrap;'>{}</th>"
+            "<td style='padding:.3em 0;'>{}</td></tr>",
+            (
+                (entry.get("question", ""), entry.get("answer", ""))
+                for entry in answers
+                if isinstance(entry, dict)
+            ),
+        )
+        return format_html("<table>{}</table>", rows)
 
     def utterance_count(self, obj):
         count = obj.utterances.count()
@@ -354,7 +399,13 @@ class ConversationAdmin(ExportMixin, BaseAdmin):
         (
             "Metadata",
             {
-                "fields": ("survey_meta_data", "started_time", "bot_config"),
+                "fields": (
+                    "survey_context_readable",
+                    "survey_meta_data",
+                    "survey_context",
+                    "started_time",
+                    "bot_config",
+                ),
                 "classes": ("collapse",),
             },
         ),
@@ -375,7 +426,9 @@ class UtteranceAdmin(ExportMixin, BaseAdmin):
         "created_time",
         "is_voice",
         "moderation_category",
+        "survey_context_state",
     )
+    list_select_related = ("conversation",)
     list_display_links = ("conversation_link", "text_preview")
     search_fields = (
         "speaker_id",
@@ -423,6 +476,37 @@ class UtteranceAdmin(ExportMixin, BaseAdmin):
         )
 
     text_preview.short_description = "Message"
+
+    @admin.display(description="Survey ctx")
+    def survey_context_state(self, obj):
+        """
+        Whether this message's prompt actually carried the survey answers.
+
+        Three outcomes, and telling them apart is the point:
+          used             the answers are in the prompt behind this message
+          linked, not used the answers reached the conversation but this bot
+                           does not use them — a control condition, or a
+                           missing preamble
+          —                no answers were linked to the conversation at all
+
+        Detected by looking for an answer's text in the prompt rather than by
+        re-rendering it, so it stays honest even if the bot's preamble was
+        edited after the message was sent.
+        """
+        answers = getattr(obj.conversation, "survey_context", None) or []
+        if not answers:
+            return "—"
+
+        prompt = obj.instruction_prompt or ""
+        used = any(
+            isinstance(entry, dict)
+            and entry.get("answer")
+            and entry["answer"] in prompt
+            for entry in answers
+        )
+        if used:
+            return format_html('<span style="color:#2e7d32;">used</span>')
+        return format_html('<span style="color:#b26a00;">linked, not used</span>')
 
     def instruction_prompt_preview(self, obj):
         if obj.instruction_prompt and obj.instruction_prompt.strip():
@@ -669,6 +753,17 @@ class BotAdmin(ExportMixin, BaseAdmin):
                     "max_transcript_length",
                 ),
                 "description": "Control how bot responses are formatted and displayed. Max transcript length controls how many previous messages to include in chat history. 0 = no chat history (only current message), 1+ = include that many most recent messages.",
+            },
+        ),
+        (
+            "Survey Context",
+            {
+                "fields": (
+                    "survey_context_preamble",
+                    "survey_context_in_followup",
+                ),
+                "classes": ("collapse",),
+                "description": "Feed answers the participant gave in your survey tool (e.g. Qualtrics) to this bot as context. LEAVE THE PREAMBLE BLANK to append nothing — that is how a control condition is configured. See docs/survey-integration/qualtrics.rst.",
             },
         ),
         (
@@ -1322,6 +1417,93 @@ class KeystrokeAdmin(BaseAdmin):
             },
         ),
     )
+
+
+@admin.register(SurveyIngestToken)
+class SurveyIngestTokenAdmin(BaseAdmin):
+    """
+    Issue a token per study, so starting a study needs no redeploy.
+
+    Add a token, write a note saying what it is for, save, and copy the
+    generated value into your survey tool. The token itself is never typed by
+    hand — it is generated with secrets.token_hex on first save.
+    """
+
+    list_display = ("note", "masked_token", "is_active", "created_at")
+    list_display_links = ("note",)
+    list_filter = ("is_active", "created_at")
+    search_fields = ("note",)
+    readonly_fields = ("token_for_copying", "created_at")
+    list_per_page = 25
+
+    fieldsets = (
+        (
+            None,
+            {
+                "fields": ("note", "is_active"),
+                "description": (
+                    "Give the token a note describing which study it belongs to, "
+                    "then save. The token is generated for you."
+                ),
+            },
+        ),
+        (
+            "Token",
+            {
+                "fields": ("token_for_copying", "created_at"),
+                "description": (
+                    "Copy this into your survey tool as the <code>X-Survey-Token</code> "
+                    "request header, alongside a POST to <code>/api/survey_response/</code>. "
+                    "Untick 'is active' above to revoke it immediately without losing the record."
+                ),
+            },
+        ),
+    )
+
+    @admin.display(description="Token")
+    def masked_token(self, obj):
+        """Only the last 6 characters, so the list page is not a secret dump."""
+        return format_html("<code>…{}</code>", obj.token[-6:])
+
+    @admin.display(description="Token (copy this)")
+    def token_for_copying(self, obj):
+        if not obj.pk:
+            return "Save to generate the token."
+        return format_html(
+            '<code style="font-size:1.1em; user-select:all;">{}</code>'
+            '<p style="margin-top:.5em; color:#666;">'
+            "Send as the <code>X-Survey-Token</code> header. Anyone holding this "
+            "can submit survey answers for any participant, so treat it like a "
+            "password and revoke it when the study ends.</p>",
+            obj.token,
+        )
+
+
+@admin.register(SurveyResponse)
+class SurveyResponseAdmin(BaseAdmin):
+    """
+    Answers delivered by the survey tool before the participant reaches a bot.
+
+    Read-only on purpose: these rows are a record of what an external system
+    sent us. Editing them here would not change any conversation that already
+    snapshotted them (see Conversation.survey_context).
+    """
+
+    list_display = ("participant_id", "survey_id", "answer_count", "received_at")
+    list_display_links = ("participant_id",)
+    search_fields = ("participant_id", "survey_id")
+    list_filter = ("survey_id", "received_at")
+    ordering = ("-received_at",)
+    readonly_fields = ("survey_id", "participant_id", "answers", "received_at")
+    list_per_page = 25
+
+    def answer_count(self, obj):
+        return len(obj.answers or [])
+
+    answer_count.short_description = "Answers"
+
+    def has_add_permission(self, request):
+        return False
 
 
 @admin.register(ModerationSettings)

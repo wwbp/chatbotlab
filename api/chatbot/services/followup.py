@@ -19,6 +19,7 @@ from .post_processing import (
     human_like_chunks,
 )
 from .runchat import engine_instances, generate_system_prompt, save_chat_to_db
+from .survey import context_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +138,11 @@ async def run_followup_chat_round(
     )(conversation_id=conversation_id)
     selected_persona = conversation.selected_persona
 
-    system_prompt = generate_system_prompt(bot, selected_persona)
+    system_prompt = generate_system_prompt(
+        bot,
+        selected_persona,
+        context_for_prompt(bot, conversation, is_followup=True),
+    )
 
     # Run Kani - ai_model is now required
     engine = get_or_create_engine_from_model(bot.ai_model, engine_instances)
