@@ -42,7 +42,7 @@ ruff = ">=0.9,<2.0"
 # pytest-asyncio 1.4.0 (the latest release) does not support — every async test
 # errors at setup with `assert not self._finalizers`. Raise this cap only once
 # pytest-asyncio ships a pytest 9 compatible release.
-pytest = ">=8.0,<9.0"
+pytest = ">=9.1.1,<10.0"
 pytest-django = ">=4.9,<5.0"
 pytest-asyncio = ">=0.25,<2.0"
 isort = ">=5.13,<6.0"
