@@ -157,3 +157,48 @@ def test_participant_text_is_escaped(conversation_admin, make_conversation):
 
     assert "<script>" not in rendered
     assert "&lt;script&gt;" in rendered
+
+
+# ── Bot list column ───────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def bot_admin():
+    from django.contrib.admin.sites import site
+
+    from chatbot.admin import BotAdmin
+    from chatbot.models import Bot
+
+    return BotAdmin(Bot, site)
+
+
+@pytest.mark.django_db
+def test_bot_list_shows_survey_context_on(bot_admin, make_bot):
+    """
+    A factorial study has a bot per cell. Auditing which ones feed survey
+    answers to the model has to be possible from the list, not by opening
+    every bot in turn.
+    """
+    bot = make_bot(survey_context_enabled=True)
+
+    assert "on" in bot_admin.survey_context(bot).lower()
+
+
+@pytest.mark.django_db
+def test_bot_list_shows_survey_context_off(bot_admin, make_bot):
+    bot = make_bot(survey_context_enabled=False)
+
+    assert "off" in bot_admin.survey_context(bot).lower()
+
+
+@pytest.mark.django_db
+def test_bot_list_flags_enabled_with_no_preamble(bot_admin, make_bot):
+    """
+    Legitimate, but worth seeing: the answers reach the model with no
+    introduction, which is easy to do by accident.
+    """
+    bot = make_bot(survey_context_enabled=True, survey_context_preamble="")
+
+    label = bot_admin.survey_context(bot).lower()
+    assert "on" in label
+    assert "no preamble" in label
