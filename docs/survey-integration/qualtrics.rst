@@ -276,16 +276,25 @@ Step 3 — Turn it on for a bot
 
 In the admin panel, open the bot and find **Survey Context**:
 
-``Survey context preamble``
-   The sentence that introduces the answers to the model, for example
-   ``The participant answered these questions before talking to you:``.
-   The answers are appended underneath it as ``Q:``/``A:`` pairs.
+``Survey context enabled``
+   **The switch.** Tick it to give this bot the participant's answers; leave
+   it unticked for a control condition. Both bots can otherwise be identical,
+   and both still receive the answers — only the ticked one reads them.
 
-   **Leave this blank to append nothing.** This is how you configure a control
-   condition: point the control condition at a bot with an empty preamble and
-   the treatment condition at a bot with one set. Both bots can otherwise be
-   identical, and both still receive the answers — only the treatment bot
-   reads them.
+   In a factorial design with a bot per cell, this one checkbox is the
+   difference between a treatment and a control bot, so check it before
+   running participants. The **Survey ctx** column on the Bots list shows the
+   state of every bot at a glance.
+
+``Survey context preamble``
+   Optional wording introducing the answers to the model, for example
+   ``The participant answered these questions before talking to you:``. The
+   answers are appended underneath it as ``Q:``/``A:`` pairs.
+
+   Leaving it blank passes the answers with no introduction. It does **not**
+   switch the feature off — the checkbox above does that. (Earlier versions
+   used a blank preamble as the off switch, which made a preamble left empty
+   by accident indistinguishable from a deliberate control condition.)
 
 ``Survey context in followup``
    Whether the answers are also included when the bot sends an idle follow-up

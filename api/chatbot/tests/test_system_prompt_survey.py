@@ -40,7 +40,7 @@ ANSWERS = [
 
 @pytest.mark.django_db
 def test_chat_always_uses_the_conversation_context(make_bot, make_conversation):
-    bot = make_bot(survey_context_in_followup=False)
+    bot = make_bot(survey_context_enabled=True, survey_context_in_followup=False)
     conversation = make_conversation(bot=bot, survey_context=ANSWERS)
 
     assert context_for_prompt(bot, conversation) == ANSWERS
@@ -48,7 +48,7 @@ def test_chat_always_uses_the_conversation_context(make_bot, make_conversation):
 
 @pytest.mark.django_db
 def test_followup_uses_the_context_when_enabled(make_bot, make_conversation):
-    bot = make_bot(survey_context_in_followup=True)
+    bot = make_bot(survey_context_enabled=True, survey_context_in_followup=True)
     conversation = make_conversation(bot=bot, survey_context=ANSWERS)
 
     assert context_for_prompt(bot, conversation, is_followup=True) == ANSWERS
@@ -57,7 +57,7 @@ def test_followup_uses_the_context_when_enabled(make_bot, make_conversation):
 @pytest.mark.django_db
 def test_followup_drops_the_context_when_disabled(make_bot, make_conversation):
     """The toggle affects follow-ups only — regular chat is unaffected."""
-    bot = make_bot(survey_context_in_followup=False)
+    bot = make_bot(survey_context_enabled=True, survey_context_in_followup=False)
     conversation = make_conversation(bot=bot, survey_context=ANSWERS)
 
     assert context_for_prompt(bot, conversation, is_followup=True) is None
@@ -68,10 +68,13 @@ def test_followup_drops_the_context_when_disabled(make_bot, make_conversation):
 
 
 @pytest.mark.django_db
-def test_no_preamble_leaves_the_prompt_unchanged(make_bot):
+def test_a_disabled_bot_leaves_the_prompt_unchanged(make_bot, make_conversation):
     """A bot that never opted in behaves exactly as it did before this feature."""
-    bot = make_bot(prompt="You are a test assistant.")
-    assert generate_system_prompt(bot, None, ANSWERS) == "You are a test assistant."
+    bot = make_bot(prompt="You are a test assistant.", survey_context_enabled=False)
+    conversation = make_conversation(bot=bot, survey_context=ANSWERS)
+
+    prompt = generate_system_prompt(bot, None, context_for_prompt(bot, conversation))
+    assert prompt == "You are a test assistant."
 
 
 @pytest.mark.django_db
@@ -123,7 +126,9 @@ async def test_instruction_prompt_records_the_survey_context(
     survey context, so a conversation can be reproduced after the fact.
     """
     bot = await sync_to_async(make_bot)(
-        prompt="Base prompt.", survey_context_preamble=PREAMBLE
+        prompt="Base prompt.",
+        survey_context_enabled=True,
+        survey_context_preamble=PREAMBLE,
     )
     conversation = await sync_to_async(make_conversation)(
         bot=bot, survey_context=ANSWERS

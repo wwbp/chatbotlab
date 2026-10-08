@@ -54,8 +54,6 @@ def render_survey_context(preamble, answers):
         participant whose survey data never arrived both land here.
     """
     preamble = (preamble or "").strip()
-    if not preamble:
-        return ""
 
     if not isinstance(answers, list):
         # None when no survey data was linked to this conversation. Anything
@@ -80,20 +78,29 @@ def render_survey_context(preamble, answers):
     if not blocks:
         return ""
 
-    return preamble + "\n\n" + "\n\n".join(blocks)
+    body = "\n\n".join(blocks)
+    # No preamble means no heading, rather than inventing wording of our own:
+    # a study controls its prompts precisely.
+    return f"{preamble}\n\n{body}" if preamble else body
 
 
 def context_for_prompt(bot, conversation, *, is_followup=False):
     """
     Decide whether this conversation's survey context applies to a prompt.
 
-    Pure. Regular chat always uses whatever was snapshotted at init; idle
-    follow-ups additionally respect Bot.survey_context_in_followup, so a study
-    can feed survey answers into the conversation without repeating them in
-    unprompted nudges.
+    Pure. Bot.survey_context_enabled is the switch, and nothing else turns the
+    feature on — in particular an empty preamble does not, since one field
+    deciding both whether and how was how a blank left by accident became
+    indistinguishable from a deliberate control condition.
+
+    Idle follow-ups additionally respect Bot.survey_context_in_followup, so a
+    study can feed survey answers into the conversation without repeating them
+    in unprompted nudges.
 
     Returns the answers list, or None when no context should be appended.
     """
+    if not bot.survey_context_enabled:
+        return None
     if is_followup and not bot.survey_context_in_followup:
         return None
     return conversation.survey_context
