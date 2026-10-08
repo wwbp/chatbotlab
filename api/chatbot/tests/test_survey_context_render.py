@@ -29,9 +29,19 @@ ANSWERS = [
 
 
 @pytest.mark.parametrize("preamble", ["", "   ", None])
-def test_blank_preamble_renders_nothing(preamble):
-    """A blank preamble is how a bot opts out — the control condition."""
-    assert render_survey_context(preamble, ANSWERS) == ""
+def test_blank_preamble_renders_the_answers_without_a_heading(preamble):
+    """
+    The preamble is wording, not a switch. Bot.survey_context_enabled decides
+    whether any of this is reached; leaving the preamble empty simply omits the
+    introduction rather than inventing wording for someone's study.
+    """
+    assert render_survey_context(preamble, ANSWERS) == (
+        "Q: How stressed have you felt this week?\n"
+        "A: Very stressed\n"
+        "\n"
+        "Q: What's been on your mind?\n"
+        "A: Mostly work deadlines."
+    )
 
 
 @pytest.mark.parametrize("answers", [[], None])

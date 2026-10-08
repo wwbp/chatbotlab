@@ -561,10 +561,14 @@ class Bot(models.Model):
 
     # Survey context — answers collected before the conversation (see
     # chatbot/services/survey.py and docs/survey-integration/qualtrics.rst)
+    survey_context_enabled = models.BooleanField(
+        default=False,
+        help_text="Give this bot the participant's pre-conversation survey answers. This checkbox is the switch: a blank preamble below does NOT turn it off. Leave unticked for a control condition.",
+    )
     survey_context_preamble = models.TextField(
         blank=True,
         default="",
-        help_text="Sentence introducing the participant's pre-conversation survey answers to the model, e.g. 'The participant answered these questions before talking to you:'. LEAVE BLANK to append nothing — that is how a control condition is configured.",
+        help_text="Optional sentence introducing the answers to the model, e.g. 'The participant answered these questions before talking to you:'. Leave blank to pass the answers with no introduction. This does not switch the feature on or off — the checkbox above does.",
     )
     survey_context_in_followup = models.BooleanField(
         default=True,

@@ -604,6 +604,7 @@ class BotAdmin(ExportMixin, BaseAdmin):
         "get_persona_count",
         "moderation_summary",
         "avatar_preview",
+        "survey_context",
     )
     list_display_links = ("name",)
     search_fields = ("name", "ai_model__provider__name", "ai_model__display_name")
@@ -618,6 +619,24 @@ class BotAdmin(ExportMixin, BaseAdmin):
     )
     ordering = ("name",)
     filter_horizontal = ["personas"]
+
+    @admin.display(description="Survey ctx")
+    def survey_context(self, obj):
+        """
+        Whether this bot is given the participant's pre-conversation survey
+        answers, visible without opening the bot.
+
+        A factorial study has a bot per cell, and the difference between a
+        treatment and a control bot is this one setting — so it has to be
+        auditable at a glance rather than by opening each one.
+        """
+        if not obj.survey_context_enabled:
+            return format_html('<span style="color:#999;">off</span>')
+        if not (obj.survey_context_preamble or "").strip():
+            return format_html(
+                '<span style="color:#b26a00;">on (no preamble)</span>',
+            )
+        return format_html('<span style="color:#2e7d32;">on</span>')
 
     def model_provider(self, obj):
         return obj.ai_model.provider.display_name
@@ -759,11 +778,12 @@ class BotAdmin(ExportMixin, BaseAdmin):
             "Survey Context",
             {
                 "fields": (
+                    "survey_context_enabled",
                     "survey_context_preamble",
                     "survey_context_in_followup",
                 ),
                 "classes": ("collapse",),
-                "description": "Feed answers the participant gave in your survey tool (e.g. Qualtrics) to this bot as context. LEAVE THE PREAMBLE BLANK to append nothing — that is how a control condition is configured. See docs/survey-integration/qualtrics.rst.",
+                "description": "Feed answers the participant gave in your survey tool (e.g. Qualtrics) to this bot as context. The checkbox is the switch — untick it for a control condition. The preamble is only the wording that introduces the answers, and leaving it blank does NOT turn the feature off. See docs/survey-integration/qualtrics.rst.",
             },
         ),
         (
