@@ -23,8 +23,8 @@ whitenoise = ">=6.9,<7.0"
 nltk = ">=3.9,<4.0"
 certifi = ">=2025.0"
 pillow = ">=11.0,<13.0"
-boto3 = ">=1.43.111,<2.0"
-django-import-export = ">=4.0,<5.0"
+boto3 = ">=1.43.114,<2.0"
+django-import-export = ">=4.4.2,<5.0"
 django-storages = {extras = ["s3"], version = ">=1.14,<4.0"}
 # Transitive via Django, pinned up explicitly for security: everything at or
 # below 0.5.5 carries five advisories — ReDoS and quadratic CPU blowups when
@@ -37,7 +37,7 @@ sqlparse = ">=0.6.0,<1.0"
 python_version = "3.12"
 
 [dev-packages]
-ruff = ">=0.17.0,<2.0"
+ruff = ">=0.17.1,<2.0"
 # Capped below 9.0: pytest 9 changed fixture finalisation in a way
 # pytest-asyncio 1.4.0 (the latest release) does not support — every async test
 # errors at setup with `assert not self._finalizers`. Raise this cap only once
