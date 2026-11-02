@@ -17,15 +17,10 @@ from django.views.decorators.csrf import csrf_exempt
 from PIL import Image
 
 from ..models import Avatar, Bot
+from ..utils.auth import require_perm
 from .s3_helper import delete, download, get_presigned_url, get_random_image, upload
 
 logger = logging.getLogger(__name__)
-
-
-def _require_staff(request):
-    if not request.user.is_authenticated or not request.user.is_staff:
-        return JsonResponse({"error": "Forbidden."}, status=403)
-    return None
 
 
 def make_square(image, fill_color=(255, 255, 255, 0)):
@@ -135,7 +130,7 @@ def generate_avatar(
 @method_decorator(csrf_exempt, name="dispatch")
 class AvatarAPIView(View):
     def get(self, request, *args, **kwargs):
-        forbidden = _require_staff(request)
+        forbidden = require_perm(request, "chatbot.view_avatar")
         if forbidden:
             return forbidden
         try:
@@ -146,7 +141,7 @@ class AvatarAPIView(View):
             return JsonResponse({"error": "An unexpected error occurred."}, status=500)
 
     def post(self, request, *args, **kwargs):
-        forbidden = _require_staff(request)
+        forbidden = require_perm(request, "chatbot.add_avatar")
         if forbidden:
             return forbidden
         logger.info(
@@ -411,7 +406,7 @@ class AvatarDetailAPIView(View):
             return JsonResponse({"error": "Bot not found"}, status=404)
 
     def post(self, request, bot_name, *args, **kwargs):
-        forbidden = _require_staff(request)
+        forbidden = require_perm(request, "chatbot.change_avatar")
         if forbidden:
             return forbidden
         try:
@@ -551,7 +546,7 @@ class AvatarDetailAPIView(View):
             return JsonResponse({"error": "An unexpected error occurred."}, status=500)
 
     def delete(self, request, bot_name, *args, **kwargs):
-        forbidden = _require_staff(request)
+        forbidden = require_perm(request, "chatbot.delete_avatar")
         if forbidden:
             return forbidden
         try:

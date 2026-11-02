@@ -1395,6 +1395,9 @@ class AvatarAdmin(BaseAdmin):
         )
 
     delete_avatars.short_description = "Delete selected avatars and their files"
+    # Custom actions are offered to anyone who can see the changelist unless
+    # they declare a permission; Bot editors can see it but must not delete.
+    delete_avatars.allowed_permissions = ("delete",)
 
 
 @admin.register(Keystroke)

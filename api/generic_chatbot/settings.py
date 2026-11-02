@@ -116,6 +116,11 @@ INSTALLED_APPS = [
     "storages",
 ]
 
+# Without this, import_export lets any staff user export any model with an
+# Export button. "view" ties export to the model's view permission, so a role
+# can export exactly what it can read.
+IMPORT_EXPORT_EXPORT_PERMISSION_CODE = "view"
+
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "chatbot.middleware.RequestTimingMiddleware",
