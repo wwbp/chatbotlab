@@ -1,0 +1,307 @@
+/*
+ * Admin console: Swiss / International Typographic Style.
+ * Loaded on every admin page by templates/admin/base_site.html.
+ *
+ * Mostly overrides Django's CSS variables (admin/css/base.css, dark_mode.css);
+ * plain rules only where a variable can't express it.
+ * Black, white, greys and one accent (red), used for the primary button,
+ * hover and keyboard focus. Contrast (WCAG): #E30613 on white 4.88:1,
+ * white on #E30613 4.88:1; dark-mode accent #FF3B3B on #111 5.34:1.
+ */
+
+/* ===== Palette and type: light ===== */
+html[data-theme="light"],
+:root {
+    --accent: #e30613;
+    --primary: #000;
+    --secondary: #000;
+    --primary-fg: #fff;
+
+    --body-fg: #222;
+    --body-bg: #fff;
+    --body-quiet-color: #666;
+    --body-medium-color: #444;
+    --body-loud-color: #000;
+
+    --header-color: #fff;
+    --header-branding-color: #fff;
+    --header-bg: #000;
+    --header-link-color: #fff;
+
+    --breadcrumbs-fg: #666;
+    --breadcrumbs-link-fg: #000;
+    --breadcrumbs-bg: #fff;
+
+    --link-fg: #000;
+    --link-hover-color: var(--accent);
+    --link-selected-fg: var(--accent);
+
+    --hairline-color: #e5e5e5;
+    --border-color: #999;
+    --error-fg: #e30613;
+
+    --darkened-bg: #f6f6f6;
+    --selected-bg: #ededed;
+    --selected-row: #ededed;
+
+    --button-fg: #fff;
+    --button-bg: #000;
+    --button-hover-bg: #444;
+    --default-button-bg: #e30613;
+    --default-button-hover-bg: #b00510;
+    --close-button-bg: #666;
+    --close-button-hover-bg: #000;
+    --delete-button-bg: #000;
+    --delete-button-hover-bg: #e30613;
+    --object-tools-bg: #000;
+    --object-tools-hover-bg: #e30613;
+
+    --font-family-primary: "Helvetica Neue", Helvetica, Arial, "Inter",
+        system-ui, sans-serif;
+}
+
+/* ===== Palette: dark (auto via OS, or the admin theme toggle) ===== */
+@media (prefers-color-scheme: dark) {
+    :root {
+        --accent: #ff3b3b;
+        --primary: #333;
+        --body-fg: #eaeaea;
+        --body-bg: #111;
+        --body-quiet-color: #a8a8a8;
+        --body-medium-color: #cfcfcf;
+        --body-loud-color: #fff;
+        --breadcrumbs-fg: #a8a8a8;
+        --breadcrumbs-link-fg: #fff;
+        --breadcrumbs-bg: #111;
+        --link-fg: #fff;
+        --hairline-color: #2a2a2a;
+        --border-color: #666;
+        --error-fg: #ff3b3b;
+        --darkened-bg: #1a1a1a;
+        --selected-bg: #2a2a2a;
+        --selected-row: #2a2a2a;
+        --button-bg: #333;
+        --button-hover-bg: #555;
+        --close-button-bg: #333;
+        --close-button-hover-bg: #555;
+        --delete-button-bg: #333;
+        --object-tools-bg: #333;
+    }
+}
+
+html[data-theme="dark"] {
+    --accent: #ff3b3b;
+    --primary: #333;
+    --body-fg: #eaeaea;
+    --body-bg: #111;
+    --body-quiet-color: #a8a8a8;
+    --body-medium-color: #cfcfcf;
+    --body-loud-color: #fff;
+    --breadcrumbs-fg: #a8a8a8;
+    --breadcrumbs-link-fg: #fff;
+    --breadcrumbs-bg: #111;
+    --link-fg: #fff;
+    --hairline-color: #2a2a2a;
+    --border-color: #666;
+    --error-fg: #ff3b3b;
+    --darkened-bg: #1a1a1a;
+    --selected-bg: #2a2a2a;
+    --selected-row: #2a2a2a;
+    --button-bg: #333;
+    --button-hover-bg: #555;
+    --close-button-bg: #333;
+    --close-button-hover-bg: #555;
+    --delete-button-bg: #333;
+    --object-tools-bg: #333;
+}
+
+/* ===== Flat: no rounded corners, shadows or gradients ===== */
+#container,
+#container *,
+#container *::before,
+#container *::after {
+    border-radius: 0 !important;
+    box-shadow: none !important;
+}
+
+/* ===== Typography: bold, tight, flush left ===== */
+body {
+    line-height: 1.5;
+    text-align: left;
+}
+
+#content h1 {
+    font-size: 2rem;
+    font-weight: 700;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    margin: 0 0 24px;
+}
+
+#content h2 {
+    letter-spacing: -0.01em;
+}
+
+#site-name {
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+
+#site-name a:link,
+#site-name a:visited {
+    color: var(--header-branding-color);
+}
+
+/* Section captions: black type on a 1px rule instead of a coloured bar.
+   #container raises specificity over forms.css, which loads after this file. */
+#container .module h2,
+#container .module caption,
+#container .inline-group h2,
+#container fieldset .fieldset-heading,
+#container fieldset .inline-heading,
+#container :not(.inline-related) .collapse summary {
+    background: none;
+    color: var(--body-loud-color);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    border: none;
+    border-bottom: 1px solid var(--body-loud-color);
+}
+
+/* A heading inside a collapsible summary: the summary carries the rule */
+#container .collapse summary .fieldset-heading,
+#container .collapse summary .inline-heading {
+    padding: 0;
+    border: none;
+}
+
+#container .module caption a.section:link,
+#container .module caption a.section:visited {
+    color: var(--body-loud-color);
+}
+
+/* ===== Rules and spacing ===== */
+#header {
+    border-bottom: 1px solid var(--hairline-color);
+}
+
+div.breadcrumbs {
+    border-bottom: 1px solid var(--hairline-color);
+}
+
+/* Links in content are black and underlined (colour alone isn't a cue) */
+#content a:link,
+#content a:visited {
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 0.2em;
+}
+
+#content thead a:link,
+#content thead a:visited,
+#content a.button,
+#content .object-tools a,
+#content .submit-row a,
+#content .paginator a,
+#changelist-filter a:link,
+#changelist-filter a:visited {
+    text-decoration: none;
+}
+
+/* ===== Keyboard focus: always visible, in the accent ===== */
+:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+input:focus,
+textarea:focus,
+select:focus,
+.vTextField:focus {
+    border-color: var(--body-loud-color);
+}
+
+/* ===== Functional rules kept from the previous stylesheet ===== */
+
+/* Truncate long message previews in list views */
+.field-text_preview .message-preview {
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: block;
+}
+
+/* Keep long cell content from blowing out the changelist table */
+#result_list td,
+#changelist table td {
+    max-width: 300px;
+    overflow-wrap: break-word;
+}
+
+/* Bounded avatar thumbnails */
+.field-avatar_preview img,
+.field-avatar_preview_field img,
+.help img,
+.avatar-preview,
+.avatar-detail,
+.current-avatar {
+    width: 40px;
+    height: 40px;
+    object-fit: cover;
+    border: 1px solid var(--border-color);
+    display: inline-block;
+    vertical-align: middle;
+    margin: 2px;
+}
+
+.help img,
+.current-avatar {
+    width: 60px;
+    height: 60px;
+}
+
+.field-avatar_preview_field div img,
+.avatar-detail {
+    width: 80px;
+    height: 80px;
+}
+
+.field-avatar_preview,
+.field-avatar_preview_field {
+    text-align: center;
+    vertical-align: middle;
+}
+
+.avatar-detail-section,
+.current-avatar-section {
+    margin: 8px 0;
+    padding: 8px 0;
+    border-top: 1px solid var(--hairline-color);
+}
+
+.no-avatar {
+    color: var(--body-quiet-color);
+    font-style: italic;
+}
+
+@media (max-width: 768px) {
+    .field-avatar_preview img,
+    .avatar-preview {
+        width: 30px;
+        height: 30px;
+    }
+
+    .field-avatar_preview_field div img,
+    .avatar-detail {
+        width: 50px;
+        height: 50px;
+    }
+
+    .help img,
+    .current-avatar {
+        width: 40px;
+        height: 40px;
+    }
+}

@@ -26,25 +26,26 @@
 # elasticbeanstalk.tf so I can reference it in the app instances rule below.
 # -----------------------------------------------------------------------------
 
+# AWS's list of CloudFront's origin-facing addresses (same name in every region).
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
 resource "aws_security_group" "load_balancer" {
   name        = "${local.name_prefix}-load-balancer"
-  description = "I allow public HTTP and HTTPS traffic into the Elastic Beanstalk load balancer. The ALB is the only entry point to the application from the internet."
+  description = "I allow only CloudFront into the Elastic Beanstalk load balancer. CloudFront is the only entry point to the application from the internet."
   vpc_id      = aws_vpc.main.id
 
+  # Only CloudFront, so nobody can skip it and forge the client IP the access
+  # log records (api/chatbot/access_log.py). Port 80 only: CloudFront reaches
+  # this origin http-only (cloudfront.tf) and the ALB has no HTTPS listener.
+  # The prefix list counts as 55 of a security group's 60 rules, so one rule.
   ingress {
-    description = "HTTP from anywhere - redirected to HTTPS by the app"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "HTTPS from anywhere"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    description     = "HTTP from CloudFront only"
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
   egress {

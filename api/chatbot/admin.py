@@ -181,21 +181,16 @@ class BotAdminForm(forms.ModelForm):
 class BaseAdmin(admin.ModelAdmin):
     """Base admin class with common styling and functionality"""
 
+    def get_list_display(self, request):
+        """Add custom styling to list display"""
+        list_display = super().get_list_display(request)
+        return list_display
+
 
 class HistoryAdmin(SimpleHistoryAdmin, BaseAdmin):
     """For models with HistoricalRecords: the History button shows field-level
     diffs. Only those models may use it — on any other model SimpleHistoryAdmin's
     history page fails, so they keep BaseAdmin and Django's own action log."""
-
-    class Media:
-        css = {
-            "all": ("admin/css/custom_admin.css",),
-        }
-
-    def get_list_display(self, request):
-        """Add custom styling to list display"""
-        list_display = super().get_list_display(request)
-        return list_display
 
 
 class ConversationResource(resources.ModelResource):
