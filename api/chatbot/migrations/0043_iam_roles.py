@@ -5,31 +5,34 @@ from django.db import migrations
 
 # Site-wide roles, frozen here rather than imported from app code so that
 # replaying this migration always produces the same groups. To change a role,
-# add a new migration. Superusers keep everything, including the two things no
-# role gets: managing accounts and survey ingest tokens.
-_RESEARCHER = {
-    f"view_{model}"
-    for model in (
-        "conversation",
-        "utterance",
-        "keystroke",
-        "surveyresponse",
-        "bot",
-        "persona",
-    )
-}
-_EDITED_BY_BOT_EDITOR = ("bot", "persona", "avatar", "moderationsettings")
+# add a new migration.
+#
+# Least privilege: bot configuration and participant data are separate roles,
+# and a person who needs both is put in both groups. Superusers keep what no
+# role gets: accounts, survey ingest tokens and deletes.
+_CONFIG = ("bot", "persona", "moderationsettings")
+# Avatars count as participant data: they are generated from participants'
+# faces. A bot's default avatar is set through the Bot admin form, which needs
+# only change_bot.
+_PARTICIPANT_DATA = (
+    "conversation",
+    "utterance",
+    "keystroke",
+    "surveyresponse",
+    "avatar",
+)
 
 ROLE_PERMISSIONS = {
-    "Researcher": _RESEARCHER,
-    # view_ is included alongside change_ so the bots/avatar APIs, which check
-    # view for GET, behave the same as the admin (where change implies view).
-    "Bot editor": _RESEARCHER
-    | {
+    # view_ is included alongside change_ so the bots API, which checks view
+    # for GET, behaves the same as the admin (where change implies view).
+    "Config editor": {
         f"{action}_{model}"
         for action in ("view", "add", "change")
-        for model in _EDITED_BY_BOT_EDITOR
+        for model in _CONFIG
     },
+    # View is also export (IMPORT_EXPORT_EXPORT_PERMISSION_CODE). Config is
+    # viewable so data can be read in the context of the bot that produced it.
+    "Data viewer": {f"view_{model}" for model in _PARTICIPANT_DATA + _CONFIG},
 }
 
 
