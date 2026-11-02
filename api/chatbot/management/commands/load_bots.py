@@ -23,11 +23,18 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.WARNING("No bots found in config.json."))
                 return
 
+            # Runs on every container start (entrypoint.sh), so only seed bots
+            # that are missing: never overwrite what a researcher edited.
             for bot in bots:
-                Bot.objects.update_or_create(
+                Bot.objects.get_or_create(
                     name=bot["name"],
                     defaults={
                         "prompt": bot["prompt"],
+                        "ai_model": Model.objects.filter(
+                            provider__name=bot.get("model_type"),
+                            model_id=bot.get("model_id"),
+                        ).first()
+                        or Bot.get_default_model(),
                     },
                 )
             self.stdout.write(
