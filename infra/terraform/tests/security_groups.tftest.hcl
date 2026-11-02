@@ -14,6 +14,11 @@ mock_provider "aws" {
   }
 }
 
+# main.tf also declares an aliased aws provider for us-east-1 (CloudFront).
+mock_provider "aws" {
+  alias = "us_east_1"
+}
+
 mock_provider "random" {}
 
 variables {
