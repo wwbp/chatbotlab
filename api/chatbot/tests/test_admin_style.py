@@ -35,3 +35,11 @@ def test_admin_pages_load_stylesheet_once(admin_client, url_name):
 
     assert response.status_code == 200
     assert response.content.decode().count(HREF) == 1
+
+
+@pytest.mark.django_db
+def test_admin_is_branded_chatbotlab(client):
+    html = client.get(reverse("admin:login")).content.decode()
+
+    assert "ChatbotLab" in html
+    assert "Django administration" not in html
