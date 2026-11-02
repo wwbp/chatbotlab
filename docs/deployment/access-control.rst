@@ -113,3 +113,59 @@ in the admin still shows up in that bot's history as a save by you.
 
 Edits made before edit history was switched on have no history. Only changes
 from then on are recorded.
+
+Access log
+----------
+
+Django's admin history only records when something is added, changed, or
+deleted. It cannot tell you who *looked at* or *downloaded* participant data.
+The access log fills that gap: every action a signed-in user takes in the admin
+(``/api/admin/``) or the staff-only API leaves one row in the
+``chatbot_accesslog`` table.
+
+**What is recorded**
+
+- Every admin page a signed-in user opens (``view``), and every form they
+  submit (``change``) — including saves and deletes.
+- Every export from the admin's **Export** button (``export``). Opening the
+  export form is a ``view``; the ``export`` row is written when the file is
+  actually downloaded.
+- Requests to the staff-only API used by the bot editor: ``/api/bots/``,
+  ``/api/avatar/`` and ``/api/avatar-upload/``.
+- Every sign-in (``login``), sign-out (``logout``), and failed sign-in
+  (``login_failed``). A failed sign-in records the username that was typed.
+
+Each row has the user (and a copy of their username, so the row survives the
+account being deleted), the time, the action, the HTTP method, the page path
+and query string (so a search for a participant ID is visible), the response
+status, and the client IP address.
+
+**What is deliberately not recorded**
+
+- Request or response bodies, passwords, and tokens. A failed sign-in stores
+  the attempted username only.
+- Participant traffic: chat messages, keystrokes, survey answers, voice, and
+  the public avatar image the chat page loads. These are not staff activity and
+  would bury the log. Researchers testing a bot while signed in are not logged
+  either, for the same reason.
+- Anything done outside the web app, such as a direct database connection or
+  ``manage.py shell``.
+
+**How to review it**
+
+Sign in as a superuser and open **Access logs** in the admin. Filter by user,
+action, or date, or search by username or path — for example, search
+``conversation/export`` to see every conversation export. The page is visible
+to superusers only, and nobody — superusers included — can edit or delete a
+row from the admin.
+
+The IP address is the one CloudFront saw, read from ``X-Forwarded-For`` from
+the right so a value the client invents is ignored. A request sent straight to
+the load balancer, bypassing CloudFront, could still forge it; treat the IP as
+a strong hint, not proof.
+
+**Retention**
+
+Rows are never pruned automatically yet, so the table grows with admin use. If
+it needs trimming, decide on a retention period with the study's IRB
+requirements in mind before deleting anything.

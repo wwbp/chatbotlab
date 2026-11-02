@@ -16,6 +16,7 @@ from simple_history.admin import SimpleHistoryAdmin
 
 from .models import (
     MODERATION_CATEGORIES,
+    AccessLog,
     Avatar,
     Bot,
     Conversation,
@@ -1554,3 +1555,40 @@ class ModerationSettingsAdmin(HistoryAdmin):
         if not ModerationSettings.objects.exists():
             ModerationSettings.objects.create(enabled=True)
         return super().changelist_view(request, extra_context)
+
+
+@admin.register(AccessLog)
+class AccessLogAdmin(BaseAdmin):
+    """
+    Who viewed, changed, exported, or signed in to the admin (see
+    chatbot/access_log.py). Superusers only, and read-only for everyone: an
+    audit trail its subjects could edit would prove nothing.
+    """
+
+    list_display = (
+        "timestamp",
+        "username",
+        "action",
+        "method",
+        "path",
+        "status_code",
+        "ip",
+    )
+    list_filter = ("action", "user", "timestamp")
+    search_fields = ("username", "path")
+    list_per_page = 50
+
+    def has_module_permission(self, request):
+        return request.user.is_superuser
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.is_superuser
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
