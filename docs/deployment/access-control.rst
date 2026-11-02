@@ -20,10 +20,10 @@ site: a role grants the same access to every bot and every study.
      - View conversations, utterances, keystrokes, survey responses, bots and
        personas. Export conversations, utterances and bots (the models with an
        *Export* button).
-     - Add, change or delete anything. Edit bots in the bot management page.
+     - Add, change or delete anything.
    * - **Bot editor**
      - Everything a Researcher can, plus add and change bots, personas, avatars
-       and moderation settings — in the admin and in the bot management page.
+       and moderation settings — in the admin.
      - Delete anything, including bots and avatars.
    * - **Superuser**
      - Everything, including managing accounts and survey ingest tokens.
