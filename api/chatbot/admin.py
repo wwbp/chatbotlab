@@ -177,12 +177,14 @@ class BotAdminForm(forms.ModelForm):
             self.fields["remove_avatar"].widget = forms.HiddenInput()
 
 
-class BaseAdmin(SimpleHistoryAdmin):
-    """Base admin class with common styling and functionality.
+class BaseAdmin(admin.ModelAdmin):
+    """Base admin class with common styling and functionality"""
 
-    SimpleHistoryAdmin adds the "History" button with field-level diffs. On a
-    model without HistoricalRecords it falls back to Django's own action log.
-    """
+
+class HistoryAdmin(SimpleHistoryAdmin, BaseAdmin):
+    """For models with HistoricalRecords: the History button shows field-level
+    diffs. Only those models may use it — on any other model SimpleHistoryAdmin's
+    history page fails, so they keep BaseAdmin and Django's own action log."""
 
     class Media:
         css = {
@@ -220,7 +222,7 @@ class UtteranceResource(resources.ModelResource):
 
 
 @admin.register(Persona)
-class PersonaAdmin(BaseAdmin):
+class PersonaAdmin(HistoryAdmin):
     list_display = (
         "name",
         "instructions_preview",
@@ -592,7 +594,7 @@ class UtteranceAdmin(ExportMixin, BaseAdmin):
 
 
 @admin.register(Bot)
-class BotAdmin(ExportMixin, BaseAdmin):
+class BotAdmin(ExportMixin, HistoryAdmin):
     resource_class = BotResource
     form = BotAdminForm
 
@@ -1449,7 +1451,7 @@ class KeystrokeAdmin(BaseAdmin):
 
 
 @admin.register(SurveyIngestToken)
-class SurveyIngestTokenAdmin(BaseAdmin):
+class SurveyIngestTokenAdmin(HistoryAdmin):
     """
     Issue a token per study, so starting a study needs no redeploy.
 
@@ -1536,7 +1538,7 @@ class SurveyResponseAdmin(BaseAdmin):
 
 
 @admin.register(ModerationSettings)
-class ModerationSettingsAdmin(BaseAdmin):
+class ModerationSettingsAdmin(HistoryAdmin):
     list_display = ("enabled", "updated_at")
     list_display_links = None
     list_editable = ("enabled",)

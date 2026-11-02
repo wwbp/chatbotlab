@@ -140,3 +140,13 @@ def test_history_page_renders(staff_client, make_bot):
     bot = make_bot()
     r = client.get(f"/api/admin/chatbot/bot/{bot.pk}/history/")
     assert r.status_code == 200
+
+
+@pytest.mark.django_db
+def test_history_page_renders_for_untracked_model(staff_client, make_conversation):
+    # Untracked models keep Django's own History page (admin LogEntry); a
+    # SimpleHistoryAdmin on them 500s because they have no history manager.
+    client, _ = staff_client
+    conv = make_conversation()
+    r = client.get(f"/api/admin/chatbot/conversation/{conv.pk}/history/")
+    assert r.status_code == 200
