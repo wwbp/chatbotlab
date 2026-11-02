@@ -24,8 +24,8 @@ How it works
 
 Each conversation gets one avatar. A second upload for the same
 ``conversation_id`` is refused, because every avatar is a paid image
-generation. Participants do not log in. Only ``user`` avatar bots accept
-uploads from them.
+generation. Each network (IP address) can create at most 30 avatars an hour.
+Participants do not log in. Only ``user`` avatar bots accept uploads from them.
 
 Server settings
 ---------------

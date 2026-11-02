@@ -161,3 +161,34 @@ def test_chat_page_gets_the_participants_avatar(make_bot):
         r = Client().get(f"/api/avatar/{bot.name}/", {"conversation_id": "R_abc"})
     assert r.status_code == 200
     assert r.json()["image_url"] == "https://s3/a"
+
+
+# ── Rate limit: each avatar is a paid generation ─────────────────────────────
+
+
+@pytest.fixture
+def fresh_cache(settings):
+    settings.CACHES = {
+        "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}
+    }
+    from django.core.cache import cache
+
+    cache.clear()
+    yield
+    cache.clear()
+
+
+@pytest.mark.django_db
+def test_avatar_creation_is_rate_limited_per_ip(make_bot, s3, fresh_cache):
+    from chatbot.services.avatar import AVATARS_PER_IP_PER_HOUR
+
+    bot = make_bot(avatar_type="user")
+    lab = Client(REMOTE_ADDR="203.0.113.7")
+    with _generated() as gen:
+        for i in range(AVATARS_PER_IP_PER_HOUR):
+            assert _create(lab, bot.name, conversation_id=f"R_{i}").status_code == 200
+        r = _create(lab, bot.name, conversation_id="R_over")
+        assert r.status_code == 429
+        assert gen.call_count == AVATARS_PER_IP_PER_HOUR  # no paid call when limited
+        other = Client(REMOTE_ADDR="198.51.100.9")
+        assert _create(other, bot.name, conversation_id="R_other").status_code == 200

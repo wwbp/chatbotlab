@@ -9,6 +9,7 @@ from datetime import datetime
 import openai
 import requests
 from django.conf import settings
+from django.core.cache import cache
 from django.core.files.base import ContentFile
 from django.http import JsonResponse
 from django.utils.decorators import method_decorator
@@ -16,6 +17,7 @@ from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 from PIL import Image
 
+from ..access_log import client_ip
 from ..models import Avatar, Bot
 from ..utils.auth import require_perm
 from .s3_helper import delete, download, get_presigned_url, get_random_image, upload
@@ -143,7 +145,27 @@ def _participant_bot(request):
     return bot, data
 
 
-def create_participant_avatar(bot, data):
+# Generous on purpose: a lab session can put many participants behind one IP.
+AVATARS_PER_IP_PER_HOUR = 30
+
+
+def _within_rate_limit(ip):
+    """Fixed hourly window per client IP, in the shared cache.
+
+    Fails open (allows) if the cache is unreachable: a Redis blip must not stop
+    a running study. ponytail: fixed window, so a burst can straddle two
+    windows; switch to a sliding window if that is ever abused.
+    """
+    key = f"avatar-rate:{ip}"
+    if cache.add(key, 1, timeout=3600):
+        return True
+    try:
+        return cache.incr(key) <= AVATARS_PER_IP_PER_HOUR
+    except ValueError:  # key expired between add() and incr()
+        return True
+
+
+def create_participant_avatar(bot, data, ip=None):
     """Generate a participant's avatar from the photo they put in uploads/.
 
     One per conversation: each one is a paid image generation, and the chat page
@@ -161,6 +183,11 @@ def create_participant_avatar(bot, data):
     if Avatar.objects.filter(bot=bot, bot_conversation=conversation_id).exists():
         return JsonResponse(
             {"error": "This conversation already has an avatar."}, status=409
+        )
+    if not _within_rate_limit(ip):
+        return JsonResponse(
+            {"error": "Too many avatars from this network. Try again later."},
+            status=429,
         )
     image = generate_avatar(
         download("uploads", image_path),
@@ -196,7 +223,7 @@ class AvatarAPIView(View):
         # Participants (/avatar-upload, not logged in) for "user" avatar bots.
         bot, data = _participant_bot(request)
         if bot:
-            return create_participant_avatar(bot, data)
+            return create_participant_avatar(bot, data, client_ip(request))
         forbidden = require_perm(request, "chatbot.add_avatar")
         if forbidden:
             return forbidden
