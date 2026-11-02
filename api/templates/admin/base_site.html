@@ -1,0 +1,4 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+{# Recursive extends keeps Django's branding; this only adds the admin stylesheet to every admin page. #}
+{% block extrastyle %}{{ block.super }}<link rel="stylesheet" href="{% static "admin/css/custom_admin.css" %}">{% endblock %}
