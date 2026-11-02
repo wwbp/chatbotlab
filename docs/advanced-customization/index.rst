@@ -22,4 +22,5 @@ Explore the following guides to configure each feature in detail:
    :maxdepth: 1
 
    moderation
+   avatars
 
