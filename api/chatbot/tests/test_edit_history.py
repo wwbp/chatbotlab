@@ -72,7 +72,9 @@ def test_admin_bot_edit_records_user_and_changed_field(staff_client, make_bot):
     assert latest.prompt == "A revised prompt."
 
 
-@pytest.mark.django_db
+# transaction=True: the async view writes from another thread, outside the test
+# transaction, so only a flush cleans up (as in test_mock_llm.py).
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_participant_chat_creates_no_history(mock_llm, make_conversation):
     conv = await sync_to_async(make_conversation)()
