@@ -12,6 +12,7 @@ from django.utils.safestring import mark_safe
 from import_export import resources
 from import_export.admin import ExportMixin
 from PIL import Image
+from simple_history.admin import SimpleHistoryAdmin
 
 from .models import (
     MODERATION_CATEGORIES,
@@ -176,8 +177,12 @@ class BotAdminForm(forms.ModelForm):
             self.fields["remove_avatar"].widget = forms.HiddenInput()
 
 
-class BaseAdmin(admin.ModelAdmin):
-    """Base admin class with common styling and functionality"""
+class BaseAdmin(SimpleHistoryAdmin):
+    """Base admin class with common styling and functionality.
+
+    SimpleHistoryAdmin adds the "History" button with field-level diffs. On a
+    model without HistoricalRecords it falls back to Django's own action log.
+    """
 
     class Media:
         css = {

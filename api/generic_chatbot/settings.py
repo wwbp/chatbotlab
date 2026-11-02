@@ -114,6 +114,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "import_export",
     "storages",
+    "simple_history",
 ]
 
 # Without this, import_export lets any staff user export any model with an
@@ -132,6 +133,9 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # Records request.user as history_user on edits. Must follow
+    # AuthenticationMiddleware.
+    "simple_history.middleware.HistoryRequestMiddleware",
 ]
 
 CORS_ALLOWED_ORIGINS = [
