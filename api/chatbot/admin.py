@@ -179,11 +179,6 @@ class BotAdminForm(forms.ModelForm):
 class BaseAdmin(admin.ModelAdmin):
     """Base admin class with common styling and functionality"""
 
-    class Media:
-        css = {
-            "all": ("admin/css/custom_admin.css",),
-        }
-
     def get_list_display(self, request):
         """Add custom styling to list display"""
         list_display = super().get_list_display(request)
