@@ -64,6 +64,23 @@ To change someone's role, edit their user and change their groups. To remove
 access, untick **Active** rather than deleting the user, so their name stays
 attached to their past actions.
 
+Switching from the shared login
+-------------------------------
+
+Do this once, after these changes are live on production:
+
+1. Sign in with the shared ``admin`` login and add everyone as described in
+   *Adding a person*, using their PennKey as the username so single sign-on can
+   match them later. Give each person a temporary password and send it to them
+   directly.
+2. Ask each person to sign in and change their password. Their sign-in shows
+   up as a ``login`` row in the access log, so you can see who has done it.
+3. Change the ``admin`` password (**Change password**, top right). The new one
+   is for emergencies only: keep it with the lab's other secrets and do not
+   share it.
+4. Check the access log for ``login_failed`` rows on ``admin`` in the following
+   days — they show who is still using the old password.
+
 Edit history
 ------------
 
@@ -166,6 +183,9 @@ a strong hint, not proof.
 
 **Retention**
 
-Rows are never pruned automatically yet, so the table grows with admin use. If
-it needs trimming, decide on a retention period with the study's IRB
-requirements in mind before deleting anything.
+Rows are never pruned automatically, so the table grows with admin use. Agree a
+retention period with the study's IRB first, then delete older rows by hand
+(``--dry-run`` shows the count without deleting)::
+
+    python manage.py prune_access_log --older-than-days 365 --dry-run
+    python manage.py prune_access_log --older-than-days 365
