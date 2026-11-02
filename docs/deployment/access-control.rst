@@ -87,8 +87,7 @@ need to.
    * - Admin section
      - Notes
    * - Bots
-     - Every field. Which personas a bot uses is not tracked, so a persona
-       being added to or removed from a bot will not show up here.
+     - Every field, including which personas the bot uses.
    * - Personas
      - Every field.
    * - Global Moderation Settings

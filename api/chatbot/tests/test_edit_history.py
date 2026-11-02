@@ -150,3 +150,13 @@ def test_history_page_renders_for_untracked_model(staff_client, make_conversatio
     conv = make_conversation()
     r = client.get(f"/api/admin/chatbot/conversation/{conv.pk}/history/")
     assert r.status_code == 200
+
+
+@pytest.mark.django_db
+def test_bot_persona_changes_are_in_history(make_bot):
+    # Which personas a bot embodies shapes its replies, so it is study config too.
+    bot = make_bot()
+    persona = Persona.objects.create(name="Warm", instructions="Be warm.")
+    bot.personas.add(persona)
+    latest = bot.history.latest()
+    assert list(latest.personas.values_list("persona_id", flat=True)) == [persona.pk]

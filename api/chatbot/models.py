@@ -688,7 +688,7 @@ class Bot(models.Model):
         help_text="Select personas that this bot should embody",
     )
     # See the edit-history note at the top of this module.
-    history = HistoricalRecords()
+    history = HistoricalRecords(m2m_fields=["personas"])
 
     def __str__(self):
         return self.name
