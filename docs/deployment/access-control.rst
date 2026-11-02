@@ -70,9 +70,8 @@ Switching from the shared login
 Do this once, after these changes are live on production:
 
 1. Sign in with the shared ``admin`` login and add everyone as described in
-   *Adding a person*, using their PennKey as the username so single sign-on can
-   match them later. Give each person a temporary password and send it to them
-   directly.
+   *Adding a person*. Give each person a temporary password and send it to
+   them directly.
 2. Ask each person to sign in and change their password. Their sign-in shows
    up as a ``login`` row in the access log, so you can see who has done it.
 3. Change the ``admin`` password (**Change password**, top right). The new one
