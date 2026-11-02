@@ -77,9 +77,10 @@ def client_ip(request):
     are private (VPC 10.x, Docker 172.x) and skipped, the first public address
     is the CloudFront edge the ALB saw, and the next is the client.
     """
-    # ponytail: trusts one public hop (CloudFront). The ALB also accepts direct
-    # traffic, so a request that bypasses CloudFront can forge this; restrict
-    # the ALB to CloudFront's prefix list to close that.
+    # ponytail: trusts one public hop (CloudFront). Safe only while the ALB
+    # accepts CloudFront alone (its security group allows just the managed
+    # prefix list com.amazonaws.global.cloudfront.origin-facing, since
+    # 2026-11-02); if it is reopened to the internet, this can be forged.
     forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
     public = []
     for entry in reversed([e.strip() for e in forwarded.split(",") if e.strip()]):

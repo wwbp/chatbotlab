@@ -177,9 +177,11 @@ to superusers only, and nobody — superusers included — can edit or delete a
 row from the admin.
 
 The IP address is the one CloudFront saw, read from ``X-Forwarded-For`` from
-the right so a value the client invents is ignored. A request sent straight to
-the load balancer, bypassing CloudFront, could still forge it; treat the IP as
-a strong hint, not proof.
+the right so a value the client invents is ignored. This relies on the load
+balancer accepting traffic from CloudFront only: on dev.bot.wwbp.org and
+bot.wwbp.org its security group allows just AWS's CloudFront prefix list
+(``com.amazonaws.global.cloudfront.origin-facing``) on port 443. If that rule
+is ever reopened to ``0.0.0.0/0``, the IP can be forged.
 
 **Retention**
 
