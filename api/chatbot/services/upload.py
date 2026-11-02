@@ -8,21 +8,17 @@ from django.conf import settings
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
+from ..utils.auth import require_perm
+
 logger = logging.getLogger(__name__)
 
 _ALLOWED_IMAGE_CONTENT_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 _SAFE_FILENAME_RE = re.compile(r"^[\w\-. ]+$")
 
 
-def _require_staff(request):
-    if not request.user.is_authenticated or not request.user.is_staff:
-        return JsonResponse({"error": "Forbidden."}, status=403)
-    return None
-
-
 @csrf_exempt
 def get_presigned_url(request):
-    forbidden = _require_staff(request)
+    forbidden = require_perm(request, "chatbot.add_avatar")
     if forbidden:
         return forbidden
 
