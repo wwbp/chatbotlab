@@ -20,13 +20,20 @@ from django.contrib.auth.models import User
 from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ImproperlyConfigured
 from django.core.mail import EmailMessage
+from django.http import HttpResponseRedirect
 from django.template import loader
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 
-from .access_log import Action, _write
+from .access_log import Action, _write, client_ip
+from .utils.rate_limit import within_rate_limit
 
 logger = logging.getLogger(__name__)
+
+# Per hour. Low per address (a person needs one or two); higher per IP because
+# a lab can share one address.
+RESETS_PER_EMAIL_PER_HOUR = 3
+RESETS_PER_IP_PER_HOUR = 10
 
 INVITE_TEMPLATES = (
     "registration/staff_invite_subject.txt",
@@ -117,13 +124,18 @@ class StaffPasswordResetView(auth_views.PasswordResetView):
     form_class = StaffPasswordResetForm
 
     def form_valid(self, form):
-        # TODO(rate-limit): if not within_rate_limit(...): return the done page
-        _write(
-            self.request,
-            None,
-            Action.PASSWORD_RESET_REQUESTED,
-            username=form.cleaned_data["email"],
+        email = form.cleaned_data["email"]
+        _write(self.request, None, Action.PASSWORD_RESET_REQUESTED, username=email)
+        # Count both, always. Over the limit: send nothing but show the same
+        # page, so the limit reveals nothing about which addresses exist.
+        email_ok = within_rate_limit(
+            f"reset-email:{email.lower()}", RESETS_PER_EMAIL_PER_HOUR, 3600
         )
+        ip_ok = within_rate_limit(
+            f"reset-ip:{client_ip(self.request)}", RESETS_PER_IP_PER_HOUR, 3600
+        )
+        if not (email_ok and ip_ok):
+            return HttpResponseRedirect(self.get_success_url())
         return super().form_valid(form)
 
 

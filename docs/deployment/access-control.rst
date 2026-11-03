@@ -157,6 +157,10 @@ The limits count all attempts, not only failed attempts. At the limit, the page
 refuses more attempts from that username or IP address. Wait 15 minutes. Then
 try again.
 
+The "Forgotten your login credentials?" page sends a maximum of 3 emails to one
+address, and 10 emails from one IP address, in each hour. At the limit, the page
+shows the usual message but sends no email.
+
 Passwords must have a minimum of 12 characters. A session stops after 12 hours.
 Then you must sign in again.
 

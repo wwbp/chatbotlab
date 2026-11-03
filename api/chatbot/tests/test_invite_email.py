@@ -417,6 +417,51 @@ def test_unknown_email_gets_same_done_page_and_no_mail():
     assert len(mail.outbox) == 0
 
 
+@pytest.fixture
+def fresh_cache(settings):
+    settings.CACHES = {
+        "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}
+    }
+    from django.core.cache import cache
+
+    cache.clear()
+    yield
+    cache.clear()
+
+
+@pytest.mark.django_db
+def test_reset_is_rate_limited_per_email_silently(fresh_cache):
+    from chatbot.staff_auth import RESETS_PER_EMAIL_PER_HOUR
+
+    staff_user(email="x@upenn.edu")
+    for _ in range(RESETS_PER_EMAIL_PER_HOUR + 2):
+        response = Client().post(RESET_URL, {"email": "X@upenn.edu"})
+        # Same page either way, so the limit reveals nothing.
+        assert response.url == "/api/auth/password_reset/done/"
+    assert len(mail.outbox) == RESETS_PER_EMAIL_PER_HOUR
+    # Still recorded, so an attack shows up in the access log.
+    assert (
+        AccessLog.objects.filter(
+            action=AccessLog.Action.PASSWORD_RESET_REQUESTED
+        ).count()
+        == RESETS_PER_EMAIL_PER_HOUR + 2
+    )
+
+
+@pytest.mark.django_db
+def test_reset_is_rate_limited_per_ip(fresh_cache):
+    from chatbot.staff_auth import RESETS_PER_IP_PER_HOUR
+
+    for i in range(RESETS_PER_IP_PER_HOUR + 1):
+        staff_user(email=f"u{i}@upenn.edu", username=f"u{i}@upenn.edu")
+    lab = Client(REMOTE_ADDR="203.0.113.7")
+    for i in range(RESETS_PER_IP_PER_HOUR + 1):
+        lab.post(RESET_URL, {"email": f"u{i}@upenn.edu"})
+    assert len(mail.outbox) == RESETS_PER_IP_PER_HOUR
+    Client(REMOTE_ADDR="198.51.100.9").post(RESET_URL, {"email": "u0@upenn.edu"})
+    assert len(mail.outbox) == RESETS_PER_IP_PER_HOUR + 1
+
+
 # ── Access log ────────────────────────────────────────────────────────────────
 
 
