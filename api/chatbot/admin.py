@@ -229,6 +229,21 @@ class BaseAdmin(admin.ModelAdmin):
         return list_display
 
 
+class ReadOnlyDataAdmin(BaseAdmin):
+    """For participant data: view and delete only, for everyone.
+
+    These tables have no edit history, so an admin edit would change research
+    data with no trace. Delete stays (a participant withdraws). Corrections
+    need a recorded management command, not the admin.
+    """
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
 class HistoryAdmin(SimpleHistoryAdmin, BaseAdmin):
     """For models with HistoricalRecords: the History button shows field-level
     diffs. Only those models may use it — on any other model SimpleHistoryAdmin's
@@ -318,7 +333,7 @@ class PersonaAdmin(HistoryAdmin):
 
 
 @admin.register(Conversation)
-class ConversationAdmin(ExportMixin, BaseAdmin):
+class ConversationAdmin(ExportMixin, ReadOnlyDataAdmin):
     resource_class = ConversationResource
     list_display = (
         "conversation_id",
@@ -458,7 +473,7 @@ class ConversationAdmin(ExportMixin, BaseAdmin):
 
 
 @admin.register(Utterance)
-class UtteranceAdmin(ExportMixin, BaseAdmin):
+class UtteranceAdmin(ExportMixin, ReadOnlyDataAdmin):
     resource_class = UtteranceResource
     list_display = (
         "conversation_link",
@@ -1446,7 +1461,7 @@ class AvatarAdmin(BaseAdmin):
 
 
 @admin.register(Keystroke)
-class KeystrokeAdmin(BaseAdmin):
+class KeystrokeAdmin(ReadOnlyDataAdmin):
     list_display = (
         "conversation_id",
         "timestamp",
@@ -1549,7 +1564,7 @@ class SurveyIngestTokenAdmin(HistoryAdmin):
 
 
 @admin.register(SurveyResponse)
-class SurveyResponseAdmin(BaseAdmin):
+class SurveyResponseAdmin(ReadOnlyDataAdmin):
     """
     Answers delivered by the survey tool before the participant reaches a bot.
 
@@ -1570,9 +1585,6 @@ class SurveyResponseAdmin(BaseAdmin):
         return len(obj.answers or [])
 
     answer_count.short_description = "Answers"
-
-    def has_add_permission(self, request):
-        return False
 
 
 @admin.register(ModerationSettings)
