@@ -186,36 +186,3 @@ class TestChatHistoryCapture(TestCase):
         parsed_history = json.loads(test_utterance.chat_history_used)
         assert len(parsed_history) == 0  # Should be 0 messages (no chat history)
         # No messages should be in chat history since new user message is passed separately
-
-    def test_admin_preview_functionality(self):
-        """Test the admin preview functionality for chat history"""
-        from chatbot.admin import UtteranceAdmin
-
-        # Create admin instance
-        admin_instance = UtteranceAdmin(Utterance, None)
-
-        # Create a test utterance with chat history
-        test_history = [
-            {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Hi there!"},
-        ]
-
-        utterance = Utterance.objects.create(
-            conversation=self.conversation,
-            speaker_id="assistant",
-            text="I'm doing well, thanks!",
-            bot_name=self.bot.name,
-            chat_history_used=json.dumps(test_history, indent=2),
-        )
-
-        # Test the preview method
-        preview = admin_instance.chat_history_used_preview(utterance)
-
-        # Should show "2 messages"
-        assert "2 messages" in preview
-
-        # Test with no chat history
-        utterance.chat_history_used = ""
-        utterance.save()
-        preview = admin_instance.chat_history_used_preview(utterance)
-        assert "No chat history" in preview

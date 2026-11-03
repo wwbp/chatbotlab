@@ -22,6 +22,8 @@ from django.utils.safestring import mark_safe
 from django.utils.timezone import localtime
 from import_export import resources
 from import_export.admin import ExportMixin
+from import_export.fields import Field
+from import_export.formats import base_formats
 from PIL import Image
 from simple_history.admin import SimpleHistoryAdmin
 
@@ -256,12 +258,52 @@ class HistoryAdmin(SimpleHistoryAdmin, BaseAdmin):
     history page fails, so they keep BaseAdmin and Django's own action log."""
 
 
+class DataExportMixin(ExportMixin):
+    """Export for participant data, made to open cleanly in Excel.
+
+    Excel only reads a CSV as UTF-8 when the file starts with a byte-order mark;
+    without one, accented letters and emoji in participants' messages turn into
+    mojibake. pandas and R read the BOM fine (encoding="utf-8-sig" in pandas).
+    Only CSV gets it: a BOM breaks some JSON readers.
+    """
+
+    def get_export_data(self, file_format, request, queryset, **kwargs):
+        data = super().get_export_data(file_format, request, queryset, **kwargs)
+        if isinstance(file_format, base_formats.CSV) and isinstance(data, str):
+            data = "\ufeff" + data
+        return data
+
+
+# The export Resources below list their columns explicitly, as an analysis
+# would join on them: the conversation_id the survey tool knows (Qualtrics
+# ResponseID, never the database pk), study and condition. Prompt, history and
+# bot-config fields are left out entirely rather than offered unticked: they
+# are several KB per row, make a CSV that Excel truncates and nobody can scan,
+# and are rarely analysed. They stay on each row's admin view page; a study
+# that needs them in bulk should query the database (docs/data/exporting.rst).
+# "user_group" is exported as "condition", the word researchers use for it.
+
+
 class ConversationResource(resources.ModelResource):
-    """Resource class for exporting Conversation data"""
+    condition = Field(attribute="user_group", column_name="condition")
+    message_count = Field(attribute="message_count", column_name="message_count")
 
     class Meta:
         model = Conversation
-        # Export all fields by default
+        fields = (
+            "conversation_id",
+            "participant_id",
+            "study_name",
+            "condition",
+            "survey_id",
+            "bot_name",
+            "started_time",
+            "message_count",
+        )
+
+    def filter_export(self, queryset, **kwargs):
+        # One COUNT per conversation would be a query per exported row.
+        return queryset.annotate(message_count=Count("utterances"))
 
 
 class BotResource(resources.ModelResource):
@@ -273,11 +315,47 @@ class BotResource(resources.ModelResource):
 
 
 class UtteranceResource(resources.ModelResource):
-    """Resource class for exporting Utterance data"""
+    conversation_id = Field(
+        attribute="conversation__conversation_id", column_name="conversation_id"
+    )
+    study_name = Field(attribute="conversation__study_name", column_name="study_name")
+    condition = Field(attribute="conversation__user_group", column_name="condition")
+    survey_id = Field(attribute="conversation__survey_id", column_name="survey_id")
 
     class Meta:
         model = Utterance
-        # Export all fields by default
+        fields = (
+            "conversation_id",
+            "study_name",
+            "condition",
+            "survey_id",
+            "participant_id",
+            "bot_name",
+            "speaker_id",
+            "text",
+            "created_time",
+            "moderation_category",
+        )
+
+
+class KeystrokeResource(resources.ModelResource):
+    class Meta:
+        model = Keystroke
+        fields = (
+            "conversation_id",
+            "keystroke_count",
+            "total_time_on_page",
+            "total_time_away_from_page",
+            "timestamp",
+        )
+
+
+class SurveyResponseResource(resources.ModelResource):
+    # answers is exported as one JSON text cell, e.g. [{"question": ..., "answer":
+    # ...}]; json.loads (or jsonlite::fromJSON) turns it back into a list.
+    class Meta:
+        model = SurveyResponse
+        fields = ("survey_id", "participant_id", "received_at", "answers")
 
 
 @admin.register(Persona)
@@ -651,24 +729,67 @@ class ConversationAdmin(ExportMixin, ReadOnlyDataAdmin):
     )
 
 
+class FlaggedFilter(admin.SimpleListFilter):
+    """Any moderation category vs none, rather than one category at a time."""
+
+    title = "flagged by moderation"
+    parameter_name = "flagged"
+
+    def lookups(self, request, model_admin):
+        return (("yes", "Flagged"), ("no", "Not flagged"))
+
+    def queryset(self, request, queryset):
+        if self.value() in ("yes", "no"):
+            return queryset.filter(moderation_category__isnull=self.value() == "no")
+        return queryset
+
+
+def choices_filter(field_name, title, choices):
+    """A filter over a fixed set of values.
+
+    Django's default filter for a plain CharField lists its values with a
+    SELECT DISTINCT over the whole table on every page load; on Utterance that
+    is a full scan of the largest table. The values here are known in advance.
+    """
+
+    class Filter(admin.SimpleListFilter):
+        parameter_name = field_name
+
+        def lookups(self, request, model_admin):
+            return choices
+
+        def queryset(self, request, queryset):
+            if self.value():
+                return queryset.filter(**{field_name: self.value()})
+            return queryset
+
+    Filter.title = title
+    return Filter
+
+
+def titled_filter(title):
+    """The default filter for a field, under a researcher-facing title."""
+
+    class Filter(admin.AllValuesFieldListFilter):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.title = title
+
+    return Filter
+
+
 @admin.register(Utterance)
-class UtteranceAdmin(ExportMixin, ReadOnlyDataAdmin):
+class UtteranceAdmin(DataExportMixin, ReadOnlyDataAdmin):
     resource_class = UtteranceResource
     list_display = (
-        "conversation_link",
-        "speaker_id",
-        "bot_name",
-        "participant_id",
-        "text_preview",
-        "instruction_prompt_preview",
-        "chat_history_used_preview",
         "created_time",
-        "is_voice",
+        "speaker_id",
+        "text_preview",
         "moderation_category",
-        "survey_context_state",
+        "conversation_link",
+        "bot_name",
     )
-    list_select_related = ("conversation",)
-    list_display_links = ("conversation_link", "text_preview")
+    list_display_links = ("created_time",)
     search_fields = (
         "speaker_id",
         "bot_name",
@@ -676,19 +797,56 @@ class UtteranceAdmin(ExportMixin, ReadOnlyDataAdmin):
         "text",
         "conversation__conversation_id",
     )
+    # Study and condition live on the conversation; their choices are read from
+    # the (much smaller) Conversation table.
     list_filter = (
-        "is_voice",
-        "speaker_id",
-        "bot_name",
-        "created_time",
-        "moderation_category",
+        FlaggedFilter,
+        ("conversation__study_name", titled_filter("study")),
+        ("conversation__user_group", titled_filter("condition")),
+        choices_filter(
+            "speaker_id", "speaker", (("user", "Participant"), ("assistant", "Bot"))
+        ),
+        choices_filter(
+            "moderation_category",
+            "moderation category",
+            [(c, c) for c in MODERATION_CATEGORIES],
+        ),
     )
+    date_hierarchy = "created_time"
     # The moderation columns record what the moderation path actually did —
     # editing them by hand would corrupt that record.
-    readonly_fields = ("created_time", "moderation_category", "moderation_scores")
-    ordering = ("-created_time",)
-    list_per_page = 50
+    readonly_fields = (
+        "created_time",
+        "moderation_category",
+        "moderation_scores",
+        "survey_context_state",
+    )
+    # Grouped by conversation, oldest first, so a filtered list reads as a set
+    # of transcripts rather than an interleaved feed.
+    ordering = ("conversation", "created_time")
+    list_per_page = 100
 
+    def get_queryset(self, request):
+        # Prompts, history and bot config are KB-sized per row and never shown
+        # in the list or exported; leave them in the database. Deferred fields
+        # still load (one query each) on the single-row view page.
+        return (
+            super()
+            .get_queryset(request)
+            .select_related("conversation")
+            .defer(
+                "instruction_prompt",
+                "chat_history_used",
+                "compiled_prompt",
+                "moderation_scores",
+                "conversation__bot_config",
+                "conversation__survey_meta_data",
+                "conversation__survey_context",
+                "conversation__initial_utterance",
+            )
+        )
+
+    @admin.display(description="Conversation", ordering="conversation")
     def conversation_link(self, obj):
         if obj.conversation:
             url = reverse(
@@ -702,21 +860,17 @@ class UtteranceAdmin(ExportMixin, ReadOnlyDataAdmin):
             )
         return format_html('<span class="no-conversation">{}</span>', "No conversation")
 
-    conversation_link.short_description = "Conversation ID"
-
+    @admin.display(description="Message")
     def text_preview(self, obj):
-        preview = obj.text[:100] + "..." if len(obj.text) > 100 else obj.text
+        # Truncated with no title= tooltip: a tooltip would put every
+        # participant's full message into the list page's HTML.
+        preview = obj.text[:120] + "…" if len(obj.text) > 120 else obj.text
         speaker_class = "user-message" if obj.speaker_id == "user" else "bot-message"
         return format_html(
-            '<span class="message-preview {}" title="{}">{}</span>',
-            speaker_class,
-            obj.text,
-            preview,
+            '<span class="message-preview {}">{}</span>', speaker_class, preview
         )
 
-    text_preview.short_description = "Message"
-
-    @admin.display(description="Survey ctx")
+    @admin.display(description="Survey answers in this prompt")
     def survey_context_state(self, obj):
         """
         Whether this message's prompt actually carried the survey answers.
@@ -744,53 +898,32 @@ class UtteranceAdmin(ExportMixin, ReadOnlyDataAdmin):
             for entry in answers
         )
         if used:
-            return format_html('<span style="color:#2e7d32;">used</span>')
-        return format_html('<span style="color:#b26a00;">linked, not used</span>')
-
-    def instruction_prompt_preview(self, obj):
-        if obj.instruction_prompt and obj.instruction_prompt.strip():
-            preview = (
-                obj.instruction_prompt[:100] + "..."
-                if len(obj.instruction_prompt) > 100
-                else obj.instruction_prompt
-            )
-            return preview
-        return "No instruction prompt"
-
-    instruction_prompt_preview.short_description = "Instruction Prompt"
-
-    def chat_history_used_preview(self, obj):
-        if obj.chat_history_used and obj.chat_history_used.strip():
-            try:
-                # Parse JSON to get message count
-                import json
-
-                history_data = json.loads(obj.chat_history_used)
-                message_count = len(history_data)
-                return f"{message_count} messages"
-            except (json.JSONDecodeError, TypeError):
-                return (
-                    obj.chat_history_used[:50] + "..."
-                    if len(obj.chat_history_used) > 50
-                    else obj.chat_history_used
-                )
-        return "No chat history"
-
-    chat_history_used_preview.short_description = "Chat History Used"
+            return format_html('<span class="st-ok">used</span>')
+        return format_html('<span class="st-warn">linked, not used</span>')
 
     fieldsets = (
         (
-            "Message Content",
+            "Message",
             {
                 "fields": (
                     "conversation",
                     "speaker_id",
                     "text",
+                    "created_time",
+                ),
+            },
+        ),
+        (
+            "Prompt sent to the LLM",
+            {
+                "fields": (
+                    "survey_context_state",
                     "instruction_prompt",
                     "chat_history_used",
                     "compiled_prompt",
                 ),
-                "description": "Message content, instruction prompt (bot prompt + persona), and chat history that was passed to the LLM. For followup messages, the followup instruction prompt is sent as an admin message, not included in the system prompt.",
+                "classes": ("collapse",),
+                "description": "Instruction prompt (bot prompt + persona) and chat history that were passed to the LLM. For followup messages, the followup instruction prompt is sent as an admin message, not included in the system prompt.",
             },
         ),
         (
@@ -813,13 +946,6 @@ class UtteranceAdmin(ExportMixin, ReadOnlyDataAdmin):
                 "fields": ("moderation_category", "moderation_scores"),
                 "classes": ("collapse",),
                 "description": "Set only when this exchange was blocked by moderation. The category appears on both the user message and the canned warning; the full score map is kept on the user message only.",
-            },
-        ),
-        (
-            "Metadata",
-            {
-                "fields": ("created_time",),
-                "classes": ("collapse",),
             },
         ),
     )
@@ -1583,25 +1709,51 @@ class AvatarAdmin(BaseAdmin):
 
 
 @admin.register(Keystroke)
-class KeystrokeAdmin(ReadOnlyDataAdmin):
+class KeystrokeAdmin(DataExportMixin, ReadOnlyDataAdmin):
+    resource_class = KeystrokeResource
     list_display = (
-        "conversation_id",
         "timestamp",
+        "conversation_link",
         "keystroke_count",
         "total_time_on_page",
         "total_time_away_from_page",
         "total_session_time",
     )
-    list_display_links = ("conversation_id",)
-    search_fields = ("conversation_id",)
-    list_filter = ("timestamp",)
+    list_display_links = ("timestamp",)
+    search_fields = ("=conversation_id",)
+    date_hierarchy = "timestamp"
     ordering = ("-timestamp",)
     readonly_fields = ("timestamp",)
     list_per_page = 25
 
+    def get_queryset(self, request):
+        # Keystroke.conversation_id is a plain string, not a ForeignKey
+        # (keystrokes can arrive before the conversation exists), so the
+        # conversation's pk is looked up in the same query for the link.
+        conversation_pk = Conversation.objects.filter(
+            conversation_id=OuterRef("conversation_id")
+        ).values("pk")[:1]
+        return (
+            super()
+            .get_queryset(request)
+            .annotate(conversation_pk=Subquery(conversation_pk))
+        )
+
+    @admin.display(description="Conversation", ordering="conversation_id")
+    def conversation_link(self, obj):
+        if obj.conversation_pk is None:
+            return obj.conversation_id
+        return format_html(
+            '<a href="{}">{}</a>',
+            reverse("admin:chatbot_conversation_change", args=[obj.conversation_pk]),
+            obj.conversation_id,
+        )
+
     def total_session_time(self, obj):
         total = obj.total_time_on_page + obj.total_time_away_from_page
-        return format_html('<span class="session-time">{:.1f}s</span>', total)
+        # format_html escapes its arguments to strings first, so a format spec
+        # like {:.1f} raises; format the number before it goes in.
+        return format_html('<span class="session-time">{}s</span>', f"{total:.1f}")
 
     total_session_time.short_description = "Total Session"
 
@@ -1686,7 +1838,7 @@ class SurveyIngestTokenAdmin(HistoryAdmin):
 
 
 @admin.register(SurveyResponse)
-class SurveyResponseAdmin(ReadOnlyDataAdmin):
+class SurveyResponseAdmin(DataExportMixin, ReadOnlyDataAdmin):
     """
     Answers delivered by the survey tool before the participant reaches a bot.
 
@@ -1695,10 +1847,14 @@ class SurveyResponseAdmin(ReadOnlyDataAdmin):
     snapshotted them (see Conversation.survey_context).
     """
 
+    resource_class = SurveyResponseResource
+    # The answers themselves (often clinical, e.g. PHQ-9) stay off the list;
+    # they are on each row's view page and in the export.
     list_display = ("participant_id", "survey_id", "answer_count", "received_at")
     list_display_links = ("participant_id",)
-    search_fields = ("participant_id", "survey_id")
-    list_filter = ("survey_id", "received_at")
+    search_fields = ("^participant_id", "=survey_id")
+    list_filter = ("survey_id",)
+    date_hierarchy = "received_at"
     ordering = ("-received_at",)
     readonly_fields = ("survey_id", "participant_id", "answers", "received_at")
     list_per_page = 25
