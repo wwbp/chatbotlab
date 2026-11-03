@@ -99,7 +99,7 @@ class Utterance(models.Model):
         null=True,
         blank=True,
     )
-    speaker_id = models.CharField(max_length=255)  # 'participant' or 'bot'
+    speaker_id = models.CharField(max_length=255)  # 'user' or 'assistant'
     bot_name = models.CharField(max_length=255, null=True, blank=True)
     participant_id = models.CharField(max_length=255, null=True, blank=True)
     created_time = models.DateTimeField(auto_now_add=True)  # Timestamp
@@ -427,8 +427,8 @@ class ModerationSettings(models.Model):
     history = HistoricalRecords(excluded_fields=["updated_at"])
 
     class Meta:
-        verbose_name = "Global Moderation Setting"
-        verbose_name_plural = "Global Moderation Settings"
+        # A singleton on/off switch, so singular in the admin list too.
+        verbose_name = verbose_name_plural = "Moderation switch"
 
     def save(self, *args, **kwargs):
         # Enforce singleton pattern

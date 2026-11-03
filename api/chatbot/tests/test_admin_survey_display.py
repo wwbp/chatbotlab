@@ -13,7 +13,7 @@ nothing at all. The columns have to tell those apart.
 Coverage:
   - Conversation list shows how many answers were linked, and flags none
   - Conversation detail renders the answers readably rather than as raw JSON
-  - Utterance list distinguishes used / linked-but-unused / none
+  - Utterance view page distinguishes used / linked-but-unused / none
 """
 
 import html

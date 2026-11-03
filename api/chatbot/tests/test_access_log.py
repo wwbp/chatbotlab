@@ -180,7 +180,7 @@ def test_export_logs_an_export(admin_client, make_conversation):
 
     response = admin_client.post(
         CHANGELIST + "export/",
-        {"format": "0", "resource": "0", "conversationresource_id": "on"},
+        {"format": "0", "resource": "0", "conversationresource_conversation_id": "on"},
     )
 
     assert response.status_code == 200
