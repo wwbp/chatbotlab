@@ -195,7 +195,10 @@ class TestModerationAdminSurface(TestCase):
 
     def test_category_is_listed_and_filterable(self):
         assert "moderation_category" in self.admin.list_display
-        assert "moderation_category" in self.admin.list_filter
+        assert any(
+            getattr(f, "parameter_name", None) == "moderation_category"
+            for f in self.admin.list_filter
+        )
 
     def test_both_fields_appear_on_the_change_form(self):
         fields = {
@@ -210,9 +213,8 @@ class TestModerationAdminSurface(TestCase):
         assert "moderation_category" in self.admin.readonly_fields
         assert "moderation_scores" in self.admin.readonly_fields
 
-    def test_export_resource_includes_moderation_fields(self):
-        """UtteranceResource declares no explicit field list, so CSV export
-        picks new model fields up automatically — assert that stays true."""
+    def test_export_resource_includes_moderation_category(self):
+        """The export lists its columns explicitly; the category is one of them.
+        The score map stays on the view page (it is only on blocked rows)."""
         exported = self.admin.resource_class().get_export_headers()
         assert "moderation_category" in exported
-        assert "moderation_scores" in exported
