@@ -52,6 +52,9 @@ EDGE = "130.176.1.1"  # a CloudFront edge address
         ("GET", "/api/admin/login/", None),
         ("POST", "/api/admin/login/", None),
         ("POST", "/api/admin/logout/", None),
+        # password reset/invite links carry a token: never logged by path
+        ("GET", "/api/auth/reset/MQ/abc-123/", None),
+        ("POST", "/api/auth/password_reset/", None),
         # staff-only API (services/bots.py, avatar.py, upload.py)
         ("GET", "/api/bots/", Action.VIEW),
         ("POST", "/api/bots/", Action.CHANGE),

@@ -878,13 +878,15 @@ class AccessLog(models.Model):
         LOGIN = "login"
         LOGOUT = "logout"
         LOGIN_FAILED = "login_failed"
+        PASSWORD_RESET_REQUESTED = "password_reset_requested"
+        PASSWORD_SET = "password_set"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
     )
     username = models.CharField(max_length=150)
     timestamp = models.DateTimeField(auto_now_add=True, db_index=True)
-    action = models.CharField(max_length=16, choices=Action.choices)
+    action = models.CharField(max_length=32, choices=Action.choices)
     method = models.CharField(max_length=10)
     path = models.CharField(max_length=1024)
     query = models.CharField(max_length=1024, blank=True)

@@ -18,12 +18,41 @@ Including another URLconf
 from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
+from django.contrib.auth import views as auth_views
 from django.urls import include, path
+
+from chatbot.staff_auth import StaffPasswordResetConfirmView, StaffPasswordResetView
 
 admin.site.site_header = admin.site.site_title = "ChatbotLab"
 
+# Password reset and invite links live outside /api/admin/ so the access log,
+# which records admin paths, never stores a token. The admin-styled
+# registration/* templates ship with django.contrib.admin.
+_branding = {"extra_context": {"site_header": "ChatbotLab", "site_title": "ChatbotLab"}}
+
 urlpatterns = [
     path("api/admin/", admin.site.urls),
+    path(
+        "api/auth/password_reset/",
+        StaffPasswordResetView.as_view(**_branding),
+        # This name makes the admin login show "Forgotten your password?".
+        name="admin_password_reset",
+    ),
+    path(
+        "api/auth/password_reset/done/",
+        auth_views.PasswordResetDoneView.as_view(**_branding),
+        name="password_reset_done",
+    ),
+    path(
+        "api/auth/reset/<uidb64>/<token>/",
+        StaffPasswordResetConfirmView.as_view(**_branding),
+        name="password_reset_confirm",
+    ),
+    path(
+        "api/auth/reset/done/",
+        auth_views.PasswordResetCompleteView.as_view(**_branding),
+        name="password_reset_complete",
+    ),
     path("", include("chatbot.urls")),  # Include chatbot app URLs directly
 ]
 
