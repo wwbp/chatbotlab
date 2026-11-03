@@ -305,3 +305,55 @@ select:focus,
         height: 40px;
     }
 }
+
+/* Conversation transcript */
+.transcript {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 6px 16px;
+    max-width: 70em;
+}
+
+.transcript .tr-time {
+    font-family: ui-monospace, Menlo, monospace;
+    color: var(--body-quiet-color);
+    text-align: right;
+    padding-top: 2px;
+}
+
+.transcript .tr-turn {
+    padding-left: 10px;
+    border-left: 3px solid transparent;
+}
+
+.transcript .tr-user {
+    border-left-color: var(--body-loud-color);
+}
+
+.transcript .tr-moderated {
+    border-left-color: var(--accent);
+}
+
+.transcript .tr-text {
+    white-space: pre-wrap;
+}
+
+.bot-config-prompt {
+    white-space: pre-wrap;
+    max-width: 70em;
+}
+
+.bot-config dt {
+    font-weight: bold;
+}
+
+.bot-config dd {
+    margin: 0 0 6px;
+}
+
+/* Beats Django's `form .aligned ul` indent (160px) inside a readonly field. */
+form .aligned ul.related-records {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
