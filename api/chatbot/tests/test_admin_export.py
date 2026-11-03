@@ -123,9 +123,9 @@ def test_conversation_export_has_analysis_columns(make_conversation):
     for _ in range(3):
         Utterance.objects.create(conversation=conversation, text="hi")
 
-    header, row = _csv_rows(
-        _export(_client_for("Data viewer"), "conversation", ConversationResource)
-    )
+    response = _export(_client_for("Data viewer"), "conversation", ConversationResource)
+    assert response.content.startswith(b"\xef\xbb\xbf")  # BOM, as for utterances
+    header, row = _csv_rows(response)
 
     assert header == [
         "conversation_id",

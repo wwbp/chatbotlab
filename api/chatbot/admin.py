@@ -458,7 +458,7 @@ class SessionHealthFilter(admin.SimpleListFilter):
 
 
 @admin.register(Conversation)
-class ConversationAdmin(ExportMixin, ReadOnlyDataAdmin):
+class ConversationAdmin(DataExportMixin, ReadOnlyDataAdmin):
     resource_class = ConversationResource
     # Slim on purpose: one line per row, so a study's sessions can be scanned.
     # bot_config (a large JSON snapshot) lives on the change page only.
