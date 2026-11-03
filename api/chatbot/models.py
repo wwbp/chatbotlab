@@ -1,5 +1,6 @@
 import secrets
 
+from django.conf import settings
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
 from simple_history.models import HistoricalRecords
@@ -857,3 +858,41 @@ class Avatar(models.Model):
 
     def __str__(self):
         return f"Avatar for Conversation {self.bot.name} {self.bot.avatar_type} {self.condition} {self.participant_avatar} {self.chatbot_avatar}"
+
+
+class AccessLog(models.Model):
+    """
+    Who viewed, changed, or exported what in the admin and staff-only API.
+
+    Django's admin LogEntry only records add/change/delete, so it cannot say who
+    looked at or downloaded participant data. Rows are written by
+    chatbot.access_log and never edited. `username` is a snapshot: it survives
+    the user being deleted (`user` goes NULL) and is the only identity a failed
+    login has.
+    """
+
+    class Action(models.TextChoices):
+        VIEW = "view"
+        CHANGE = "change"
+        EXPORT = "export"
+        LOGIN = "login"
+        LOGOUT = "logout"
+        LOGIN_FAILED = "login_failed"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
+    )
+    username = models.CharField(max_length=150)
+    timestamp = models.DateTimeField(auto_now_add=True, db_index=True)
+    action = models.CharField(max_length=16, choices=Action.choices)
+    method = models.CharField(max_length=10)
+    path = models.CharField(max_length=1024)
+    query = models.CharField(max_length=1024, blank=True)
+    status_code = models.PositiveSmallIntegerField(null=True, blank=True)
+    ip = models.GenericIPAddressField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-timestamp"]
+
+    def __str__(self):
+        return f"{self.username} {self.action} {self.path} at {self.timestamp}"

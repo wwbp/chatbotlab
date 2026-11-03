@@ -64,6 +64,22 @@ To change someone's role, edit their user and change their groups. To remove
 access, untick **Active** rather than deleting the user, so their name stays
 attached to their past actions.
 
+Switching from the shared login
+-------------------------------
+
+Do this once, after these changes are live on production:
+
+1. Sign in with the shared ``admin`` login and add everyone as described in
+   *Adding a person*. Give each person a temporary password and send it to
+   them directly.
+2. Ask each person to sign in and change their password. Their sign-in shows
+   up as a ``login`` row in the access log, so you can see who has done it.
+3. Change the ``admin`` password (**Change password**, top right). The new one
+   is for emergencies only: keep it with the lab's other secrets and do not
+   share it.
+4. Check the access log for ``login_failed`` rows on ``admin`` in the following
+   days — they show who is still using the old password.
+
 Edit history
 ------------
 
@@ -113,3 +129,64 @@ in the admin still shows up in that bot's history as a save by you.
 
 Edits made before edit history was switched on have no history. Only changes
 from then on are recorded.
+
+Access log
+----------
+
+Django's admin history only records when something is added, changed, or
+deleted. It cannot tell you who *looked at* or *downloaded* participant data.
+The access log fills that gap: every action a signed-in user takes in the admin
+(``/api/admin/``) or the staff-only API leaves one row in the
+``chatbot_accesslog`` table.
+
+**What is recorded**
+
+- Every admin page a signed-in user opens (``view``), and every form they
+  submit (``change``) — including saves and deletes.
+- Every export from the admin's **Export** button (``export``). Opening the
+  export form is a ``view``; the ``export`` row is written when the file is
+  actually downloaded.
+- Requests to the staff-only API used by the bot editor: ``/api/bots/``,
+  ``/api/avatar/`` and ``/api/avatar-upload/``.
+- Every sign-in (``login``), sign-out (``logout``), and failed sign-in
+  (``login_failed``). A failed sign-in records the username that was typed.
+
+Each row has the user (and a copy of their username, so the row survives the
+account being deleted), the time, the action, the HTTP method, the page path
+and query string (so a search for a participant ID is visible), the response
+status, and the client IP address.
+
+**What is deliberately not recorded**
+
+- Request or response bodies, passwords, and tokens. A failed sign-in stores
+  the attempted username only.
+- Participant traffic: chat messages, keystrokes, survey answers, voice, and
+  the public avatar image the chat page loads. These are not staff activity and
+  would bury the log. Researchers testing a bot while signed in are not logged
+  either, for the same reason.
+- Anything done outside the web app, such as a direct database connection or
+  ``manage.py shell``.
+
+**How to review it**
+
+Sign in as a superuser and open **Access logs** in the admin. Filter by user,
+action, or date, or search by username or path — for example, search
+``conversation/export`` to see every conversation export. The page is visible
+to superusers only, and nobody — superusers included — can edit or delete a
+row from the admin.
+
+The IP address is the one CloudFront saw, read from ``X-Forwarded-For`` from
+the right so a value the client invents is ignored. This relies on the load
+balancer accepting traffic from CloudFront only: on dev.bot.wwbp.org and
+bot.wwbp.org its security group allows just AWS's CloudFront prefix list
+(``com.amazonaws.global.cloudfront.origin-facing``) on port 443. If that rule
+is ever reopened to ``0.0.0.0/0``, the IP can be forged.
+
+**Retention**
+
+Rows are never pruned automatically, so the table grows with admin use. Agree a
+retention period with the study's IRB first, then delete older rows by hand
+(``--dry-run`` shows the count without deleting)::
+
+    python manage.py prune_access_log --older-than-days 365 --dry-run
+    python manage.py prune_access_log --older-than-days 365
