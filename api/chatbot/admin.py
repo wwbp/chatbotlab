@@ -12,6 +12,7 @@ from django.utils.safestring import mark_safe
 from import_export import resources
 from import_export.admin import ExportMixin
 from PIL import Image
+from simple_history.admin import SimpleHistoryAdmin
 
 from .models import (
     MODERATION_CATEGORIES,
@@ -185,6 +186,12 @@ class BaseAdmin(admin.ModelAdmin):
         return list_display
 
 
+class HistoryAdmin(SimpleHistoryAdmin, BaseAdmin):
+    """For models with HistoricalRecords: the History button shows field-level
+    diffs. Only those models may use it — on any other model SimpleHistoryAdmin's
+    history page fails, so they keep BaseAdmin and Django's own action log."""
+
+
 class ConversationResource(resources.ModelResource):
     """Resource class for exporting Conversation data"""
 
@@ -210,7 +217,7 @@ class UtteranceResource(resources.ModelResource):
 
 
 @admin.register(Persona)
-class PersonaAdmin(BaseAdmin):
+class PersonaAdmin(HistoryAdmin):
     list_display = (
         "name",
         "instructions_preview",
@@ -582,7 +589,7 @@ class UtteranceAdmin(ExportMixin, BaseAdmin):
 
 
 @admin.register(Bot)
-class BotAdmin(ExportMixin, BaseAdmin):
+class BotAdmin(ExportMixin, HistoryAdmin):
     resource_class = BotResource
     form = BotAdminForm
 
@@ -1439,7 +1446,7 @@ class KeystrokeAdmin(BaseAdmin):
 
 
 @admin.register(SurveyIngestToken)
-class SurveyIngestTokenAdmin(BaseAdmin):
+class SurveyIngestTokenAdmin(HistoryAdmin):
     """
     Issue a token per study, so starting a study needs no redeploy.
 
@@ -1526,7 +1533,7 @@ class SurveyResponseAdmin(BaseAdmin):
 
 
 @admin.register(ModerationSettings)
-class ModerationSettingsAdmin(BaseAdmin):
+class ModerationSettingsAdmin(HistoryAdmin):
     list_display = ("enabled", "updated_at")
     list_display_links = None
     list_editable = ("enabled",)

@@ -2,6 +2,15 @@ import secrets
 
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
+from simple_history.models import HistoricalRecords
+
+# Edit history (who changed what, field by field) is kept only on the
+# configuration researchers edit: Bot, Persona, ModerationSettings and
+# SurveyIngestToken. Participant-written models (Conversation, Utterance,
+# Keystroke, SurveyResponse) deliberately have none: a history row per write
+# would double the largest tables. Avatar is left out for the same reason —
+# AvatarDetailAPIView saves per-conversation Avatar rows on participant
+# requests. Timestamps are excluded because history_date already records when.
 
 # Every category omni-moderation-latest scores, in OpenAI's own spelling. Adding
 # a category here is not enough on its own — it also needs the matching
@@ -37,6 +46,7 @@ class Persona(models.Model):
     instructions = models.TextField(help_text="Instructions for this persona")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    history = HistoricalRecords(excluded_fields=["created_at", "updated_at"])
 
     def __str__(self):
         return self.name
@@ -413,6 +423,7 @@ class ModerationSettings(models.Model):
         help_text="When disabled, all content moderation is bypassed globally",
     )
     updated_at = models.DateTimeField(auto_now=True)
+    history = HistoricalRecords(excluded_fields=["updated_at"])
 
     class Meta:
         verbose_name = "Global Moderation Setting"
@@ -676,6 +687,8 @@ class Bot(models.Model):
         related_name="bots",
         help_text="Select personas that this bot should embody",
     )
+    # See the edit-history note at the top of this module.
+    history = HistoricalRecords(m2m_fields=["personas"])
 
     def __str__(self):
         return self.name
@@ -776,6 +789,9 @@ class SurveyIngestToken(models.Model):
         help_text="Untick to revoke this token without deleting the record. A revoked token is rejected immediately.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    # The token is never edited (editable=False), so its history adds nothing
+    # but another copy of a live secret for anyone who can read history.
+    history = HistoricalRecords(excluded_fields=["token", "created_at"])
 
     class Meta:
         verbose_name = "Survey ingest token"

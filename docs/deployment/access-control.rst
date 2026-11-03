@@ -63,3 +63,53 @@ Sign in as a superuser, then:
 To change someone's role, edit their user and change their groups. To remove
 access, untick **Active** rather than deleting the user, so their name stays
 attached to their past actions.
+
+Edit history
+------------
+
+Every change made to a study's configuration is recorded: who made it, when,
+and which fields changed from what to what. If a bot's prompt was edited in the
+middle of a study, this is how you find out who changed it and what it said
+before.
+
+**Where to see it:** open any bot, persona, survey ingest token or the global
+moderation setting in the admin panel and click the **History** button in the
+top right. Each row lists the user, the time and the changed fields; click a
+row to see the full record as it was at that moment, and revert to it if you
+need to.
+
+**What is tracked**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Admin section
+     - Notes
+   * - Bots
+     - Every field, including which personas the bot uses.
+   * - Personas
+     - Every field.
+   * - Global Moderation Settings
+     - Whether moderation is on or off.
+   * - Survey ingest tokens
+     - The note and whether the token is active. The token itself is *not*
+       copied into history: it never changes, and every extra copy is
+       somewhere else it could leak from.
+
+Changes made outside the admin panel are recorded too, with no user. In
+particular, every server start re-applies the prompts of the bots listed in
+``api/config.json``, so those bots get a user-less history entry at each
+restart, and an admin edit to their prompt is overwritten there.
+
+**What is not tracked, and why**
+
+Conversations, utterances, keystrokes, survey responses and avatars are written
+by participants as they chat, not by researchers. A history copy of each of
+those writes would roughly double the largest tables in the database for no
+audit benefit. Avatars are on this list because a participant's avatar is
+created and updated during their conversation; changing a bot's avatar
+in the admin still shows up in that bot's history as a save by you.
+
+Edits made before edit history was switched on have no history. Only changes
+from then on are recorded.
