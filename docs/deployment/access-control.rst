@@ -80,6 +80,24 @@ Do this once, after these changes are live on production:
 4. Check the access log for ``login_failed`` rows on ``admin`` in the following
    days — they show who is still using the old password.
 
+Sign-in protection
+------------------
+
+The admin sign-in page limits attempts in each 15-minute period:
+
+- 10 attempts for one username.
+- 30 attempts from one IP address.
+
+The limits count all attempts, not only failed attempts. At the limit, the page
+refuses more attempts from that username or IP address. Wait 15 minutes. Then
+try again.
+
+Passwords must have a minimum of 12 characters. A session stops after 12 hours.
+Then you must sign in again.
+
+The admin does not use multi-factor authentication (MFA) at this time. The lab
+asked Penn IRB and ISO if these studies must have MFA.
+
 Edit history
 ------------
 

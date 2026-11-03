@@ -5,6 +5,7 @@ import uuid
 
 from django import forms
 from django.contrib import admin
+from django.contrib.admin.forms import AdminAuthenticationForm
 from django.core.exceptions import ValidationError
 from django.urls import reverse
 from django.utils.html import format_html, format_html_join
@@ -14,6 +15,7 @@ from import_export.admin import ExportMixin
 from PIL import Image
 from simple_history.admin import SimpleHistoryAdmin
 
+from .access_log import client_ip
 from .models import (
     MODERATION_CATEGORIES,
     AccessLog,
@@ -30,9 +32,44 @@ from .models import (
 )
 from .services.avatar import generate_avatar
 from .services.s3_helper import delete, get_presigned_url, upload
+from .utils.rate_limit import within_rate_limit
 
 # Get logger for this module
 logger = logging.getLogger(__name__)
+
+
+LOGIN_WINDOW_SECONDS = 15 * 60
+LOGIN_ATTEMPTS_PER_IP = 30  # a lab can share one address
+LOGIN_ATTEMPTS_PER_USERNAME = 10
+
+
+class ThrottledLoginForm(AdminAuthenticationForm):
+    """Admin sign-in that refuses guessing before it reaches authenticate().
+
+    Counts every attempt, not just failures: simpler, and a real person never
+    signs in 10 times in 15 minutes. A refused attempt never calls
+    authenticate(), so it writes no login_failed row to the access log.
+    """
+
+    def clean(self):
+        username = (self.cleaned_data.get("username") or "").lower()
+        ip_ok = within_rate_limit(
+            f"login-ip:{client_ip(self.request)}",
+            LOGIN_ATTEMPTS_PER_IP,
+            LOGIN_WINDOW_SECONDS,
+        )
+        user_ok = within_rate_limit(
+            f"login-user:{username}", LOGIN_ATTEMPTS_PER_USERNAME, LOGIN_WINDOW_SECONDS
+        )
+        if not (ip_ok and user_ok):
+            raise ValidationError(
+                "Too many sign-in attempts. Try again in 15 minutes.",
+                code="throttled",
+            )
+        return super().clean()
+
+
+admin.site.login_form = ThrottledLoginForm
 
 
 class AvatarImageField(forms.FileField):

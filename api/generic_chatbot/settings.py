@@ -252,6 +252,7 @@ AUTH_PASSWORD_VALIDATORS = [
     },
     {
         "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
+        "OPTIONS": {"min_length": 12},
     },
     {
         "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",
@@ -329,6 +330,7 @@ STORAGES = {
 }
 
 X_FRAME_OPTIONS = "SAMEORIGIN"
+SESSION_COOKIE_AGE = 12 * 60 * 60  # shared lab machines: sign out by end of day
 SESSION_COOKIE_SAMESITE = "None"
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SAMESITE = "None"
