@@ -6,14 +6,17 @@ import uuid
 from django import forms
 from django.contrib import admin, messages
 from django.contrib.admin.forms import AdminAuthenticationForm
+from django.contrib.admin.widgets import AdminTextareaWidget
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth.models import Group, User
 from django.core.exceptions import ValidationError
-from django.db import transaction
-from django.db.models import Q
+from django.db import models, transaction
+from django.db.models import Count, OuterRef, Q, Subquery
 from django.urls import reverse
+from django.utils.formats import date_format
 from django.utils.html import format_html, format_html_join
 from django.utils.safestring import mark_safe
+from django.utils.timezone import localtime
 from import_export import resources
 from import_export.admin import ExportMixin
 from PIL import Image
@@ -21,7 +24,6 @@ from simple_history.admin import SimpleHistoryAdmin
 
 from .access_log import client_ip
 from .models import (
-    MODERATION_CATEGORIES,
     AccessLog,
     Avatar,
     Bot,
@@ -32,7 +34,6 @@ from .models import (
     SurveyIngestToken,
     SurveyResponse,
     Utterance,
-    moderation_field_name,
 )
 from .services.avatar import generate_avatar
 from .services.s3_helper import delete, get_presigned_url, upload
@@ -122,6 +123,8 @@ class BotAdminForm(forms.ModelForm):
     class Meta:
         model = Bot
         fields = "__all__"
+        # BotAdmin shortens every other textarea to 3 rows; the prompt is long.
+        widgets = {"prompt": AdminTextareaWidget}
 
     def clean(self):
         cleaned_data = super().clean()
@@ -289,6 +292,9 @@ class PersonaAdmin(HistoryAdmin):
     ordering = ("name",)
     list_per_page = 25
 
+    def get_queryset(self, request):
+        return super().get_queryset(request).annotate(n_bots=Count("bots"))
+
     def instructions_preview(self, obj):
         preview = (
             obj.instructions[:100] + "..."
@@ -304,7 +310,7 @@ class PersonaAdmin(HistoryAdmin):
     instructions_preview.short_description = "Instructions"
 
     def bot_count(self, obj):
-        count = obj.bots.count()
+        count = obj.n_bots
         if count > 0:
             url = (
                 reverse("admin:chatbot_bot_changelist")
@@ -651,23 +657,26 @@ class BotAdmin(ExportMixin, HistoryAdmin):
     resource_class = BotResource
     form = BotAdminForm
 
+    # What differs between the bots of a study's cells; the rest is on the
+    # bot's page and in the filters. The avatar thumbnail is on the bot's
+    # page only: in the list it cost a query and a presigned URL per row.
     list_display = (
         "name",
-        "model_provider",
         "model_name",
+        "persona_count",
         "avatar_type",
-        "has_initial_utterance",
-        "chunk_messages",
-        "humanlike_delay",
-        "follow_up_on_idle",
-        "recurring_followup",
-        "max_transcript_length",
-        "get_persona_count",
-        "moderation_summary",
-        "avatar_preview",
         "survey_context",
+        "updated",
     )
     list_display_links = ("name",)
+    list_select_related = ("ai_model__provider",)
+    # "Save as new" duplicates a bot for the next study cell (rename it first:
+    # names are unique). The avatar image is not copied.
+    save_as = True
+    formfield_overrides = {
+        models.TextField: {"widget": AdminTextareaWidget(attrs={"rows": 3})},
+        models.ManyToManyField: {"widget": forms.CheckboxSelectMultiple},
+    }
     search_fields = ("name", "ai_model__provider__name", "ai_model__display_name")
     list_filter = (
         "ai_model__provider",
@@ -679,7 +688,21 @@ class BotAdmin(ExportMixin, HistoryAdmin):
         "personas",
     )
     ordering = ("name",)
-    filter_horizontal = ["personas"]
+
+    def get_queryset(self, request):
+        last_edit = (
+            Bot.history.model.objects.filter(id=OuterRef("pk"))
+            .order_by("-history_date")
+            .values("history_date")[:1]
+        )
+        return (
+            super()
+            .get_queryset(request)
+            .annotate(
+                n_personas=Count("personas", distinct=True),
+                last_edit=Subquery(last_edit),
+            )
+        )
 
     @admin.display(description="Survey ctx")
     def survey_context(self, obj):
@@ -692,105 +715,26 @@ class BotAdmin(ExportMixin, HistoryAdmin):
         auditable at a glance rather than by opening each one.
         """
         if not obj.survey_context_enabled:
-            return format_html('<span style="color:#999;">off</span>')
+            return format_html('<span class="st-off">off</span>')
         if not (obj.survey_context_preamble or "").strip():
-            return format_html(
-                '<span style="color:#b26a00;">on (no preamble)</span>',
-            )
-        return format_html('<span style="color:#2e7d32;">on</span>')
+            return format_html('<span class="st-warn">on (no preamble)</span>')
+        return format_html('<span class="st-ok">on</span>')
 
-    def model_provider(self, obj):
-        return obj.ai_model.provider.display_name
-
-    model_provider.short_description = "Provider"
-
+    @admin.display(description="Model", ordering="ai_model__display_name")
     def model_name(self, obj):
-        return obj.ai_model.display_name
+        return f"{obj.ai_model.provider.display_name} {obj.ai_model.display_name}"
 
-    model_name.short_description = "Model"
+    @admin.display(description="Personas", ordering="n_personas")
+    def persona_count(self, obj):
+        return format_html('<span class="num">{}</span>', obj.n_personas)
 
-    def get_persona_count(self, obj):
-        return obj.personas.count()
-
-    get_persona_count.short_description = "Personas Count"
-
-    def has_initial_utterance(self, obj):
-        return bool(obj.initial_utterance and obj.initial_utterance.strip())
-
-    has_initial_utterance.boolean = True
-    has_initial_utterance.short_description = "Has Initial Message"
-
-    def avatar_preview(self, obj):
-        """Display avatar preview in list view"""
-        try:
-            from .models import Avatar
-
-            avatar = Avatar.objects.filter(
-                bot=obj,
-                bot_conversation__isnull=True,
-            ).first()
-            if avatar and avatar.chatbot_avatar:
-                # Check if we're in local development
-                from django.conf import settings
-
-                is_local = settings.BACKEND_ENVIRONMENT == "local"
-
-                if is_local:
-                    # For local development, serve from media directory
-                    from pathlib import Path
-
-                    local_path = (
-                        Path(settings.MEDIA_ROOT) / "avatars" / avatar.chatbot_avatar
-                    )
-                    if local_path.exists():
-                        image_url = f"/media/avatars/{avatar.chatbot_avatar}"
-                        return format_html(
-                            '<img src="{}" alt="Avatar" class="avatar-preview" title="{}" />',
-                            image_url,
-                            avatar.chatbot_avatar,
-                        )
-                else:
-                    # Production: Get presigned URL for display
-                    image_url = get_presigned_url(
-                        "avatar",
-                        avatar.chatbot_avatar,
-                        expiration=3600,
-                    )
-                    if image_url:
-                        return format_html(
-                            '<img src="{}" alt="Avatar" class="avatar-preview" title="{}" />',
-                            image_url,
-                            avatar.chatbot_avatar,
-                        )
-        except Exception:
-            pass
-        return format_html('<span class="no-avatar">{}</span>', "No avatar")
-
-    avatar_preview.short_description = "Avatar"
-
-    def moderation_summary(self, obj):
-        """Display moderation settings summary"""
-        # Derived from the model's own field defaults rather than a second copy
-        # of them — the copy silently omitted categories as they were added.
-        custom_count = 0
-        for category in MODERATION_CATEGORIES:
-            field_name = moderation_field_name(category)
-            default_value = Bot.default_moderation_threshold(category)
-            if float(getattr(obj, field_name)) != default_value:
-                custom_count += 1
-
-        if custom_count == 0:
-            return format_html(
-                '<span class="default-moderation">{}</span>',
-                "Using defaults",
-            )
-        else:
-            return format_html(
-                '<span class="custom-moderation">{} custom values</span>',
-                custom_count,
-            )
-
-    moderation_summary.short_description = "Moderation"
+    @admin.display(description="Updated", ordering="last_edit")
+    def updated(self, obj):
+        # The last edit-history entry: Bot has no updated_at column.
+        stamp = (
+            date_format(localtime(obj.last_edit), "Y-m-d H:i") if obj.last_edit else "-"
+        )
+        return format_html('<span class="num">{}</span>', stamp)
 
     fieldsets = (
         (
@@ -808,6 +752,7 @@ class BotAdmin(ExportMixin, HistoryAdmin):
         (
             "Personas",
             {
+                "classes": ("collapse",),
                 "fields": ("personas",),
                 "description": "Select the personas this bot should embody. You can select multiple personas.",
             },
@@ -815,6 +760,7 @@ class BotAdmin(ExportMixin, HistoryAdmin):
         (
             "Avatar Settings",
             {
+                "classes": ("collapse",),
                 "fields": (
                     "avatar_type",
                     "avatar_prompt",
@@ -827,6 +773,7 @@ class BotAdmin(ExportMixin, HistoryAdmin):
         (
             "Response Settings",
             {
+                "classes": ("collapse",),
                 "fields": (
                     "chunk_messages",
                     "humanlike_delay",
@@ -872,6 +819,7 @@ class BotAdmin(ExportMixin, HistoryAdmin):
         (
             "Follow-up Settings",
             {
+                "classes": ("collapse",),
                 "fields": (
                     "follow_up_on_idle",
                     "idle_time_minutes",
@@ -1240,6 +1188,7 @@ class AvatarAdmin(BaseAdmin):
         "has_chatbot_avatar",
     )
     list_display_links = ("bot_name",)
+    list_select_related = ("bot",)
     search_fields = ("bot__name", "bot_conversation")
     list_filter = ("condition", "bot__avatar_type")
     ordering = ("bot__name", "bot_conversation")
@@ -1554,8 +1503,8 @@ class SurveyIngestTokenAdmin(HistoryAdmin):
         if not obj.pk:
             return "Save to generate the token."
         return format_html(
-            '<code style="font-size:1.1em; user-select:all;">{}</code>'
-            '<p style="margin-top:.5em; color:#666;">'
+            '<code class="mono" style="font-size:1.1em; user-select:all;">{}</code>'
+            '<p class="st-off">'
             "Send as the <code>X-Survey-Token</code> header. Anyone holding this "
             "can submit survey answers for any participant, so treat it like a "
             "password and revoke it when the study ends.</p>",

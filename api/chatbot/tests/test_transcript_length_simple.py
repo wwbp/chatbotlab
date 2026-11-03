@@ -353,9 +353,8 @@ class TestTranscriptLengthSimple(TestCase):
         """Test that the admin interface includes the max_transcript_length field"""
         from chatbot.admin import BotAdmin
 
-        # Check that the field is in the list display
-        assert "max_transcript_length" in BotAdmin.list_display
-
+        # Not a list column since the Bot list was trimmed to what usually
+        # differs between study cells (test_admin_layout.py).
         # Check that the field is in the fieldsets
         fieldsets = BotAdmin.fieldsets
         response_settings_found = False
