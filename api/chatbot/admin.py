@@ -4,9 +4,13 @@ import time
 import uuid
 
 from django import forms
-from django.contrib import admin
+from django.contrib import admin, messages
 from django.contrib.admin.forms import AdminAuthenticationForm
+from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
+from django.contrib.auth.models import Group, User
 from django.core.exceptions import ValidationError
+from django.db import transaction
+from django.db.models import Q
 from django.urls import reverse
 from django.utils.html import format_html, format_html_join
 from django.utils.safestring import mark_safe
@@ -32,6 +36,7 @@ from .models import (
 )
 from .services.avatar import generate_avatar
 from .services.s3_helper import delete, get_presigned_url, upload
+from .staff_auth import send_set_password_email
 from .utils.rate_limit import within_rate_limit
 
 # Get logger for this module
@@ -1624,3 +1629,94 @@ class AccessLogAdmin(BaseAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+ROLES = ("Config editor", "Data viewer")
+
+
+class StaffUserCreationForm(forms.ModelForm):
+    """One page: email, name and role. No password: the invite sets it."""
+
+    email = forms.EmailField(required=True)
+    groups = forms.ModelMultipleChoiceField(
+        queryset=Group.objects.filter(name__in=ROLES),
+        widget=forms.CheckboxSelectMultiple,
+        label="Role",
+    )
+
+    class Meta:
+        model = User
+        fields = ("email", "first_name", "last_name", "groups")
+
+    def clean_email(self):
+        email = self.cleaned_data["email"].strip()
+        if User.objects.filter(
+            Q(email__iexact=email) | Q(username__iexact=email)
+        ).exists():
+            raise ValidationError("A user with this email already exists.")
+        return email
+
+    def save(self, commit=True):
+        user = super().save(commit=False)
+        user.username = user.email.lower()
+        user.is_staff = True
+        user.set_unusable_password()
+        if commit:
+            user.save()
+            self.save_m2m()
+        return user
+
+
+admin.site.unregister(User)
+
+
+@admin.register(User)
+class UserAdmin(BaseUserAdmin):
+    """Superuser-only (no role has auth permissions). Adding sends an invite."""
+
+    add_form = StaffUserCreationForm
+    add_fieldsets = (
+        (None, {"fields": ("email", "first_name", "last_name", "groups")}),
+    )
+    list_display = (*BaseUserAdmin.list_display, "is_active", "last_login")
+    actions = ["send_set_password_email"]
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        if not change:
+            # After commit, so the groups are saved and listed in the email.
+            transaction.on_commit(lambda: self._send(request, obj, invite=True))
+
+    def _send(self, request, user, invite):
+        try:
+            send_set_password_email(user, request.user, invite=invite)
+        except Exception as error:
+            # The message carries the error only, never the token or link.
+            logger.error("set-password email to user %s failed: %s", user.pk, error)
+            self.message_user(
+                request,
+                "User saved, but the invite email could not be sent: "
+                f"{error}. Use 'Send set-password email' to retry.",
+                messages.WARNING,
+            )
+            return False
+        return True
+
+    @admin.action(description="Send set-password email", permissions=["superuser"])
+    def send_set_password_email(self, request, queryset):
+        sent = 0
+        for user in queryset:
+            invite = not user.has_usable_password()
+            if invite:
+                # A fresh unusable password changes the token hash, so every
+                # earlier invite link stops working.
+                user.set_unusable_password()
+                user.save()
+            if self._send(request, user, invite):
+                self.log_change(request, user, "Sent set-password email")
+                sent += 1
+        if sent:
+            self.message_user(request, f"Sent set-password email to {sent} user(s).")
+
+    def has_superuser_permission(self, request):
+        return request.user.is_superuser

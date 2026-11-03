@@ -45,40 +45,105 @@ a new migration so every deployment stays the same.
 Adding a person
 ~~~~~~~~~~~~~~~
 
-Sign in as a superuser, then:
+.. note::
+   You must be a superuser to do this procedure.
 
 1. Go to **Authentication and Authorization → Users → Add user**.
-2. Enter a username (e.g. their PennKey) and a temporary password, then click
-   **Save**.
-3. On the next page, under **Permissions**:
+2. Enter the email address of the person.
+3. Enter their first name and last name.
+4. Under **Role**, select *Config editor*, *Data viewer*, or both.
+5. Click **Save**.
 
-   - tick **Staff status** — without it they cannot sign in to the admin;
-   - leave **Superuser status** unticked;
-   - under **Groups**, move *Config editor*, *Data viewer* or both to
-     *Chosen groups*.
+The person gets an invite email with a link. The link sets their password. The
+link works one time and expires after 3 days. Their username is their email
+address in lowercase.
 
-4. Click **Save**, and send them the username and temporary password. They can
-   change it from **Change password** in the top-right of the admin.
+.. note::
+   If the email is not sent, the admin shows a warning. The user is saved.
+   Do the procedure in *Sending a new link*.
 
-To change someone's role, edit their user and change their groups. To remove
-access, untick **Active** rather than deleting the user, so their name stays
-attached to their past actions.
+Sending a new link
+~~~~~~~~~~~~~~~~~~
+
+Do this procedure if the person did not get the email, or the link expired.
+
+.. note::
+   The new email makes all earlier invite links unusable.
+
+1. Go to **Authentication and Authorization → Users**.
+2. Select the person.
+3. In **Action**, select **Send set-password email**.
+4. Click **Go**.
+
+People who forget their password can get a link without help. On the admin
+sign-in page, they click **Forgotten your login credentials?** and enter
+their email address.
+
+Changing a role
+~~~~~~~~~~~~~~~
+
+1. Open the user.
+2. Change their **Groups**.
+3. Click **Save**.
+
+Removing access
+~~~~~~~~~~~~~~~
+
+.. warning::
+   Do not delete the user. Their name must stay on their past actions.
+
+1. Open the user.
+2. Clear **Active**.
+3. Click **Save**.
+
+Their session stops at their next request.
 
 Switching from the shared login
 -------------------------------
 
-Do this once, after these changes are live on production:
+Do this procedure one time, after these changes are on production.
 
-1. Sign in with the shared ``admin`` login and add everyone as described in
-   *Adding a person*. Give each person a temporary password and send it to
-   them directly.
-2. Ask each person to sign in and change their password. Their sign-in shows
-   up as a ``login`` row in the access log, so you can see who has done it.
-3. Change the ``admin`` password (**Change password**, top right). The new one
-   is for emergencies only: keep it with the lab's other secrets and do not
-   share it.
-4. Check the access log for ``login_failed`` rows on ``admin`` in the following
-   days — they show who is still using the old password.
+1. Sign in with the shared ``admin`` login.
+2. Add each person. Use the procedure in *Adding a person*.
+3. Tell each person to set their password from the invite email.
+4. In the access log, find the ``password_set`` row for each person.
+5. For each person without a ``password_set`` row, send a new link.
+
+.. note::
+   Keep the new ``admin`` password with the lab's other secrets. Use it only
+   in an emergency. Do not share it.
+
+6. Change the ``admin`` password with **Change password** (top right).
+7. For some days, look for ``login_failed`` rows on ``admin`` in the access
+   log. These rows show who still uses the old password.
+
+Email
+-----
+
+Set these environment variables on each Elastic Beanstalk environment:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Variable
+     - Value
+   * - ``SITE_URL``
+     - The public URL, e.g. ``https://bot.wwbp.org``. Links use this URL.
+       If it is not set, invites fail with a warning.
+   * - ``EMAIL_BACKEND``
+     - ``chatbot.email_backend.SESBackend``. The default prints emails to the
+       console.
+   * - ``DEFAULT_FROM_EMAIL``
+     - The sender. Default: ``ChatbotLab <no-reply@bot.wwbp.org>``. Staging:
+       ``ChatbotLab (staging) <no-reply@bot.wwbp.org>``.
+
+.. note::
+   Verify the sender address in Amazon SES before you send email.
+
+The links are not in the access log. Each link is in the nginx, load balancer
+and CloudFront access logs one time. The links work one time and expire after
+3 days.
 
 Sign-in protection
 ------------------
@@ -91,6 +156,10 @@ The admin sign-in page limits attempts in each 15-minute period:
 The limits count all attempts, not only failed attempts. At the limit, the page
 refuses more attempts from that username or IP address. Wait 15 minutes. Then
 try again.
+
+The "Forgotten your login credentials?" page sends a maximum of 3 emails to one
+address, and 10 emails from one IP address, in each hour. At the limit, the page
+shows the usual message but sends no email.
 
 Passwords must have a minimum of 12 characters. A session stops after 12 hours.
 Then you must sign in again.
@@ -168,6 +237,8 @@ The access log fills that gap: every action a signed-in user takes in the admin
   ``/api/avatar/`` and ``/api/avatar-upload/``.
 - Every sign-in (``login``), sign-out (``logout``), and failed sign-in
   (``login_failed``). A failed sign-in records the username that was typed.
+- Every password reset request (``password_reset_requested``, with the email
+  that was typed) and every password set from a link (``password_set``).
 
 Each row has the user (and a copy of their username, so the row survives the
 account being deleted), the time, the action, the HTTP method, the page path

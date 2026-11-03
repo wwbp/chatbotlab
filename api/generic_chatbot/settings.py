@@ -343,6 +343,22 @@ FILE_UPLOAD_TEMP_DIR = None
 FILE_UPLOAD_PERMISSIONS = 0o644
 FILE_UPLOAD_DIRECTORY_PERMISSIONS = 0o755
 
+# Email: staff invites and password resets (chatbot/staff_auth.py).
+# Links are built from SITE_URL, never the request (behind CloudFront the
+# request looks like http to the EB hostname). Unset in production means
+# invites fail with an admin warning; startup is not blocked.
+SITE_URL = os.getenv("SITE_URL", "")
+# Production: chatbot.email_backend.SESBackend.
+EMAIL_BACKEND = os.getenv(
+    "EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend"
+)
+DEFAULT_FROM_EMAIL = os.getenv(
+    "DEFAULT_FROM_EMAIL", "ChatbotLab <no-reply@bot.wwbp.org>"
+)
+# Where the "Log in" link after a password reset goes; Django's default
+# /accounts/login/ would land on the SPA.
+LOGIN_URL = "admin:login"
+
 # Environment settings
 BACKEND_ENVIRONMENT = os.getenv("BACKEND_ENVIRONMENT", "production")
 

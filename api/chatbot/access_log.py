@@ -100,7 +100,7 @@ def client_ip(request):
         return None
 
 
-def _row(request, user, action, username=None, status_code=None):
+def _row(request, user, action, username=None, status_code=None, path=None):
     # Signals may pass no request (authenticate() without one) or a bare
     # HttpRequest with method None (force_login).
     request = request or HttpRequest()
@@ -111,7 +111,7 @@ def _row(request, user, action, username=None, status_code=None):
         "username": username[:150],
         "action": action,
         "method": request.method or "",
-        "path": request.path[:1024],
+        "path": (path or request.path)[:1024],
         "query": request.META.get("QUERY_STRING", "")[:1024],
         "status_code": status_code,
         "ip": client_ip(request),
