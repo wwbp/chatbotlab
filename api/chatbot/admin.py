@@ -29,6 +29,7 @@ from simple_history.admin import SimpleHistoryAdmin
 
 from .access_log import client_ip
 from .models import (
+    MODERATION_CATEGORIES,
     AccessLog,
     Avatar,
     Bot,
