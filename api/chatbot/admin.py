@@ -1,4 +1,5 @@
 import io
+import json
 import logging
 import time
 import uuid
@@ -11,10 +12,12 @@ from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth.models import Group, User
 from django.core.exceptions import ValidationError
 from django.db import models, transaction
-from django.db.models import Count, OuterRef, Q, Subquery
+from django.db.models import Count, OuterRef, Q, Subquery, Sum
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.formats import date_format
 from django.utils.html import format_html, format_html_join
+from django.utils.http import urlencode
 from django.utils.safestring import mark_safe
 from django.utils.timezone import localtime
 from import_export import resources
@@ -338,46 +341,113 @@ class PersonaAdmin(HistoryAdmin):
     )
 
 
+class ConditionFilter(admin.AllValuesFieldListFilter):
+    """user_group holds the experimental condition; say so in the sidebar."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.title = "Condition"
+
+
+class SessionHealthFilter(admin.SimpleListFilter):
+    """Find sessions that went wrong, so they can be checked or excluded.
+
+    Relies on the counts ConversationAdmin.get_queryset annotates.
+    """
+
+    title = "Session health"
+    parameter_name = "health"
+
+    def lookups(self, request, model_admin):
+        return (
+            ("no_reply", "No bot reply"),
+            ("short", "2 or fewer messages"),
+            ("no_survey", "No survey answers"),
+        )
+
+    def queryset(self, request, queryset):
+        if self.value() == "no_reply":
+            return queryset.filter(bot_reply_count=0)
+        if self.value() == "short":
+            return queryset.filter(message_count__lte=2)
+        if self.value() == "no_survey":
+            # Null when no answers were found; [] if the survey sent none.
+            return queryset.filter(
+                Q(survey_context__isnull=True) | Q(survey_context=[])
+            )
+        return None
+
+
 @admin.register(Conversation)
 class ConversationAdmin(ExportMixin, ReadOnlyDataAdmin):
     resource_class = ConversationResource
+    # Slim on purpose: one line per row, so a study's sessions can be scanned.
+    # bot_config (a large JSON snapshot) lives on the change page only.
     list_display = (
         "conversation_id",
-        "bot_name",
-        "bot_config",
-        "participant_id",
-        "utterance_count",
-        "selected_persona",
-        "study_name",
-        "user_group",
         "started_time",
+        "study_name",
+        "condition",
+        "bot_name",
+        "message_count",
         "survey_answers",
+        "participant_id",
     )
     list_display_links = ("conversation_id",)
-    search_fields = (
-        "conversation_id",
-        "bot_name",
-        "participant_id",
-        "study_name",
-        "user_group",
-        "survey_id",
-    )
+    # IDs are pasted from the survey tool: exact/prefix matches can use an
+    # index, unlike LIKE '%...%'. Study, condition and bot are filters instead.
+    search_fields = ("=conversation_id", "^participant_id")
+    search_help_text = "Exact conversation ID, or the start of a participant ID."
     list_filter = (
-        "bot_name",
-        "user_group",
         "study_name",
+        ("user_group", ConditionFilter),
+        "bot_name",
         "started_time",
-        "selected_persona",
+        SessionHealthFilter,
     )
+    date_hierarchy = "started_time"
+    show_facets = admin.ShowFacets.ALWAYS
     readonly_fields = (
+        "transcript",
+        "related_records",
+        "condition",
         "started_time",
-        "utterance_count",
         "selected_persona",
-        "bot_config",
+        "bot_config_readable",
         "survey_context_readable",
     )
     ordering = ("-started_time",)
-    list_per_page = 25
+    list_per_page = 100
+
+    def get_queryset(self, request):
+        # Annotated once here so the list, its sort and SessionHealthFilter
+        # need no query per row.
+        return (
+            super()
+            .get_queryset(request)
+            .annotate(
+                message_count=Count("utterances"),
+                bot_reply_count=Count(
+                    "utterances", filter=Q(utterances__speaker_id="assistant")
+                ),
+            )
+        )
+
+    def get_object(self, request, object_id, from_field=None):
+        obj = super().get_object(request, object_id, from_field)
+        if obj is not None:
+            # Readonly-field methods receive only obj; related_records needs
+            # the request to build a sort link that is right for this user.
+            obj.admin_request = request
+        return obj
+
+    @admin.display(description="Condition", ordering="user_group")
+    def condition(self, obj):
+        return obj.user_group
+
+    @admin.display(description="Messages", ordering="message_count")
+    def message_count(self, obj):
+        return obj.message_count
 
     @admin.display(description="Survey answers")
     def survey_answers(self, obj):
@@ -390,10 +460,8 @@ class ConversationAdmin(ExportMixin, ReadOnlyDataAdmin):
         """
         answers = obj.survey_context or []
         if not answers:
-            return format_html('<span style="color:#999;">none</span>')
-        return format_html(
-            '<span style="color:#2e7d32;">{} linked</span>', len(answers)
-        )
+            return format_html('<span class="st-off">none</span>')
+        return format_html('<span class="st-ok">{} linked</span>', len(answers))
 
     @admin.display(description="Survey answers (as the bot received them)")
     def survey_context_readable(self, obj):
@@ -401,7 +469,7 @@ class ConversationAdmin(ExportMixin, ReadOnlyDataAdmin):
         answers = obj.survey_context or []
         if not answers:
             return format_html(
-                '<span style="color:#999;">No survey answers were linked to this '
+                '<span class="st-off">No survey answers were linked to this '
                 "conversation. If this study feeds survey answers to the bot, this "
                 "participant did not receive any — check that the survey tool sent "
                 "a matching survey_id and participant_id.</span>",
@@ -420,45 +488,151 @@ class ConversationAdmin(ExportMixin, ReadOnlyDataAdmin):
         )
         return format_html("<table>{}</table>", rows)
 
-    def utterance_count(self, obj):
-        count = obj.utterances.count()
-        if count > 0:
-            url = (
-                reverse("admin:chatbot_utterance_changelist")
-                + f"?conversation__id__exact={obj.id}"
-            )
-            return format_html(
-                '<a href="{}" class="utterance-link">{} utterances</a>',
-                url,
-                count,
-            )
-        return format_html('<span class="no-utterances">{}</span>', "0 utterances")
+    @admin.display(description="Transcript")
+    def transcript(self, obj):
+        """The whole conversation, oldest first, full text, escaped."""
 
-    utterance_count.short_description = "Messages"
+        def turn(u):
+            time = timezone.localtime(u.created_time)
+            # Text chat stores "user", voice chat "participant"; bots "assistant".
+            bot = u.speaker_id == "assistant"
+            flag = u.moderation_category
+            return (
+                time.isoformat(),
+                time.strftime("%H:%M:%S"),
+                ("tr-bot" if bot else "tr-user") + (" tr-moderated" if flag else ""),
+                "Bot" if bot else "Participant",
+                format_html(' <span class="st-warn">{}</span>', flag) if flag else "",
+                u.text,
+            )
+
+        rows = format_html_join(
+            "",
+            '<span class="tr-time" title="{}">{}</span>'
+            '<div class="tr-turn {}"><strong>{}</strong>{}'
+            '<div class="tr-text">{}</div></div>',
+            map(turn, obj.utterances.order_by("created_time")),
+        )
+        if not rows:
+            return format_html('<span class="st-off">{}</span>', "No messages.")
+        return format_html('<div class="transcript">{}</div>', rows)
+
+    @admin.display(description="Related records")
+    def related_records(self, obj):
+        """Links to this conversation's rows in the other participant tables."""
+        keystrokes = Keystroke.objects.filter(
+            conversation_id=obj.conversation_id
+        ).aggregate(total=Sum("keystroke_count"))["total"]
+        links = [
+            (
+                reverse("admin:chatbot_keystroke_changelist")
+                + "?"
+                + urlencode({"conversation_id": obj.conversation_id}),
+                f"{keystrokes or 0} keystrokes",
+            ),
+            (
+                reverse("admin:chatbot_surveyresponse_changelist")
+                + "?"
+                + urlencode({"participant_id": obj.participant_id}),
+                f"Survey responses from participant {obj.participant_id}",
+            ),
+            (
+                reverse("admin:chatbot_utterance_changelist")
+                + "?"
+                + urlencode(self._utterance_params(obj)),
+                "Utterances, oldest first (prompts, moderation scores)",
+            ),
+        ]
+        html = format_html_join("", '<li><a href="{}">{}</a></li>', links)
+
+        avatar = Avatar.objects.filter(
+            bot__name=obj.bot_name, bot_conversation=obj.conversation_id
+        ).first()
+        if avatar and avatar.participant_avatar:
+            url = get_presigned_url("avatar", avatar.participant_avatar, 3600)
+            if url:
+                html += format_html(
+                    '<li><a href="{}"><img src="{}" alt="Participant avatar" '
+                    'class="avatar-preview"></a></li>',
+                    reverse("admin:chatbot_avatar_change", args=[avatar.pk]),
+                    url,
+                )
+        return format_html('<ul class="related-records">{}</ul>', html)
+
+    def _utterance_params(self, obj):
+        """Utterance changelist filtered to obj, sorted by created_time ascending.
+
+        The admin sorts by column index (?o=N), and the changelist puts an
+        action checkbox in column 0 only for users who have an action (delete),
+        so the index depends on who is looking.
+        """
+        params = {"conversation__id__exact": obj.pk}
+        request = getattr(obj, "admin_request", None)
+        if request is not None:
+            utterance_admin = self.admin_site.get_model_admin(Utterance)
+            columns = list(utterance_admin.get_list_display(request))
+            if utterance_admin.get_actions(request):
+                columns.insert(0, "action_checkbox")
+            if "created_time" in columns:
+                params["o"] = columns.index("created_time")
+        return params
+
+    @admin.display(description="Bot configuration at start")
+    def bot_config_readable(self, obj):
+        """The bot as it was when this conversation started, without raw JSON."""
+        try:
+            config = json.loads(obj.bot_config or "")
+        except ValueError:
+            return obj.bot_config or "—"
+        if not isinstance(config, dict):
+            return obj.bot_config
+        prompt = config.pop("prompt", "")
+        items = format_html_join(
+            "",
+            "<dt>{}</dt><dd>{}</dd>",
+            (
+                (key, value if isinstance(value, str) else json.dumps(value))
+                for key, value in sorted(config.items())
+            ),
+        )
+        if prompt:
+            prompt = format_html(
+                '<dt>prompt</dt><dd><pre class="bot-config-prompt">{}</pre></dd>',
+                prompt,
+            )
+        return format_html('<dl class="bot-config">{}{}</dl>', prompt, items)
 
     fieldsets = (
+        ("Transcript", {"fields": ("transcript",)}),
         (
-            "Basic Information",
+            "Conversation",
             {
                 "fields": (
                     "conversation_id",
-                    "bot_name",
                     "participant_id",
-                    "initial_utterance",
+                    "bot_name",
+                    "started_time",
+                    "study_name",
+                    "condition",
+                    "survey_id",
+                    "related_records",
                 ),
             },
         ),
         (
-            "Persona Information",
+            "Persona",
             {
                 "fields": ("selected_persona",),
                 "description": "The persona randomly selected for this conversation",
+                "classes": ("collapse",),
             },
         ),
         (
-            "Study Information",
+            "Bot configuration",
             {
-                "fields": ("study_name", "user_group", "survey_id"),
+                "fields": ("bot_config_readable",),
+                "description": "A snapshot taken when the conversation started; "
+                "later edits to the bot do not change it.",
                 "classes": ("collapse",),
             },
         ),
@@ -469,8 +643,7 @@ class ConversationAdmin(ExportMixin, ReadOnlyDataAdmin):
                     "survey_context_readable",
                     "survey_meta_data",
                     "survey_context",
-                    "started_time",
-                    "bot_config",
+                    "initial_utterance",
                 ),
                 "classes": ("collapse",),
             },
