@@ -427,8 +427,8 @@ class ModerationSettings(models.Model):
     history = HistoricalRecords(excluded_fields=["updated_at"])
 
     class Meta:
-        verbose_name = "Global Moderation Setting"
-        verbose_name_plural = "Global Moderation Settings"
+        # A singleton on/off switch, so singular in the admin list too.
+        verbose_name = verbose_name_plural = "Moderation switch"
 
     def save(self, *args, **kwargs):
         # Enforce singleton pattern

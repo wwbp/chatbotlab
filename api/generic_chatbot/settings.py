@@ -102,7 +102,8 @@ if not DEBUG:
 # Application definition
 
 INSTALLED_APPS = [
-    "django.contrib.admin",
+    # django.contrib.admin, with the front page grouped by job (admin_site.py)
+    "chatbot.apps.ChatbotLabAdminConfig",
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
