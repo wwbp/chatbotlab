@@ -1479,7 +1479,9 @@ class KeystrokeAdmin(ReadOnlyDataAdmin):
 
     def total_session_time(self, obj):
         total = obj.total_time_on_page + obj.total_time_away_from_page
-        return format_html('<span class="session-time">{:.1f}s</span>', total)
+        # format_html escapes its arguments to strings first, so a format spec
+        # like {:.1f} raises; format the number before it goes in.
+        return format_html('<span class="session-time">{}s</span>', f"{total:.1f}")
 
     total_session_time.short_description = "Total Session"
 
