@@ -9,6 +9,7 @@ from datetime import datetime
 import openai
 import requests
 from django.conf import settings
+from django.core.cache import cache
 from django.core.files.base import ContentFile
 from django.http import JsonResponse
 from django.utils.decorators import method_decorator
@@ -16,9 +17,11 @@ from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 from PIL import Image
 
+from ..access_log import client_ip
 from ..models import Avatar, Bot
 from ..utils.auth import require_perm
 from .s3_helper import delete, download, get_presigned_url, get_random_image, upload
+from .upload import safe_upload_name
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +65,7 @@ def generate_avatar(
         openai.api_key = os.getenv("OPENAI_API_KEY")
         if not openai.api_key:
             logger.error("[ERROR] OPENAI_API_KEY not set")
-            return None, None
+            return None
 
         client = openai.OpenAI()
 
@@ -76,7 +79,7 @@ def generate_avatar(
             logger.error(
                 "[ERROR] No avatar prompt available - neither bot.avatar_prompt nor CHATBOT_AVATAR_PROMPT environment variable is set",
             )
-            return None, None
+            return None
 
         try:
             response = client.images.edit(
@@ -88,7 +91,7 @@ def generate_avatar(
             # Check if response has data
             if not response.data or len(response.data) == 0:
                 logger.error("[ERROR] OpenAI API returned no data")
-                return None, None
+                return None
 
             image_data = response.data[0]
 
@@ -108,15 +111,15 @@ def generate_avatar(
                     image = ContentFile(image_bytes)
                 except Exception as e:
                     logger.error(f"[ERROR] Failed to download image from URL: {e}")
-                    return None, None
+                    return None
             else:
                 logger.error(
                     "[ERROR] OpenAI API response missing both b64_json and url fields",
                 )
-                return None, None
+                return None
         except Exception as e:
             logger.exception(f"[ERROR] OpenAI API call failed: {e}")
-            return None, None
+            return None
 
         # Set the image name with timestamp to make it unique
         image.name = f"{participant_id + '_' if participant_id else ''}{conversation_id + '_' if conversation_id else ''}{bot.name}_{avatar_type}_{int(datetime.now().timestamp())!s}_avatar.png"
@@ -124,7 +127,83 @@ def generate_avatar(
         return image
     except Exception as e:
         logger.exception(f"[ERROR] {e}")
+        return None
+
+
+def _participant_bot(request):
+    """The bot for an anonymous participant avatar request (JSON for a bot whose
+    avatar_type is "user"), else None: everything else is staff-only."""
+    if request.content_type != "application/json":
         return None, None
+    try:
+        data = json.loads(request.body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    bot = Bot.objects.filter(name=data.get("bot_name"), avatar_type="user").first()
+    return bot, data
+
+
+# Generous on purpose: a lab session can put many participants behind one IP.
+AVATARS_PER_IP_PER_HOUR = 30
+
+
+def _within_rate_limit(ip):
+    """Fixed hourly window per client IP, in the shared cache.
+
+    Fails open (allows) if the cache is unreachable: a Redis blip must not stop
+    a running study. ponytail: fixed window, so a burst can straddle two
+    windows; switch to a sliding window if that is ever abused.
+    """
+    key = f"avatar-rate:{ip}"
+    if cache.add(key, 1, timeout=3600):
+        return True
+    try:
+        return cache.incr(key) <= AVATARS_PER_IP_PER_HOUR
+    except ValueError:  # key expired between add() and incr()
+        return True
+
+
+def create_participant_avatar(bot, data, ip=None):
+    """Generate a participant's avatar from the photo they put in uploads/.
+
+    One per conversation: each one is a paid image generation, and the chat page
+    looks it up with .get(bot, conversation).
+    """
+    # ponytail: the exists() check is not atomic, so two simultaneous requests
+    # for one conversation can both generate; add a unique constraint if seen.
+    conversation_id = data.get("conversation_id")
+    image_path = safe_upload_name(data.get("image_path"))
+    if not conversation_id or not image_path:
+        return JsonResponse(
+            {"error": "conversation_id and a valid image_path are required."},
+            status=400,
+        )
+    if Avatar.objects.filter(bot=bot, bot_conversation=conversation_id).exists():
+        return JsonResponse(
+            {"error": "This conversation already has an avatar."}, status=409
+        )
+    if not _within_rate_limit(ip):
+        return JsonResponse(
+            {"error": "Too many avatars from this network. Try again later."},
+            status=429,
+        )
+    image = generate_avatar(
+        download("uploads", image_path),
+        bot,
+        bot.avatar_type,
+        conversation_id,
+        data.get("participant_id"),
+    )
+    if not image or not upload(image, image.name):
+        return JsonResponse({"error": "Avatar generation failed."}, status=502)
+    # The photo of the participant's face is only needed to make the avatar.
+    delete("uploads", image_path)
+    Avatar.objects.create(
+        bot=bot, bot_conversation=conversation_id, participant_avatar=image.name
+    )
+    return JsonResponse({"message": "SUCCESS!"}, status=200)
 
 
 @method_decorator(csrf_exempt, name="dispatch")
@@ -141,6 +220,10 @@ class AvatarAPIView(View):
             return JsonResponse({"error": "An unexpected error occurred."}, status=500)
 
     def post(self, request, *args, **kwargs):
+        # Participants (/avatar-upload, not logged in) for "user" avatar bots.
+        bot, data = _participant_bot(request)
+        if bot:
+            return create_participant_avatar(bot, data, client_ip(request))
         forbidden = require_perm(request, "chatbot.add_avatar")
         if forbidden:
             return forbidden
@@ -247,7 +330,6 @@ class AvatarAPIView(View):
             bot_name = data.get("bot_name")
             bot = Bot.objects.get(name=bot_name)
             conversation_id = data.get("conversation_id")
-            participant_id = data.get("participant_id")
             image_url = data.get("image_path")
             image_key = None
 
@@ -269,26 +351,6 @@ class AvatarAPIView(View):
                     bot_conversation=conversation_id,
                     chatbot_avatar=image_key,
                 )
-            if bot.avatar_type == "user" and conversation_id:
-                image = generate_avatar(
-                    download("uploads", image_url),
-                    bot,
-                    bot.avatar_type,
-                    conversation_id,
-                    participant_id,
-                )
-                image_key = (
-                    image.name
-                    if hasattr(image, "name")
-                    else f"{bot_name}_{int(time.time())}.png"
-                )
-                upload(image, image_key)
-                Avatar.objects.create(
-                    bot=bot,
-                    bot_conversation=conversation_id,
-                    participant_avatar=image_key,
-                )
-
             logger.debug(f"[DEBUG] {bot.name}, {conversation_id}, {image_key}")
             return JsonResponse(
                 {"message": "SUCCESS!"},
