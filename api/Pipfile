@@ -7,7 +7,7 @@ name = "pypi"
 django = ">=5.2,<6.0"
 djangorestframework = ">=3.18.3,<4.0"
 django-cors-headers = ">=4.6,<5.0"
-mysqlclient = ">=2.3.0,<3.0"
+mysqlclient = ">=2.3.1,<3.0"
 gunicorn = ">=23.0,<26.0"
 uvicorn = {extras = ["standard"], version = ">=0.54.0,<1.0"}
 openai = ">=2.0,<3.0"
@@ -23,8 +23,8 @@ whitenoise = ">=6.9,<7.0"
 nltk = ">=3.10.4,<4.0"
 certifi = ">=2026.10.23"
 pillow = ">=13.0.0,<14.0"
-boto3 = ">=1.43.122,<2.0"
-django-import-export = ">=4.4.4,<5.0"
+boto3 = ">=1.44.2,<2.0"
+django-import-export = ">=4.4.5,<5.0"
 django-storages = {extras = ["s3"], version = ">=1.14,<4.0"}
 # Transitive via Django, pinned up explicitly for security: everything at or
 # below 0.5.5 carries five advisories — ReDoS and quadratic CPU blowups when
@@ -37,14 +37,14 @@ sqlparse = ">=0.6.0,<1.0"
 python_version = "3.12"
 
 [dev-packages]
-ruff = ">=0.17.3,<2.0"
+ruff = ">=0.17.5,<2.0"
 # Capped below 9.0: pytest 9 changed fixture finalisation in a way
 # pytest-asyncio 1.4.0 (the latest release) does not support — every async test
 # errors at setup with `assert not self._finalizers`. Raise this cap only once
 # pytest-asyncio ships a pytest 9 compatible release.
 pytest = ">=9.0.3,<10.0"
 pytest-django = ">=4.9,<5.0"
-pytest-asyncio = ">=1.4.1,<2.0"
+pytest-asyncio = ">=1.5.0,<2.0"
 isort = ">=9.0.2,<10.0"
 mypy = ">=2.4.1,<3.0"
 black = ">=26.10.1,<27.0"
