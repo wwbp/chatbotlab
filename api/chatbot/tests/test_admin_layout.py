@@ -27,6 +27,7 @@ BOT_LIST = "/api/admin/chatbot/bot/"
 
 STUDY_SETUP = ["Bot", "Persona", "ModerationSettings", "SurveyIngestToken"]
 PARTICIPANT_DATA = [
+    "Studies",
     "Conversation",
     "Utterance",
     "SurveyResponse",

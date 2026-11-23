@@ -1,0 +1,77 @@
+{% extends "admin/base_site.html" %}
+{% block breadcrumbs %}
+<div class="breadcrumbs"><a href="{% url 'admin:index' %}">Home</a> &rsaquo; Studies</div>
+{% endblock %}
+{% block content %}
+<div id="content-main" class="studies">
+  <p class="help">
+    A study is every conversation that arrived with the same study name. The
+    dates select conversations by the day they started (UTC), both days
+    included. A download holds the conversations shown in the row, with their
+    utterances, keystrokes and survey responses, as one CSV file per table.
+  </p>
+
+  <form method="get" class="studies-filter">
+    {{ form.non_field_errors }}
+    {% for field in form %}
+    <div>
+      {{ field.errors }}
+      <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+      {{ field }}
+    </div>
+    {% endfor %}
+    <div>
+      <input type="submit" value="Filter">
+      {% if filtered %}<a href="{% url 'admin:studies' %}">Clear filters</a>{% endif %}
+    </div>
+  </form>
+
+  {% if studies %}
+  <table id="studies">
+    <caption class="visually-hidden">Studies, most recent activity first</caption>
+    <thead>
+      <tr>
+        <th scope="col">Study</th>
+        <th scope="col">Conversations</th>
+        <th scope="col">By condition</th>
+        <th scope="col">Utterances</th>
+        <th scope="col">First conversation</th>
+        <th scope="col">Last conversation</th>
+        <th scope="col">Open</th>
+        <th scope="col">Export</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for study in studies %}
+      <tr>
+        <th scope="row">{{ study.label }}</th>
+        <td><span class="num">{{ study.conversations }}</span></td>
+        <td>
+          <ul>
+            {% for condition, count in study.conditions %}
+            <li>{{ condition|default_if_none:"(none)"|default:"(empty)" }}: {{ count }}</li>
+            {% endfor %}
+          </ul>
+        </td>
+        <td><span class="num">{{ study.utterances }}</span></td>
+        <td><span class="num">{{ study.first|date:"Y-m-d" }}</span></td>
+        <td><span class="num">{{ study.last|date:"Y-m-d" }}</span></td>
+        <td>
+          <a href="{{ study.conversations_url }}">Conversations<span class="visually-hidden"> in {{ study.label }}</span></a>
+          <a href="{{ study.utterances_url }}">Utterances<span class="visually-hidden"> in {{ study.label }}</span></a>
+        </td>
+        <td>
+          <form method="post" action="{{ study.export_url }}">
+            {% csrf_token %}
+            <button type="submit" class="button">Download zip<span class="visually-hidden"> of {{ study.label }}</span></button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% elif form.is_valid %}
+  <p>No conversations{% if filtered %} match these filters{% else %} yet{% endif %}.</p>
+  {% endif %}
+</div>
+{% endblock %}
