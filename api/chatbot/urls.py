@@ -9,10 +9,13 @@ from .services.keystroke import update_keystrokes
 from .services.survey import survey_response
 from .services.upload import get_presigned_url
 from .services.voicechat import get_realtime_session, upload_voice_utterance
-from .views import ChatbotAPIView, health_check, test_upload
+from .views import ChatbotAPIView, health_check, health_ready, test_upload
 
 urlpatterns = [
     path("health/", health_check, name="health_check"),
+    # Under /api/ because CloudFront only forwards /api/* to the backend;
+    # /health/ is reachable from the load balancer but not from the internet.
+    path("api/health/ready/", health_ready, name="health_ready"),
     path(
         "api/initialize_conversation/",
         InitializeConversationAPIView.as_view(),

@@ -216,6 +216,8 @@ Deploys are triggered by pushing to a branch. CI must pass first.
 
 Each deploy builds the React app to S3 behind CloudFront, and the Django app to Elastic Beanstalk. On boot the production container applies migrations, collects static files, loads bots, and creates the superuser if `DJANGO_SUPERUSER_PASSWORD` is set — see [`api/entrypoint.sh`](api/entrypoint.sh).
 
+After both halves are deployed, the workflow runs [`scripts/smoke.sh`](scripts/smoke.sh) against the site and fails if `/api/health/ready/` (database and cache reachable) or the frontend root is not healthy. It reports a broken deploy; it does not roll one back. Run it by hand with `scripts/smoke.sh https://dev.bot.wwbp.org`.
+
 Production runtime configuration lives in Elastic Beanstalk environment variables, not in a `.env` file. `SECRET_KEY`, database credentials, and LLM API keys must be set there before the first deploy.
 
 ### Infrastructure
