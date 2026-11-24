@@ -11,11 +11,11 @@ import json
 import pytest
 
 from .conftest import (
+    DST,
     DST_DB,
-    DST_HOST,
     DST_PASSWORD,
+    SRC,
     SRC_DB,
-    SRC_HOST,
     admin,
     django,
     plain_copy,
@@ -35,7 +35,7 @@ from .fixture_data import (
 
 def t(sql):
     """Run SQL on the target as root."""
-    return admin(DST_HOST, sql, DST_DB)
+    return admin(DST, sql, DST_DB)
 
 
 def one(sql):
@@ -70,7 +70,7 @@ def test_identical_copy_passes(clean_report):
     report = clean_report
     assert report["ok"] is True
     assert report["differences"] == []
-    source_tables = {row[0] for row in admin(SRC_HOST, "SHOW TABLES", SRC_DB)}
+    source_tables = {row[0] for row in admin(SRC, "SHOW TABLES", SRC_DB)}
     assert set(report["tables"]) == source_tables
     assert {"django_migrations", "chatbot_utterance", "mig_nopk"} <= source_tables
 
@@ -122,28 +122,6 @@ def test_verify_writes_nothing_on_dry_run(copied, tmp_path):
     assert result.returncode == 0, result.stderr
     assert "dry-run" in result.stdout.lower()
     assert not (tmp_path / "verify-report.json").exists()
-
-
-def test_app_reads_the_conversation_from_the_target(copied):
-    out = django(
-        "import django; django.setup();"
-        "from chatbot.tests.data_migration.fixture_data import read_back; read_back()",
-        DST_HOST,
-        DST_DB,
-        DST_PASSWORD,
-    ).stdout
-    seen = json.loads(out.strip().splitlines()[-1])
-    assert seen["logged_in"] is True
-    assert seen["page_status"] == 200
-    assert seen["page_has_emoji_text"] is True
-    assert seen["survey_context"] == SURVEY_CONTEXT
-    assert seen["study_name"] is None
-    assert seen["initial_utterance"] == ""
-    assert seen["texts"][0] == EMOJI_TEXT[:40]
-    assert seen["long_len"] > 900_000
-    # 02:30:15.123456+05:30 as the app stores it: UTC, microseconds intact.
-    assert seen["created_time"] == "2025-03-08T21:00:15.123456+00:00"
-    assert seen["total_utterances"] == N_UTTERANCES + 9
 
 
 # ── every way a copy can be wrong ────────────────────────────────────────────
@@ -343,12 +321,9 @@ def auto_increment_lowered(_):
 
 
 def table_missing(_):
-    t("RENAME TABLE mig_empty TO mig_renamed")
-    return "RENAME TABLE mig_renamed TO mig_empty", (
-        "mig_empty",
-        "table_missing_on_target",
-        None,
-    )
+    t("DROP TABLE mig_empty")
+    undo = "CREATE TABLE mig_empty (id INT PRIMARY KEY, note VARCHAR(10) NULL)"
+    return undo, ("mig_empty", "table_missing_on_target", None)
 
 
 def table_extra(_):
@@ -438,3 +413,38 @@ def test_target_is_clean_after_all_mutations(copied, clean_report, tmp_path):
         assert (
             table["checksum_target"] == clean_report["tables"][name]["checksum_source"]
         )
+
+
+def test_app_reads_the_conversation_from_the_target(copied):
+    # Last on purpose: logging in writes (last_login, a session row, an access
+    # log row), so after this the target no longer matches the source. The
+    # same holds in a real cutover: verify first, then let the app in.
+    out = django(
+        "import django; django.setup();"
+        "from chatbot.tests.data_migration.fixture_data import read_back; read_back()",
+        DST,
+        DST_DB,
+        DST_PASSWORD,
+    ).stdout
+    seen = json.loads(out.strip().splitlines()[-1])
+    assert seen["logged_in"] is True
+    assert seen["page_status"] == 200
+    assert seen["page_has_emoji_text"] is True
+    assert seen["survey_context"] == SURVEY_CONTEXT
+    assert seen["study_name"] is None
+    assert seen["initial_utterance"] == ""
+    assert seen["texts"][0] == EMOJI_TEXT[:40]
+    assert seen["long_len"] > 900_000
+    # 02:30:15.123456+05:30 as the app stores it: UTC, microseconds intact.
+    assert seen["created_time"] == "2025-03-08T21:00:15.123456+00:00"
+    assert seen["total_utterances"] == N_UTTERANCES + 9
+
+
+def test_verify_refuses_mysql_against_mariadb(source_db, tmp_path):
+    if source_db["source"] == source_db["target"]:
+        pytest.skip("needs a MySQL server on one side and MariaDB on the other")
+    result = tool("--run-dir", str(tmp_path), "verify")
+    assert result.returncode == 2
+    assert "REFUSED" in result.stderr
+    assert "not supported" in result.stderr
+    assert not (tmp_path / "verify-report.json").exists()

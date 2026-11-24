@@ -253,9 +253,11 @@ def read_back():
     researchers use, and reads the rows through the ORM.
     """
     from django.test import Client
+    from django.test.utils import setup_test_environment
 
     from chatbot.models import Conversation, Utterance
 
+    setup_test_environment()  # allows the test client's host name
     client = Client()
     logged_in = client.login(username=ADMIN_USER, password=ADMIN_PASSWORD)
     conversation = Conversation.objects.get(conversation_id=AWKWARD_CONVERSATION)
