@@ -303,3 +303,29 @@ def test_a_table_name_cannot_write_to_the_source(same_or_newer_target, tmp_path)
     finally:
         admin(SRC, drop + "; DELETE FROM mig_empty", SRC_DB)
     assert written == "0"
+
+
+def test_quiesced_check_needs_process_privilege(same_or_newer_target, tmp_path):
+    # P2: without PROCESS the processlist shows only the account's own session.
+    admin(
+        SRC,
+        "DROP USER IF EXISTS 'mig_noproc'@'%';"
+        f"CREATE USER 'mig_noproc'@'%' IDENTIFIED BY '{SRC_PASSWORD}';"
+        f"GRANT ALL PRIVILEGES ON {SRC_DB}.* TO 'mig_noproc'@'%'",
+    )
+    idle = _background_sql("DO SLEEP(6);", SRC_DB)
+    try:
+        result, report = preflight(
+            tmp_path,
+            "--require-quiesced",
+            "--quiesce-seconds",
+            "1",
+            env=tool_env(MIG_SOURCE_USER="mig_noproc"),
+        )
+    finally:
+        idle.wait()
+        admin(SRC, "DROP USER IF EXISTS 'mig_noproc'@'%'")
+    assert result.returncode == 1, result.stdout + result.stderr
+    failed = check(report, "source_quiesced")
+    assert failed["status"] == "fail"
+    assert "grant PROCESS" in failed["detail"]
