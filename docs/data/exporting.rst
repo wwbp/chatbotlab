@@ -73,15 +73,31 @@ sent. The ``answers`` column of ``survey_responses.csv`` is a JSON list.
    surveys["answers"] = surveys["answers"].map(json.loads)
    messages = utterances.merge(conversations, on="conversation_id", suffixes=("", "_c"))
 
-Cells are exported exactly as participants typed them. A spreadsheet program
-that opens one of these CSV files can run a cell starting with ``=``, ``+``,
-``-`` or ``@`` as a formula, and participants type the cells. Until the
-exports escape such cells (planned as a separate change), analyse in R or
-pandas and do not open participant text in Excel.
-
 A very large study is built in memory before it downloads. If a download
 times out, narrow it with the date range and download it in parts, or use the
 database directly.
+
+Formula escaping
+----------------
+
+Spreadsheet programs run a cell that starts with ``=``, ``+``, ``-``, ``@``, a
+tab or a carriage return as a formula, and participants type the cells. In
+**CSV and TSV** exports, a text cell that starts with one of these gets one
+apostrophe (``'``) put in front, which spreadsheets read as "this is text".
+Nothing is removed and the rest of the cell is unchanged. Numbers (such as
+``-1``), dates and empty cells are never changed. JSON, YAML and HTML exports
+are not escaped.
+
+IDs, study names and conditions are text, so one that starts with such a
+character is escaped too, the same way in every file, so files still join.
+A cell that already began with an apostrophe followed by one of these
+characters gets one more, so the original can always be recovered. To get the
+text exactly as typed in pandas:
+
+.. code-block:: python
+
+   df = pd.read_csv("Utterance.csv", encoding="utf-8-sig")
+   df["text"] = df["text"].str.replace(r"^'(?='*[=+\-@\t\r])", "", regex=True)
 
 Direct database exports
 -----------------------

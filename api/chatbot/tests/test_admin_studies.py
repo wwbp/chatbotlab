@@ -287,6 +287,23 @@ def test_zip_files_match_the_per_table_exports(viewer, two_studies):
     assert "message_count" in archive.read("conversations.csv").decode("utf-8-sig")
 
 
+def test_zip_escapes_formula_cells_like_the_per_table_exports(viewer, make_session):
+    conversation = make_session("stress", "control", 1)
+    Utterance.objects.create(
+        conversation=conversation, speaker_id="user", text="=HYPERLINK(1)"
+    )
+    Utterance.objects.create(conversation=conversation, speaker_id="user", text="- ok")
+
+    texts = {
+        r["text"]
+        for r in _zip_rows(_export(viewer, study_name="stress"))["utterances.csv"]
+    }
+
+    assert "'=HYPERLINK(1)" in texts
+    assert "'- ok" in texts
+    assert "=HYPERLINK(1)" not in texts
+
+
 def test_zip_honours_condition_and_date_range(viewer, two_studies):
     control = _zip_rows(_export(viewer, study_name="stress", user_group="control"))
     late = _zip_rows(
