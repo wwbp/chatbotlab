@@ -725,11 +725,22 @@ def missing_collations(used, available):
     (``uca1400_ai_ci``) while columns report the full name
     (``utf8mb4_uca1400_ai_ci``), so both spellings are accepted.
     """
+    available = {norm_collation(c) for c in available}
     return sorted(
         c
         for c in used
-        if c and c not in available and c.partition("_")[2] not in available
+        if c
+        and norm_collation(c) not in available
+        and c.partition("_")[2] not in available
     )
+
+
+def norm_collation(name):
+    """utf8_* and utf8mb3_* are one collation under two names (older servers
+    say utf8_, MariaDB 10.6+ and MySQL 8.0.30+ say utf8mb3_)."""
+    if name and name.startswith("utf8_"):
+        return "utf8mb3_" + name[len("utf8_") :]
+    return name
 
 
 def _version(conn):
@@ -906,7 +917,7 @@ def step_preflight(args):
 
     a, b = server_info(src), server_info(dst)
     problem = ""
-    if a["database_collation"] != b["database_collation"]:
+    if norm_collation(a["database_collation"]) != norm_collation(b["database_collation"]):
         problem = (
             f"target database default is {b['database_character_set']}/"
             f"{b['database_collation']}, source is {a['database_character_set']}/"
