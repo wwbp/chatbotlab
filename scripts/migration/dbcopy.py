@@ -154,7 +154,7 @@ def _spawn(conn, sql, writable=False):
         "--quick",  # stream rows; never buffer a whole table in the client
         "--skip-force",  # stop at the first SQL error, even if a file says force
         *_sandbox(),
-        f"--database={conn.database}",  # never read as an option
+        "--skip-reconnect",  # a new connection would lack the session setup
     ]
     # No row cap, whatever an option file's init-command or the server's
     # global settings say (2^64-1 is "no limit").
@@ -168,6 +168,9 @@ def _spawn(conn, sql, writable=False):
     if conn.version and conn.flavour == "mysql":
         # MySQL 8 caches information_schema statistics (AUTO_INCREMENT) for a day.
         preamble += "SET SESSION information_schema_stats_expiry = 0;"
+    # In --init-command, which the client runs on connecting: nothing on
+    # stdin can come before it, and it overrides any init-command in a file.
+    args += [f"--init-command={preamble.rstrip(';')}", f"--database={conn.database}"]
     env = dict(os.environ)
     if conn.password:
         env["MYSQL_PWD"] = conn.password  # environment, not argv
@@ -179,7 +182,7 @@ def _spawn(conn, sql, writable=False):
         env=env,
     )
     # SQL goes in on stdin. Statements here are small; the pipe never fills.
-    proc.stdin.write((preamble + sql).encode())
+    proc.stdin.write(sql.encode())
     proc.stdin.close()
     return proc
 
