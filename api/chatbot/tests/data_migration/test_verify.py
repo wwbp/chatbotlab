@@ -85,7 +85,7 @@ def test_identical_copy_passes(clean_report):
     assert keystrokes["rows_source"] == N_KEYSTROKES
     # The fixture deleted the newest rows: the counter is above MAX(id)+1.
     assert keystrokes["auto_increment_source"] > N_KEYSTROKES + N_DELETED_KEYSTROKES
-    assert keystrokes["auto_increment_target"] >= keystrokes["auto_increment_source"]
+    assert keystrokes["auto_increment_target"] == keystrokes["auto_increment_source"]
 
     # Different tables must not share a checksum by accident of construction.
     checksums = [
@@ -330,6 +330,19 @@ def auto_increment_lowered(_):
     return undo, ("chatbot_keystroke", "auto_increment", None)
 
 
+def auto_increment_raised(_):
+    # A faithful copy carries the counter exactly; ahead means the target was
+    # written to (or the copy came from a later state of the source).
+    original = (
+        t("SHOW CREATE TABLE chatbot_keystroke")[0][1]
+        .split("AUTO_INCREMENT=")[1]
+        .split()[0]
+    )
+    t(f"ALTER TABLE chatbot_keystroke AUTO_INCREMENT = {int(original) + 10}")
+    undo = f"ALTER TABLE chatbot_keystroke AUTO_INCREMENT = {original}"
+    return undo, ("chatbot_keystroke", "auto_increment", None)
+
+
 def table_missing(_):
     t("DROP TABLE mig_empty")
     undo = "CREATE TABLE mig_empty (id INT PRIMARY KEY, note VARCHAR(10) NULL)"
@@ -383,6 +396,7 @@ MUTATIONS = [
     index_dropped,
     foreign_key_dropped,
     auto_increment_lowered,
+    auto_increment_raised,
     table_missing,
     table_extra,
     migration_record_missing,
