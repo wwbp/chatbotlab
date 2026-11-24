@@ -57,7 +57,14 @@ class StaffPasswordResetForm(PasswordResetForm):
     def get_users(self, email):
         # Unlike Django's default, include users with an unusable password:
         # an invited person who lost the invite must be able to recover.
-        return User.objects.filter(email__iexact=email, is_active=True, is_staff=True)
+        users = User.objects.filter(email__iexact=email, is_active=True, is_staff=True)
+        if not users.exists():
+            # Server side only; the page stays the same (no enumeration).
+            logger.info(
+                "password reset for no active staff account at %s",
+                email.rpartition("@")[2],
+            )
+        return users
 
     def send_mail(
         self,
