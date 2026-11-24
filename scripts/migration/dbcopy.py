@@ -1195,6 +1195,12 @@ DUMP_OPTIONS = [
     # dump loaded into the wrong database would destroy what is there.
     "--skip-add-drop-table",
     "--max-allowed-packet=1G",
+    # Pinned off whatever a [mysqldump] group in the option file says: no
+    # FLUSH, no global read lock, no binlog position or purge on the source.
+    "--skip-flush-logs",
+    "--skip-lock-all-tables",
+    "--master-data=0",
+    "--skip-delete-master-logs",
 ]
 TRAILER = b"-- Dump completed"
 
@@ -1487,7 +1493,12 @@ def load_dump(dst, path):
     # --show-warnings: dumps switch strict mode off, so bad data is only a
     # warning; restore treats any warning as failure.
     command, env = _command(
-        CLIENT, dst, "--max-allowed-packet=1G", "--show-warnings", "--skip-force"
+        CLIENT,
+        dst,
+        "--max-allowed-packet=1G",
+        "--show-warnings",
+        "--skip-force",
+        *_sandbox(),
     )
     # One handle, hashed as it is fed: the bytes loaded are the bytes checked.
     digest = hashlib.sha256()
