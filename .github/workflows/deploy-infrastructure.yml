@@ -33,7 +33,8 @@ name: Deploy Infrastructure
 #   ANTHROPIC_API_KEY        — Anthropic key (optional if OPENAI_API_KEY is set)
 #   DB_PASSWORD              — Password you choose for the database (letters + numbers only)
 #   ADMIN_PANEL_PASSWORD     — Password you will use to log into the admin panel
-#   GH_PAT                   — GitHub personal access token with secrets:write on this repo
+#   GH_PAT                   — GitHub personal access token with secrets:write on this repo.
+#                              Needed only when write_deploy_secrets is ticked.
 #   TF_PROJECT_PREFIX        — Name prefix for every AWS resource (must match
 #                              var.project_name in infra/terraform). Kept in a
 #                              secret so this public repo does not publish the
@@ -59,6 +60,14 @@ on:
         options:
           - staging
           - production
+      # Off unless asked. The deploy secrets decide where staging.yml and
+      # production.yml send the application, so writing them is a cutover step,
+      # not part of building infrastructure.
+      write_deploy_secrets:
+        description: "Also point this environment's app deploy workflow at this stack (writes GitHub secrets)"
+        required: false
+        default: false
+        type: boolean
       eb_instance_type:
         description: 'App server EC2 instance type (e.g. t3.small, t3.medium)'
         required: false
@@ -98,6 +107,8 @@ jobs:
           AWS_SECRET:           ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           GH_PAT:               ${{ secrets.GH_PAT }}
           TF_PROJECT_PREFIX:    ${{ secrets.TF_PROJECT_PREFIX }}
+          ENVIRONMENT:          ${{ inputs.environment }}
+          WRITE_DEPLOY_SECRETS: ${{ inputs.write_deploy_secrets }}
         run: |
           fail=0
           missing() { echo "::error::$1 secret is not set"; fail=1; }
@@ -106,7 +117,7 @@ jobs:
           [[ -z "$AWS_SECRET" ]]          && missing "AWS_SECRET_ACCESS_KEY"
           [[ -z "$DB_PASSWORD" ]]         && missing "DB_PASSWORD"
           [[ -z "$ADMIN_PANEL_PASSWORD" ]] && missing "ADMIN_PANEL_PASSWORD"
-          [[ -z "$GH_PAT" ]]              && missing "GH_PAT"
+          [[ "$WRITE_DEPLOY_SECRETS" == "true" && -z "$GH_PAT" ]] && missing "GH_PAT"
           [[ -z "$TF_PROJECT_PREFIX" ]]   && missing "TF_PROJECT_PREFIX"
 
           if [[ -z "$OPENAI_KEY" && -z "$ANTHROPIC_KEY" ]]; then
@@ -116,16 +127,33 @@ jobs:
 
           [[ $fail -eq 1 ]] && exit 1
 
-          # Validate GH_PAT has write access before touching AWS.
-          # We do this by writing and immediately deleting a test secret.
-          export GH_TOKEN="$GH_PAT"
-          if ! gh secret set __PREFLIGHT_TEST__ --body "ok" --repo "${{ github.repository }}" 2>/dev/null; then
-            echo "::error::GH_PAT cannot write repository secrets on ${{ github.repository }}."
-            echo "::error::Classic token: tick the top-level 'repo' scope. 'public_repo' is NOT enough, even for a public repository."
-            echo "::error::Fine-grained token: it must list ${{ github.repository }} under 'Only select repositories', with Repository permissions -> Secrets: Read and write."
-            exit 1
+          if [[ "$WRITE_DEPLOY_SECRETS" == "true" ]]; then
+            # Validate GH_PAT has write access before touching AWS.
+            # We do this by writing and immediately deleting a test secret.
+            export GH_TOKEN="$GH_PAT"
+            if ! gh secret set __PREFLIGHT_TEST__ --body "ok" --repo "${{ github.repository }}" 2>/dev/null; then
+              echo "::error::GH_PAT cannot write repository secrets on ${{ github.repository }}."
+              echo "::error::Classic token: tick the top-level 'repo' scope. 'public_repo' is NOT enough, even for a public repository."
+              echo "::error::Fine-grained token: it must list ${{ github.repository }} under 'Only select repositories', with Repository permissions -> Secrets: Read and write."
+              exit 1
+            fi
+            gh secret delete __PREFLIGHT_TEST__ --repo "${{ github.repository }}" 2>/dev/null || true
+
+            # production.yml falls back to AWS_ACCOUNT_ID, AWS_ROLE_NAME and
+            # AWS_BACKEND_APPLICATION_NAME until its own AWS_PROD_* secrets
+            # exist. Writing the staging values while it still falls back
+            # would repoint production deploys at the staging stack.
+            if [[ "$ENVIRONMENT" == "staging" ]]; then
+              existing=$(gh secret list --repo "${{ github.repository }}" --json name --jq '.[].name')
+              for name in AWS_PROD_ACCOUNT_ID AWS_PROD_ROLE_NAME AWS_PROD_BACKEND_APPLICATION_NAME; do
+                if ! grep -qx "$name" <<<"$existing"; then
+                  echo "::error::$name is not set. Set the three AWS_PROD_* secrets (account, role, EB application) to the values production uses today before writing the staging secrets."
+                  fail=1
+                fi
+              done
+              if [[ $fail -eq 1 ]]; then exit 1; fi
+            fi
           fi
-          gh secret delete __PREFLIGHT_TEST__ --repo "${{ github.repository }}" 2>/dev/null || true
 
           echo "All required secrets are present and valid."
 
@@ -286,43 +314,48 @@ jobs:
         run: |
           terraform apply -auto-approve -input=false
 
-      # ── 10. Write all secrets needed by staging.yml / production.yml ──────────
+      # ── 10. Point one environment's app deploy workflow at this stack ─────────
+      # Only when asked, and only the secrets of the environment that was
+      # built: staging.yml reads the plain names, production.yml reads the
+      # *PROD* names. The two lists share nothing, so building one environment
+      # can never repoint the other's deploys.
       - name: Write deployment secrets
+        if: inputs.write_deploy_secrets
         working-directory: infra/terraform
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
+          ENVIRONMENT: ${{ inputs.environment }}
         run: |
           REPO="${{ github.repository }}"
           set_secret() { gh secret set "$1" --body "$2" --repo "$REPO"; }
+          out() { terraform output -raw "github_secret_$1"; }
 
-          set_secret AWS_ACCOUNT_ID                     "$(terraform output -raw github_secret_AWS_ACCOUNT_ID)"
-          set_secret AWS_ROLE_NAME                      "$(terraform output -raw github_secret_AWS_ROLE_NAME)"
-          set_secret AWS_S3_BUCKET_NAME_FRONTEND        "$(terraform output -raw github_secret_AWS_S3_BUCKET_NAME_FRONTEND)"
-          set_secret AWS_S3_PROD_BUCKET_NAME_FRONTEND   "$(terraform output -raw github_secret_AWS_S3_BUCKET_NAME_FRONTEND)"
-          set_secret AWS_CLOUDFRONT_DISTRIBUTION_ID     "$(terraform output -raw github_secret_AWS_CLOUDFRONT_DISTRIBUTION_ID)"
-          set_secret AWS_PROD_CLOUDFRONT_DISTRIBUTION_ID "$(terraform output -raw github_secret_AWS_PROD_CLOUDFRONT_DISTRIBUTION_ID)"
-          set_secret AWS_BACKEND_APPLICATION_NAME       "$(terraform output -raw github_secret_AWS_BACKEND_APPLICATION_NAME)"
-          set_secret AWS_BACKEND_ENVIRONMENT_NAME       "$(terraform output -raw github_secret_AWS_BACKEND_ENVIRONMENT_NAME)"
-          set_secret AWS_PROD_BACKEND_ENVIRONMENT_NAME  "$(terraform output -raw github_secret_AWS_PROD_BACKEND_ENVIRONMENT_NAME)"
+          case "$ENVIRONMENT" in
+            staging)
+              set_secret AWS_ACCOUNT_ID                 "$(out AWS_ACCOUNT_ID)"
+              set_secret AWS_ROLE_NAME                  "$(out AWS_ROLE_NAME)"
+              set_secret AWS_S3_BUCKET_NAME_FRONTEND    "$(out AWS_S3_BUCKET_NAME_FRONTEND)"
+              set_secret AWS_CLOUDFRONT_DISTRIBUTION_ID "$(out AWS_CLOUDFRONT_DISTRIBUTION_ID)"
+              set_secret AWS_BACKEND_APPLICATION_NAME   "$(out AWS_BACKEND_APPLICATION_NAME)"
+              set_secret AWS_BACKEND_ENVIRONMENT_NAME   "$(out AWS_BACKEND_ENVIRONMENT_NAME)"
+              ;;
+            production)
+              set_secret AWS_PROD_ACCOUNT_ID                 "$(out AWS_ACCOUNT_ID)"
+              set_secret AWS_PROD_ROLE_NAME                  "$(out AWS_ROLE_NAME)"
+              set_secret AWS_S3_PROD_BUCKET_NAME_FRONTEND    "$(out AWS_S3_BUCKET_NAME_FRONTEND)"
+              set_secret AWS_PROD_CLOUDFRONT_DISTRIBUTION_ID "$(out AWS_CLOUDFRONT_DISTRIBUTION_ID)"
+              set_secret AWS_PROD_BACKEND_APPLICATION_NAME   "$(out AWS_BACKEND_APPLICATION_NAME)"
+              set_secret AWS_PROD_BACKEND_ENVIRONMENT_NAME   "$(out AWS_BACKEND_ENVIRONMENT_NAME)"
+              ;;
+            *)
+              echo "::error::Unknown environment '$ENVIRONMENT'"
+              exit 1
+              ;;
+          esac
           # No API URL secret is written on purpose. CloudFront proxies /api/*
           # to the backend on the same host it serves the app from, so the
           # frontend uses a relative /api base and needs no build-time URL.
           # That also means a custom domain needs no frontend rebuild.
-
-      # ── 11. Trigger application deployment ───────────────────────────────────
-      # Now that infrastructure exists and all secrets are written, kick off
-      # the production deploy so researchers don't need a second manual click.
-      # A failed dispatch must not fail the run: by this point the
-      # infrastructure is built and healthy.
-      - name: Trigger application deployment
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: |
-          gh workflow run production.yml \
-            --repo "${{ github.repository }}" \
-            --ref "${{ github.ref }}"
-          echo "Application deployment triggered — check the Actions tab for progress."
 
       # ── 12. Report a failure — and change nothing ─────────────────────────────
       # A failed apply leaves every resource it created in place and recorded
@@ -358,7 +391,7 @@ jobs:
             echo ""
             echo "Log in to the admin panel with username \`admin\` and the password you set as \`ADMIN_PANEL_PASSWORD\`."
             echo ""
-            echo "**Next step:** push to the \`main\` branch to deploy the application code."
+            echo "**Next step:** deploy the application code. Infrastructure and application deploys are separate: this workflow does not start one."
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [[ -n "$DOMAIN" ]]; then

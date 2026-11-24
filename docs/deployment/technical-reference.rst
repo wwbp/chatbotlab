@@ -109,10 +109,9 @@ Runs ``terraform apply`` against the remote S3 state backend. Steps:
 4. **ACM certificate** (custom domain only). Targeted apply, so the validation CNAME can be printed before the full apply blocks waiting for DNS.
 5. **Print DNS validation record** (custom domain only). Written to the workflow Summary.
 6. **``terraform apply``**. Full infrastructure apply.
-7. **Write deployment secrets**. Uses ``GH_PAT`` to write all downstream secrets (``AWS_ROLE_NAME``, ``AWS_S3_PROD_BUCKET_NAME_FRONTEND``, etc.) directly into the GitHub repo via ``gh secret set``.
-8. **Trigger application deployment**. Calls ``gh workflow run production.yml``, so the app deploys without a second manual click.
-9. **Report failure**. If any step fails, the workflow writes a notice to the Summary and changes nothing. It does not destroy, delete or import resources.
-10. **Summary**. Writes the chatbot URL and admin panel URL to the workflow Summary.
+7. **Write deployment secrets** (only when the ``write_deploy_secrets`` input is ticked). Uses ``GH_PAT`` to write the deploy secrets of the selected environment with ``gh secret set``. Staging gets the names ``staging.yml`` reads (``AWS_ROLE_NAME``, ``AWS_S3_BUCKET_NAME_FRONTEND``, etc.). Production gets the names ``production.yml`` reads (``AWS_PROD_ROLE_NAME``, ``AWS_S3_PROD_BUCKET_NAME_FRONTEND``, etc.). The two lists share no name. The workflow does not start an application deploy.
+8. **Report failure**. If any step fails, the workflow writes a notice to the Summary and changes nothing. It does not destroy, delete or import resources.
+9. **Summary**. Writes the chatbot URL and admin panel URL to the workflow Summary.
 
 ``production.yml`` (triggers on push to ``main`` or ``workflow_dispatch``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
