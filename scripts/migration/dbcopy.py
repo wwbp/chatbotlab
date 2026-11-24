@@ -14,7 +14,8 @@ are visible in the process list):
 
 Only the standard library and the ``mariadb`` client binary are used.
 
-Exit status: 0 success, 1 the check found a problem, 2 could not run.
+Exit status: 0 succeeded; 1 a check or comparison found a problem; 2 refused,
+crashed or interrupted. Anything but 0 means stop.
 """
 
 import argparse
@@ -756,6 +757,14 @@ def main(argv=None):
         return args.func(args)
     except Refuse as error:
         sys.stderr.write(f"REFUSED: {error}\n")
+        return 2
+    except KeyboardInterrupt:
+        sys.stderr.write("INTERRUPTED: stopped before finishing; nothing was proven.\n")
+        return 2
+    except Exception as error:  # noqa: BLE001 - any bug must be exit 2, not 1
+        sys.stderr.write(
+            f"CRASHED: {type(error).__name__}: {error}\nNothing was proven.\n"
+        )
         return 2
 
 
