@@ -238,3 +238,24 @@ def test_help_states_the_exit_code_contract(tmp_path):
         in text
     )
     assert "Anything but 0 means stop" in text
+
+
+def _source_commands(commands):
+    return [c for c in commands if f"--host={SRC.host} " in c and f"{SRC_DB}" in c]
+
+
+def test_read_only_survives_a_reconnect(same_flavour, tmp_path):
+    # P4: setup sent once on stdin is lost if the client silently reconnects;
+    # --init-command is re-run on every connect, and reconnecting is off.
+    plain_copy()
+    result, commands = tool_recording_commands(
+        tmp_path, "--run-dir", str(tmp_path / "run"), "verify"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    source = _source_commands(commands)
+    assert len(source) > 5
+    for command in source:
+        assert "--skip-reconnect" in command, command
+        assert "--init-command=" in command, command
+        init = command.split("--init-command=", 1)[1]
+        assert "SET SESSION TRANSACTION READ ONLY" in init, command
