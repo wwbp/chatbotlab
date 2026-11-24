@@ -121,6 +121,11 @@ The workflow has two jobs. Setup is in ``infra/terraform/README.md``, section "R
 10. **Report failure**. If any step fails, the workflow writes a notice to the Summary and changes nothing. It does not destroy, delete or import resources.
 11. **Summary**. Writes the chatbot URL and admin panel URL to the workflow Summary.
 
+``destroy-infrastructure.yml`` (manual trigger only)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Deletes one environment and its data. The person who starts it must type the environment name, the confirmation ``destroy <environment>`` and the confirmation ``destroy data``. For production, the person must also tick ``allow_production``. A first job checks these values before the workflow signs in to AWS. The second job runs in the GitHub Environment with the same name, so required reviewers must approve it. It empties only the buckets of that environment and does not delete the Terraform state bucket.
+
 ``production.yml`` (triggers on push to ``main`` or ``workflow_dispatch``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -163,7 +168,7 @@ The trust policy on the GitHub Actions IAM role restricts assumption to:
 - OIDC issuer: ``token.actions.githubusercontent.com``
 - Subject: ``repo:{github_org}/{github_repo}:*`` (scoped to the exact fork)
 
-``deploy-infrastructure.yml`` also signs in through OIDC, with roles that a person creates one time from the policies in ``infra/terraform/bootstrap/iam/``: a read-only plan role for staging, and per environment an apply role and a permissions boundary for the roles the stack creates. The Terraform roles carry an explicit Deny on the hand-built live resources in the same account, on the other environment's resources and on the GitHub OIDC provider. ``destroy-infrastructure.yml`` still uses the long-lived ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY``.
+``deploy-infrastructure.yml`` also signs in through OIDC, with roles that a person creates one time from the policies in ``infra/terraform/bootstrap/iam/``: a read-only plan role for staging, and per environment an apply role and a permissions boundary for the roles the stack creates. The Terraform roles carry an explicit Deny on the hand-built live resources in the same account, on the other environment's resources and on the GitHub OIDC provider. ``destroy-infrastructure.yml`` uses the apply role. No workflow uses long-lived AWS keys.
 
 
 Application stack
@@ -229,14 +234,14 @@ Security configuration
 Known gotchas
 -------------
 
-1. RDS automated backups are disabled by default
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+1. RDS automated backups depend on the environment
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``backup_retention_period = 0`` in ``infra/terraform/rds.tf``. This was intentional: some AWS free-tier and newly created accounts reject RDS instances with ``backup_retention_period > 0`` during certain multi-AZ or instance class combinations, causing ``terraform apply`` to fail. With retention at 0, deployment works on any account type.
+``infra/terraform/rds.tf`` sets ``backup_retention_period`` to ``7`` days for production and ``1`` day for staging. AWS takes a daily snapshot and keeps the transaction logs for that period, so you can restore the database to a point in time in that period.
 
-**What you lose:** point-in-time recovery. If the database is corrupted or data is accidentally deleted, you cannot restore to a previous state.
+Production also has ``deletion_protection`` and takes a final snapshot when the database is deleted. Staging has neither.
 
-**To enable backups:** change ``backup_retention_period`` to ``7`` (or higher) in ``rds.tf`` and re-run the Deploy Infrastructure workflow. AWS will begin taking daily snapshots retained for that many days. Note that backup storage incurs a small additional cost.
+**To keep backups longer:** change the number in ``rds.tf`` in a pull request and apply it with the Deploy Infrastructure workflow. Backup storage has a small cost.
 
 2. CloudFront ``custom_error_response`` blocks are global
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
