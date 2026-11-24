@@ -106,14 +106,13 @@ Runs ``terraform apply`` against the remote S3 state backend. Steps:
 1. **Check required secrets**. Validates presence and GH_PAT write access before touching AWS.
 2. **Bootstrap state bucket**. Creates ``{PROJECT_PREFIX}-tfstate-{ACCOUNT_ID}`` if absent (idempotent).
 3. **Terraform init**. Points to the remote state bucket.
-4. **Reconcile orphaned resources**. Handles partial failures from previous runs. VPC-scoped resources (RDS, ElastiCache, EB environment) are purged if the VPC ID changed. Non-VPC resources are imported.
-5. **ACM certificate** (custom domain only). Targeted apply, so the validation CNAME can be printed before the full apply blocks waiting for DNS.
-6. **Print DNS validation record** (custom domain only). Written to the workflow Summary.
-7. **``terraform apply``**. Full infrastructure apply.
-8. **Write deployment secrets**. Uses ``GH_PAT`` to write all downstream secrets (``AWS_ROLE_NAME``, ``AWS_S3_PROD_BUCKET_NAME_FRONTEND``, etc.) directly into the GitHub repo via ``gh secret set``.
-9. **Trigger application deployment**. Calls ``gh workflow run production.yml``, so the app deploys without a second manual click.
-10. **Rollback on failure**. If any step fails, ``terraform destroy`` cleans up all created resources.
-11. **Summary**. Writes the chatbot URL and admin panel URL to the workflow Summary.
+4. **ACM certificate** (custom domain only). Targeted apply, so the validation CNAME can be printed before the full apply blocks waiting for DNS.
+5. **Print DNS validation record** (custom domain only). Written to the workflow Summary.
+6. **``terraform apply``**. Full infrastructure apply.
+7. **Write deployment secrets**. Uses ``GH_PAT`` to write all downstream secrets (``AWS_ROLE_NAME``, ``AWS_S3_PROD_BUCKET_NAME_FRONTEND``, etc.) directly into the GitHub repo via ``gh secret set``.
+8. **Trigger application deployment**. Calls ``gh workflow run production.yml``, so the app deploys without a second manual click.
+9. **Report failure**. If any step fails, the workflow writes a notice to the Summary and changes nothing. It does not destroy, delete or import resources.
+10. **Summary**. Writes the chatbot URL and admin panel URL to the workflow Summary.
 
 ``production.yml`` (triggers on push to ``main`` or ``workflow_dispatch``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -248,12 +247,14 @@ CloudFront references ``aws_elastic_beanstalk_environment.chatbot_api.cname`` (i
 
 **Workaround in use:** ``ALLOWED_HOSTS`` uses ``.cloudfront.net`` (leading dot = Django subdomain wildcard) so it matches any CloudFront domain without referencing the specific distribution. ``FRONTEND_URL`` is only set when ``var.domain_name`` is provided (a static string), not derived from the CloudFront resource. ``CSRF_TRUSTED_ORIGINS`` includes ``https://*.cloudfront.net`` statically in ``settings.py``.
 
-4. VPC-scoped resource reconciliation
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+4. A failed apply is not rolled back
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-RDS subnet groups and ElastiCache caches are created in specific VPC subnets. If the VPC is destroyed (e.g., a failed rollback) and recreated, the new VPC has different subnet IDs. AWS rejects updates to a subnet group that change the underlying VPC, with: ``Subnets are not in the same VPC``.
+If ``terraform apply`` fails, the resources it already created stay in AWS and in the Terraform state. The workflow used to run ``terraform destroy`` on any failure, and to delete the database when the state looked wrong. On a re-run against a stack that holds study data, that deleted the stack. Both steps are removed.
 
-**Workaround:** The reconcile step in ``deploy-infrastructure.yml`` detects this by comparing the VPC ID in Terraform state against the VPC ID of the existing RDS subnet group. If they diverge, it purges all VPC-scoped resources from both state and AWS before running ``terraform apply``, allowing Terraform to recreate them cleanly.
+**What to do:** read the failed step's log, fix the cause and run the workflow again. Terraform continues from the state. To remove a stack on purpose, run the Destroy Infrastructure workflow.
+
+**If a resource exists in AWS but not in the state** (``AlreadyExists`` errors), do not delete it from a script. Find out which state owns it first, then run ``terraform import`` or remove the resource by hand.
 
 5. GitHub OIDC provider is a singleton per AWS account
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -316,4 +317,4 @@ Re-running the infrastructure workflow
 
 The workflow is safe to re-run at any time. Terraform is idempotent. It compares the desired state (in ``.tf`` files) against the current state (in S3) and only changes what is different. Re-running to change instance sizes, rotate secrets, or add a custom domain is the intended use pattern.
 
-The reconcile step handles partial failures automatically. You do not need to manually clean up AWS resources before re-running.
+A failed run leaves its resources in place and in the state (see gotcha 4). Run the workflow again after you fix the cause.
