@@ -121,6 +121,30 @@ Runs ``terraform apply`` against the remote S3 state backend. Steps:
 1. Runs the CI suite (``ci.yml``) as a prerequisite
 2. **Frontend:** builds React with ``VITE_API_URL`` injected, syncs to S3, invalidates CloudFront cache
 3. **Backend:** runs ``eb deploy`` via the AWS EB CLI, which packages and uploads the Docker image and triggers a rolling deployment on EB
+4. **Smoke test:** once both deploys finish, runs ``scripts/smoke.sh <site-url>``, which polls ``/api/health/ready/`` for up to five minutes and then checks that ``/`` serves the app. The workflow fails if either check does not pass. It reports a broken deploy; it does not roll it back. ``staging.yml`` does the same.
+
+The site URL is ``https://bot.wwbp.org`` (``https://dev.bot.wwbp.org`` for staging) in the ``wwbp/chatbotlab`` repository. Any other deployment sets the repository variable ``PRODUCTION_SITE_URL`` (``STAGING_SITE_URL``) to its own URL, for example ``https://xxxx.cloudfront.net``; without it the smoke test is skipped with a warning.
+
+
+Health endpoints
+-----------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Path
+     - Purpose
+   * - ``/health/``
+     - Liveness. Returns 200 whenever Django is running and checks nothing else. This is the Elastic Beanstalk / load balancer health check path, so it must not depend on the database: a brief database blip would mark every instance unhealthy and trigger replacements. CloudFront does not forward it, so it is not reachable from the internet.
+   * - ``/api/health/ready/``
+     - Readiness. Runs ``SELECT 1`` on the database and a set/get on the Redis cache. Returns 200 ``{"status": "ok", ...}`` when both work, otherwise 503 with ``"database"`` or ``"cache"`` marked ``"failed"``. The cause is in the application log, never in the response. Public and unauthenticated, under ``/api/`` so that it is reachable through CloudFront.
+
+Unapplied migrations are not checked: ``entrypoint.sh`` runs ``migrate`` under ``set -e`` before the server starts, so a container whose migrations failed never serves requests.
+
+Run the smoke test by hand at any time::
+
+    scripts/smoke.sh https://dev.bot.wwbp.org
 
 
 GitHub OIDC (passwordless CI/CD)

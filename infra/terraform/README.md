@@ -401,7 +401,7 @@ aws cloudfront create-invalidation \
 | `https://<cloudfront-domain>/` | React frontend |
 | `https://<cloudfront-domain>/api/` | Django REST API |
 | `https://<cloudfront-domain>/api/admin/` | Django admin (login with superuser credentials above) |
-| `https://<cloudfront-domain>/health/` | Health check |
+| `https://<cloudfront-domain>/api/health/ready/` | Readiness check (database + cache) |
 
 ---
 
@@ -430,7 +430,7 @@ deploy both frontend and backend automatically.
 
 Not yet done. Suggested baseline before any load test:
 
-1. **Health endpoint** — `curl https://<cf-domain>/health/` should return 200 in < 200 ms
+1. **Health endpoint** — `curl https://<cf-domain>/api/health/ready/` should return 200 in < 200 ms
 2. **API under load** — use `ab` or `k6` against `/api/` endpoints; watch EB CPU and RDS connections
 3. **WebSocket** — verify the `/ws/` path stays open under concurrent connections
 4. **CloudFront cache hit rate** — check CloudFront metrics in the AWS console after serving real traffic

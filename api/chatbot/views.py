@@ -1,9 +1,12 @@
 import json
 import logging
 
+from django.core.cache import cache
+from django.db import connection
 from django.http import JsonResponse
 from django.utils.decorators import method_decorator
 from django.views import View
+from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import csrf_exempt
 
 from .services.post_processing import (
@@ -17,7 +20,50 @@ logger = logging.getLogger(__name__)
 
 
 def health_check(request):
+    # Liveness only, on purpose: this is the load balancer / Elastic Beanstalk
+    # health check path. If it queried the database, a brief database blip
+    # would mark every instance unhealthy at once and trigger replacements.
+    # Dependency checks live in health_ready below.
     return JsonResponse({"status": "ok"})
+
+
+def _check_database():
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT 1")
+        cursor.fetchone()
+
+
+def _check_cache():
+    # Round-trip rather than trust set(): django-redis runs with
+    # IGNORE_EXCEPTIONS, so a dead Redis drops the write and returns None on
+    # the read instead of raising.
+    cache.set("health:ready", "ok", 30)
+    if cache.get("health:ready") != "ok":
+        raise RuntimeError("cache round-trip failed")
+
+
+@never_cache
+def health_ready(request):
+    """
+    Readiness: can this deployment reach its database and cache?
+
+    Polled by scripts/smoke.sh after a deploy, not by the load balancer. The
+    body names which check failed and nothing else — the exception (hostnames,
+    credentials) goes to the server log only.
+    """
+    checks = {}
+    for name, check in (("database", _check_database), ("cache", _check_cache)):
+        try:
+            check()
+            checks[name] = "ok"
+        except Exception:
+            logger.exception("Readiness check failed: %s", name)
+            checks[name] = "failed"
+    ok = all(result == "ok" for result in checks.values())
+    return JsonResponse(
+        {"status": "ok" if ok else "unavailable", "checks": checks},
+        status=200 if ok else 503,
+    )
 
 
 @csrf_exempt
