@@ -104,6 +104,8 @@ jobs:
           - {source: "mariadb:10.11", target: "mariadb:10.11"}
           - {source: "mariadb:11.4", target: "mariadb:11.4"}
           - {source: "mysql:8.0", target: "mysql:8.0"}
+          # An older target: preflight must refuse unless told otherwise.
+          - {source: "mariadb:11.4", target: "mariadb:10.11"}
           # Different flavours: only the "refuses" tests run.
           - {source: "mysql:8.0", target: "mariadb:10.11"}
     services:

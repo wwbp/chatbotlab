@@ -10,6 +10,7 @@ The source gets the app's real schema (``manage.py migrate``) plus the data in
 ``fixture_data.py``.
 """
 
+import importlib.util
 import json
 import os
 import shutil
@@ -217,10 +218,13 @@ def db_collation(server, db):
     )[0][0]
 
 
-def reset_target(collation=None):
-    _create_db_and_user(
-        DST, DST_DB, DST_PASSWORD, collation or db_collation(SRC, SRC_DB)
-    )
+def reset_target():
+    """Drop and recreate the target database, empty, with the source's default
+    collation where the target server has it (it may not, across flavours)."""
+    try:
+        _create_db_and_user(DST, DST_DB, DST_PASSWORD, db_collation(SRC, SRC_DB))
+    except RuntimeError:
+        _create_db_and_user(DST, DST_DB, DST_PASSWORD)
 
 
 def plain_copy():
@@ -251,6 +255,13 @@ def plain_copy():
     )
     assert dump.wait() == 0
     assert load.returncode == 0, load.stderr.decode()
+
+
+@pytest.fixture(autouse=True)
+def _needs_the_script():
+    # The dev container mounts only api/; CI checks out the whole repository.
+    if not SCRIPT.exists():
+        pytest.skip("needs scripts/migration/dbcopy.py, which is outside api/")
 
 
 @pytest.fixture(scope="session")
@@ -295,3 +306,59 @@ def same_flavour(source_db):
 
 def read_report(run_dir):
     return json.loads((Path(run_dir) / "verify-report.json").read_text())
+
+
+def load_tool():
+    """Import scripts/migration/dbcopy.py as a module (it is not a package)."""
+    spec = importlib.util.spec_from_file_location("dbcopy", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["dbcopy"] = module  # dataclasses look the module up by name
+    spec.loader.exec_module(module)
+    return module
+
+
+def read_log(run_dir):
+    lines = (Path(run_dir) / "run.log").read_text().splitlines()
+    return [json.loads(line) for line in lines]
+
+
+def tool_recording_commands(tmp_path, *args, env=None):
+    """Run the tool and record every database client command line it issues.
+
+    Wrappers named like the clients go first on PATH; each appends its full
+    argument list (exactly what `ps` would show) to a file, then becomes the
+    real client. Complete and deterministic, unlike sampling the process list.
+    Returns (result, list of command lines); recorded_stdin() reads what
+    each client run was sent.
+    """
+    bin_dir = tmp_path / "recording-bin"
+    bin_dir.mkdir(exist_ok=True)
+    record = tmp_path / "recorded-commands.txt"
+    record.write_text("")
+    stdin_dir = tmp_path / "recorded-stdin"
+    stdin_dir.mkdir(exist_ok=True)
+    for name, real in (("mariadb", CLIENT), ("mariadb-dump", DUMP)):
+        wrapper = bin_dir / name
+        # The client also gets its stdin copied to one file per run: first
+        # line its arguments, then everything it was sent.
+        run = (
+            f"f=$(mktemp -p '{stdin_dir}'); printf '%s\\n' \"$*\" > \"$f\"\n"
+            f'tee -a "$f" | \'{real}\' "$@"\n'
+            if name == "mariadb"
+            else f"exec '{real}' \"$@\"\n"
+        )
+        wrapper.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >> '{record}'\n{run}")
+        wrapper.chmod(0o755)
+    env = dict(env or tool_env())
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    result = tool(*args, env=env)
+    return result, record.read_text().splitlines()
+
+
+def recorded_stdin(tmp_path):
+    """[(arguments, stdin text)] for each client run under tool_recording_commands."""
+    runs = []
+    for path in sorted((tmp_path / "recorded-stdin").iterdir()):
+        argv, _, sent = path.read_text(errors="replace").partition("\n")
+        runs.append((argv, sent))
+    return runs
