@@ -307,3 +307,19 @@ def test_source_sessions_do_not_wait_a_year_for_a_lock(same_flavour, tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     for command in _source_commands(commands):
         assert "SET SESSION lock_wait_timeout = 10" in command, command
+
+
+def test_awkward_password_is_scrubbed_from_the_run_log(source_db, tmp_path):
+    # P10: JSON escapes ", \\ and non-ASCII, so scrubbing the JSON text misses.
+    password = 'q"u\\o-té-test-pw'
+    env = shim(tmp_path, "mariadb", 'echo "denied for $MYSQL_PWD" >&2; exit 1')
+    env["MIG_SOURCE_PASSWORD"] = password
+    result = tool("--run-dir", str(tmp_path / "run"), "verify", env=env)
+    assert result.returncode == 2
+    leaked = password in result.stdout + result.stderr
+    assert not leaked, "password in output"
+    text = (tmp_path / "run" / "run.log").read_text()
+    entries = read_log(tmp_path / "run")
+    values = [v for e in entries for v in e.values() if isinstance(v, str)]
+    leaked = password in text or any(password in v for v in values)
+    assert not leaked, "password in run.log"
