@@ -21,6 +21,7 @@ from .conftest import (
     DST,
     DST_DB,
     DST_PASSWORD,
+    DUMP,
     ROOT_PASSWORD,
     SCRIPT,
     SRC,
@@ -33,6 +34,7 @@ from .conftest import (
     read_log,
     read_report,
     reset_target,
+    shim,
     tool,
     tool_env,
     tool_recording_commands,
@@ -277,6 +279,30 @@ def test_restore_refuses_a_file_this_run_did_not_dump(dumped, tmp_path):
     reset_target()
     (tmp_path / "dump.sql").write_bytes((dumped / "dump.sql").read_bytes())
     result = tool("--run-dir", str(tmp_path), "restore")
+    assert result.returncode == 2
+    assert "no dump is recorded" in result.stderr
+    assert target_tables() == []
+
+
+# ── a dump that fails (D2) ───────────────────────────────────────────────────
+
+BROKEN_DUMPS = {
+    "half_then_error": f'"{DUMP}" "$@" | head -c 200000; exit 2',
+    "no_trailer_exit_0": f'"{DUMP}" "$@" | grep -v "Dump completed"; exit 0',
+}
+
+
+@pytest.mark.parametrize("kind", BROKEN_DUMPS)
+def test_a_failed_dump_leaves_nothing_restore_could_use(kind, same_flavour, tmp_path):
+    env = shim(tmp_path, "mariadb-dump", BROKEN_DUMPS[kind])
+    run_dir = tmp_path / "run"
+    result = tool("--run-dir", str(run_dir), "dump", env=env)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "dump failed or is incomplete" in result.stderr
+    assert sorted(p.name for p in run_dir.iterdir()) == ["run.log"]
+    assert [e["status"] for e in read_log(run_dir)] == ["refused"]
+    reset_target()
+    result = tool("--run-dir", str(run_dir), "restore")
     assert result.returncode == 2
     assert "no dump is recorded" in result.stderr
     assert target_tables() == []
