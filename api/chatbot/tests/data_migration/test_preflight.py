@@ -11,12 +11,15 @@ from .conftest import (
     CLIENT,
     DST,
     DST_DB,
+    LIMITED,
     ROOT_PASSWORD,
     SRC,
     SRC_DB,
     SRC_PASSWORD,
     _root_args,
     admin,
+    create_limited_account,
+    drop_limited_account,
     load_tool,
     read_log,
     reset_target,
@@ -398,14 +401,17 @@ def test_source_account_must_be_able_to_dump_everything(same_or_newer_target, tm
 
 
 def test_unreadable_routine_body_fails_preflight(same_or_newer_target, tmp_path):
-    # Defined by root: mig_user may run it but its body reads as NULL.
+    # Defined by root: mig_lim may run it but its body reads as NULL (mig_user
+    # could read it on MariaDB 11.3+, where ALL includes SHOW CREATE ROUTINE).
+    create_limited_account()
     admin(
         SRC, "CREATE FUNCTION mig_f() RETURNS INT DETERMINISTIC NO SQL RETURN 1", SRC_DB
     )
     try:
-        result, report = preflight(tmp_path)
+        result, report = preflight(tmp_path, env=tool_env(MIG_SOURCE_USER=LIMITED))
     finally:
         admin(SRC, "DROP FUNCTION IF EXISTS mig_f", SRC_DB)
+        drop_limited_account()
     assert result.returncode == 1, result.stdout + result.stderr
     failed = check(report, "source_privileges")
     assert "mig_f" in failed["detail"]
