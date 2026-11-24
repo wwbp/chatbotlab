@@ -38,6 +38,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -1160,13 +1161,30 @@ def run_log(args):
     path = args.run_dir / "run.log"
     if not path.exists():
         return []
-    return [json.loads(line) for line in path.read_text().splitlines()]
+    lines = path.read_text().splitlines()
+    entries = []
+    for number, line in enumerate(lines, 1):
+        try:
+            entries.append(json.loads(line))
+        except ValueError:
+            if number == len(lines):
+                continue  # torn by a crash mid-write; it recorded nothing usable
+            raise Refuse(
+                f"{path} line {number} is not a log entry; inspect it"
+            ) from None
+    return entries
 
 
 def append_log(args, **entry):
     args.run_dir.mkdir(parents=True, exist_ok=True)
     entry = {"time": datetime.now(UTC).isoformat(timespec="seconds"), **entry}
-    with (args.run_dir / "run.log").open("a") as log:
+    path = args.run_dir / "run.log"
+    torn = (
+        path.exists() and path.stat().st_size and not path.read_bytes().endswith(b"\n")
+    )
+    with path.open("a") as log:
+        if torn:
+            log.write("\n")  # never glue an entry onto a torn last line
         # Scrub the values, before JSON escapes ", \ or non-ASCII in them.
         log.write(json.dumps(scrub_values(entry), sort_keys=True) + "\n")
 
@@ -1217,6 +1235,20 @@ def _other_sessions(conn):
     )
 
 
+def _definers(conn):
+    """{definer: ["VIEW v", ...]} for everything the dump re-creates AS a user."""
+    found = {}
+    for kind, table, name, schema in (
+        ("VIEW", "VIEWS", "TABLE_NAME", "TABLE_SCHEMA"),
+        ("ROUTINE", "ROUTINES", "ROUTINE_NAME", "ROUTINE_SCHEMA"),
+        ("TRIGGER", "TRIGGERS", "TRIGGER_NAME", "TRIGGER_SCHEMA"),
+        ("EVENT", "EVENTS", "EVENT_NAME", "EVENT_SCHEMA"),
+    ):
+        for row in _rows(conn, [name, "DEFINER"], table, f"{schema} = DATABASE()"):
+            found.setdefault(row["definer"], []).append(f"{kind} {row[name.lower()]}")
+    return found
+
+
 def lossy_floats(conn):
     """FLOAT columns holding a value that does not survive the server's text
     rendering (what mariadb-dump writes), as "table.column (n rows)"."""
@@ -1245,11 +1277,16 @@ def step_dump(args):
     path = args.run_dir / "dump.sql"
     if path.exists():
         raise Refuse(f"{path} already exists; use a new --run-dir for a new dump")
+    if not DUMP:
+        raise Refuse(
+            "no mariadb-dump (or mysqldump) on PATH; install the MariaDB client"
+        )
     version = subprocess.run(
-        [DUMP or "mariadb-dump", "--version"],
+        [DUMP, "--no-defaults", "--version"],
         capture_output=True,
         text=True,
         check=False,
+        env=_child_env(),
     ).stdout
     if "MariaDB" not in version:
         raise Refuse(
@@ -1268,6 +1305,25 @@ def step_dump(args):
             "consistent for these if nothing is writing; stop the app and pass "
             "--source-is-quiesced.",
         )
+    odd = [
+        f"{r['table_name']} ({r['table_type']})"
+        for r in _rows(src, ["TABLE_NAME", "TABLE_TYPE"], "TABLES")
+        if r["table_type"] not in ("BASE TABLE", "VIEW")
+    ]
+    if odd:
+        raise Refuse(f"cannot copy and verify: {', '.join(odd)}")
+    enabled = [r[0] for r in query(
+        src,
+        "SELECT EVENT_NAME FROM information_schema.EVENTS "
+        "WHERE EVENT_SCHEMA = DATABASE() AND STATUS = 'ENABLED'",
+    )]  # fmt: skip
+    if enabled:
+        raise Refuse(
+            f"enabled event(s) {', '.join(enabled)} would start running on the "
+            "target as soon as they are restored; disable them on the source "
+            "(the app is stopped anyway) and re-enable after cutover",
+        )
+    definers = _definers(src)
     lossy = lossy_floats(src)
     if lossy:
         raise Refuse(
@@ -1295,20 +1351,31 @@ def step_dump(args):
     # up and blocks the dump forever.
     errors = args.run_dir / "dump.stderr"
     # 0600 from creation: this file is the whole database in plain text.
-    with (
-        os.fdopen(
-            os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb"
-        ) as out,
-        errors.open("wb") as err,
-    ):
-        proc = _popen(command, stdout=subprocess.PIPE, stderr=err, env=env)
-        while chunk := proc.stdout.read(1 << 20):
-            out.write(chunk)
-            digest.update(chunk)
-            size += len(chunk)
-            tail = (tail + chunk)[-200:]
-        out.flush()
-        os.fsync(out.fileno())
+    try:
+        with (
+            os.fdopen(
+                os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb"
+            ) as out,
+            errors.open("wb") as err,
+        ):
+            proc = _popen(command, stdout=subprocess.PIPE, stderr=err, env=env)
+            while chunk := proc.stdout.read(1 << 20):
+                out.write(chunk)
+                digest.update(chunk)
+                size += len(chunk)
+                tail = (tail + chunk)[-200:]
+            out.flush()
+            os.fsync(out.fileno())
+    except BaseException as error:
+        # Disk full, Ctrl-C, anything: stop the dump and keep no partial file.
+        _stop_children()
+        partial.unlink(missing_ok=True)
+        errors.unlink(missing_ok=True)
+        if isinstance(error, OSError):
+            raise Refuse(
+                f"writing the dump failed: {error}; nothing was kept"
+            ) from None
+        raise
     proc.wait()
     stderr = errors.read_bytes()[-4000:].decode(errors="replace").strip()
     errors.unlink()
@@ -1317,7 +1384,8 @@ def step_dump(args):
     if proc.wait() != 0 or TRAILER not in tail:
         partial.unlink()
         raise Refuse(
-            f"dump failed or is incomplete: {stderr or 'no completion marker'}"
+            f"dump failed or is incomplete (mariadb-dump exit code "
+            f"{proc.returncode}): {stderr or 'no completion marker'}"
         )
     partial.rename(path)
     (args.run_dir / "dump.sql.sha256").write_text(f"{digest.hexdigest()}  dump.sql\n")
@@ -1332,7 +1400,13 @@ def step_dump(args):
         database_character_set=info["database_character_set"],
         database_collation=info["database_collation"],
         options=options,
+        definers=definers,
     )
+    for definer, names in sorted(definers.items()):
+        say(
+            f"dump: DEFINER {definer}: {', '.join(names)} (the target needs that "
+            "account, or the restoring account needs SET_USER_ID / SUPER)"
+        )
     say(
         f"dump: {len(objects['TABLE'])} tables, {size / 1e6:.1f} MB written to {path}\n"
         f"dump: sha256 {digest.hexdigest()}"
@@ -1363,16 +1437,31 @@ def load_dump(dst, path):
     command, env = _command(
         CLIENT, dst, "--max-allowed-packet=1G", "--show-warnings", "--skip-force"
     )
-    with path.open("rb") as handle:
-        proc = _popen(
-            command,
-            stdin=handle,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
+    # One handle, hashed as it is fed: the bytes loaded are the bytes checked.
+    digest = hashlib.sha256()
+    with (
+        path.open("rb") as handle,
+        tempfile.TemporaryFile() as out,
+        tempfile.TemporaryFile() as err,
+    ):
+        proc = _popen(command, stdin=subprocess.PIPE, stdout=out, stderr=err, env=env)
+        try:
+            while chunk := handle.read(1 << 20):
+                digest.update(chunk)
+                proc.stdin.write(chunk)
+        except BrokenPipeError:
+            pass  # the client stopped early; its exit code and output say why
+        finally:
+            with contextlib.suppress(BrokenPipeError):
+                proc.stdin.close()
+        proc.wait()
+        out.seek(0)
+        err.seek(0)
+        result = subprocess.CompletedProcess(
+            command, proc.returncode, out.read(), err.read()
         )
-        stdout, stderr = proc.communicate()
-    return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+    result.sha256 = digest.hexdigest()
+    return result
 
 
 def step_restore(args):
@@ -1437,6 +1526,7 @@ def step_restore(args):
     result = load_dump(dst, path)
     loaded = len(_objects(dst)["TABLE"])
     args.record.update(sha256=actual, bytes=dump["bytes"], tables=loaded)
+    args.record["fed_sha256"] = result.sha256
     output = (result.stdout + result.stderr).decode(errors="replace").strip()
     warnings = [
         w
@@ -1447,6 +1537,8 @@ def step_restore(args):
     ]
     if output:
         say(f"restore: client output:\n{output}")
+    if result.sha256 != dump["sha256"]:
+        warnings.append("the bytes fed to the client do not match the dump's checksum")
     if result.returncode != 0 or warnings or loaded < dump["tables"]:
         args.record.update(client_exit_code=result.returncode, warnings=warnings[:20])
         say(
