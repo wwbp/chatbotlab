@@ -257,4 +257,4 @@ Branch from `main`, keep CI green, and open a pull request. See [CONTRIBUTING.md
 
 ## License
 
-No license file is currently present, so default copyright applies and reuse rights are not granted. Maintainers: adding a `LICENSE` would let others use and contribute to this work.
+ChatbotLab is released under the [MIT License](LICENSE).
