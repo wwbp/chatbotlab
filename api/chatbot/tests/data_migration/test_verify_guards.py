@@ -365,3 +365,16 @@ def test_run_files_are_private(copied, tmp_path):
     modes = {p.name: oct(p.stat().st_mode & 0o777) for p in run_dir.iterdir()}
     assert modes
     assert set(modes.values()) == {"0o600"}, modes
+
+
+def test_line_separator_in_a_definition_is_not_a_row_break(copied, tmp_path):
+    # U+2028 is not escaped by the client's batch output; only "\n" ends a row.
+    view = "CREATE VIEW mig_v AS SELECT id, 'a\u2028b' AS sep FROM mig_empty"
+    try:
+        s(view)
+        t(view)
+        result = verify(tmp_path)
+    finally:
+        s("DROP VIEW IF EXISTS mig_v")
+        t("DROP VIEW IF EXISTS mig_v")
+    assert result.returncode == 0, result.stdout + result.stderr
