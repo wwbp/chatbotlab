@@ -6,6 +6,7 @@ target after a known-good copy and undone afterwards; the last test checks the
 target verifies clean again, so a leaked mutation cannot hide.
 """
 
+import hashlib
 import json
 
 import pytest
@@ -174,7 +175,9 @@ def row_added_in_a_gap(_):
     # Not at the end: an extra row whose key sorts before existing ones.
     t("INSERT INTO mig_composite VALUES (1, 'B', 'sneaked in')")
     undo = "DELETE FROM mig_composite WHERE a = 1 AND b = 'B'"
-    return undo, ("mig_composite", "row_extra_on_target", "1,B")
+    # The key is not an integer, so only a hash prefix of it is shown.
+    shown = "sha256:" + hashlib.sha256(b"1,B").hexdigest()[:12]
+    return undo, ("mig_composite", "row_extra_on_target", shown)
 
 
 def one_character_changed(_):

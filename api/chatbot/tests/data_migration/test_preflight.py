@@ -415,3 +415,19 @@ def test_unreadable_routine_body_fails_preflight(same_or_newer_target, tmp_path)
     assert result.returncode == 1, result.stdout + result.stderr
     failed = check(report, "source_privileges")
     assert "mig_f" in failed["detail"]
+
+
+def test_preflight_never_drops_a_scratch_name_it_did_not_create(
+    same_or_newer_target, tmp_path
+):
+    # Review 3: a table already called _dbcopy_preflight is someone's, not ours.
+    admin(
+        DST,
+        "CREATE TABLE _dbcopy_preflight (keep INT);"
+        "INSERT INTO _dbcopy_preflight VALUES (7)",
+        DST_DB,
+    )
+    result, report = preflight(tmp_path, "--allow-non-empty-target")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert check(report, "target_privileges")["status"] == "fail"
+    assert admin(DST, "SELECT keep FROM _dbcopy_preflight", DST_DB) == [["7"]]
