@@ -193,3 +193,49 @@ def test_config_editor_cannot_export_participant_data(model):
     response = client.post(EXPORT_URL.format(model), {"format": "0", "resource": "0"})
 
     assert response.status_code == 403
+
+
+# ── Formula escaping (IMPORT_EXPORT_ESCAPE_FORMULAE_ON_EXPORT) ───────────────
+#
+# A spreadsheet runs a cell that starts with "=" as a formula, and participants
+# type the cells. django-import-export 4.4.4's answer is to drop that one
+# leading "=" — it does not add a quote, and it leaves "+", "-" and "@" alone.
+# These tests pin exactly that, so an upgrade that changes it is noticed.
+
+
+def _exported_texts(texts, make_conversation):
+    conversation = make_conversation()
+    for text in texts:
+        Utterance.objects.create(
+            conversation=conversation, speaker_id="user", text=text
+        )
+    response = _export(_client_for("Data viewer"), "utterance", UtteranceResource)
+    header, *rows = _csv_rows(response)
+    return response, [dict(zip(header, row, strict=True)) for row in rows]
+
+
+@pytest.mark.django_db
+def test_export_drops_a_leading_equals_sign(make_conversation):
+    response, records = _exported_texts(
+        ['=HYPERLINK("http://evil.example","click")', "==1+1", "a = b, as typed"],
+        make_conversation,
+    )
+
+    assert {r["text"] for r in records} == {
+        'HYPERLINK("http://evil.example","click")',
+        "=1+1",  # only the first "=" goes: still a formula
+        "a = b, as typed",  # "=" elsewhere in the cell is untouched
+    }
+    assert response.content.startswith(b"\xef\xbb\xbf")  # Excel BOM survives
+    # Escaping turns every cell into text; an empty cell must stay empty.
+    assert {r["moderation_category"] for r in records} == {""}
+    assert all(r["created_time"][:2] == "20" for r in records)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("text", ["+1+1", "-1+1", "@SUM(A1)", "\t=1+1"])
+def test_export_does_not_escape_other_formula_prefixes(make_conversation, text):
+    """Not what we would want, but what the library does. See the docs."""
+    _, (record,) = _exported_texts([text], make_conversation)
+
+    assert record["text"] == text

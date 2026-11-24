@@ -25,6 +25,7 @@ Coverage:
 import csv
 import datetime as dt
 import io
+import json
 import uuid
 import zipfile
 
@@ -334,6 +335,56 @@ def test_zip_for_a_study_without_keystrokes_or_surveys(viewer, make_session):
     assert archive.read("survey_responses.csv").decode("utf-8-sig").splitlines() == [
         "survey_id,participant_id,received_at,answers"
     ]
+
+
+def test_zip_drops_a_leading_equals_sign_in_every_file(viewer, make_conversation):
+    """The zip goes through the same export code, so the same escaping.
+
+    The "=" is dropped from IDs in every file alike, so they still join.
+    """
+    conversation = make_conversation(
+        conversation_id="=R_1",
+        participant_id="=p1",
+        study_name="=study",
+        user_group="+control",
+        survey_id="=SV",
+    )
+    Utterance.objects.create(conversation=conversation, speaker_id="user", text="=1+1")
+    Utterance.objects.create(conversation=conversation, speaker_id="user", text="@x -y")
+    Keystroke.objects.create(
+        conversation_id="=R_1",
+        total_time_on_page=1,
+        total_time_away_from_page=0,
+        keystroke_count=5,
+        timestamp=dt.datetime(2026, 3, 1, tzinfo=UTC),
+    )
+    SurveyResponse.objects.create(
+        survey_id="=SV",
+        participant_id="=p1",
+        answers=[{"question": "q", "answer": "=1+1"}],
+    )
+
+    response = _export(viewer, study_name="=study")
+    files = _zip_rows(response)
+
+    (c,) = files["conversations.csv"]
+    assert (c["conversation_id"], c["participant_id"], c["study_name"]) == (
+        "R_1",
+        "p1",
+        "study",
+    )
+    assert c["condition"] == "+control"  # "+" is not escaped by the library
+    assert {(u["conversation_id"], u["text"]) for u in files["utterances.csv"]} == {
+        ("R_1", "1+1"),
+        ("R_1", "@x -y"),
+    }
+    assert [k["conversation_id"] for k in files["keystrokes.csv"]] == ["R_1"]
+    (s,) = files["survey_responses.csv"]
+    assert (s["survey_id"], s["participant_id"]) == ("SV", "p1")
+    # The answers cell is JSON and starts with "[", so its contents are as sent.
+    assert json.loads(s["answers"]) == [{"question": "q", "answer": "=1+1"}]
+    archive = zipfile.ZipFile(io.BytesIO(response.content))
+    assert all(archive.read(n).startswith(b"\xef\xbb\xbf") for n in archive.namelist())
 
 
 def test_export_needs_post_a_study_and_valid_dates(viewer, two_studies):

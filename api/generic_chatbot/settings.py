@@ -122,6 +122,12 @@ INSTALLED_APPS = [
 # Export button. "view" ties export to the model's view permission, so a role
 # can export exactly what it can read.
 IMPORT_EXPORT_EXPORT_PERMISSION_CODE = "view"
+# A spreadsheet runs a cell that starts with "=" as a formula, and participants
+# write the cells. With this on, django-import-export (4.4.4) removes that one
+# leading "=" from every exported cell, in every format, including the study
+# zip. It does nothing about "+", "-" or "@", and removes rather than quotes;
+# see "Formula escaping" in docs/data/exporting.rst before relying on it.
+IMPORT_EXPORT_ESCAPE_FORMULAE_ON_EXPORT = True
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
