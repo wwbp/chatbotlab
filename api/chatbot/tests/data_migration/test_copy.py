@@ -21,6 +21,7 @@ from .conftest import (
     DST_DB,
     DST_PASSWORD,
     SCRIPT,
+    SNAPSHOT,
     SRC,
     SRC_DB,
     SRC_PASSWORD,
@@ -38,7 +39,7 @@ from .fixture_data import EMOJI_TEXT, N_UTTERANCES, SURVEY_CONTEXT
 
 # Accepts an older target, so the same tests run on every same-flavour pair.
 PREFLIGHT = ["preflight", "--allow-version-downgrade"]
-STEPS = [PREFLIGHT, ["dump"], ["restore"], ["verify"]]
+STEPS = [PREFLIGHT, SNAPSHOT, ["dump"], ["restore"], ["verify"]]
 WRITE_VERBS = (
     "INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP|TRUNCATE|RENAME|GRANT|REVOKE"
     "|LOCK|FLUSH|CALL|LOAD|OPTIMIZE|ANALYZE|REPAIR"
@@ -78,6 +79,7 @@ def copy(same_flavour, tmp_path_factory):
 def dumped(same_flavour, tmp_path_factory):
     """A run directory holding just a good dump."""
     run_dir = tmp_path_factory.mktemp("dumped")
+    assert tool("--run-dir", str(run_dir), *SNAPSHOT).returncode == 0
     result = tool("--run-dir", str(run_dir), "dump")
     assert result.returncode == 0, result.stderr
     return run_dir
@@ -102,6 +104,7 @@ def test_every_step_succeeds_and_the_copy_verifies(copy):
     assert report["tables"]["chatbot_utterance"]["rows_target"] == N_UTTERANCES + 9
     assert [e["step"] for e in read_log(run_dir) if e["status"] == "ok"] == [
         "preflight",
+        "snapshot-check",
         "dump",
         "restore",
         "verify",
@@ -187,6 +190,7 @@ def test_no_writing_statement_reaches_the_source(same_flavour, tmp_path):
 def test_no_credential_in_dump_or_restore_command_lines(same_flavour, tmp_path):
     reset_target()
     run_dir = tmp_path / "run"
+    assert tool("--run-dir", str(run_dir), *SNAPSHOT).returncode == 0
     for step in ("dump", "restore"):
         result, commands = tool_recording_commands(
             tmp_path, "--run-dir", str(run_dir), step
@@ -280,6 +284,7 @@ def test_restore_refuses_a_file_this_run_did_not_dump(dumped, tmp_path):
 
 
 def test_dump_dry_run_writes_no_file(same_flavour, tmp_path):
+    assert tool("--run-dir", str(tmp_path), *SNAPSHOT).returncode == 0
     result = tool("--run-dir", str(tmp_path), "dump", "--dry-run")
     assert result.returncode == 0, result.stderr
     assert "dry-run" in result.stdout.lower()
