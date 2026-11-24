@@ -329,3 +329,13 @@ def test_quiesced_check_needs_process_privilege(same_or_newer_target, tmp_path):
     failed = check(report, "source_quiesced")
     assert failed["status"] == "fail"
     assert "grant PROCESS" in failed["detail"]
+
+
+def test_utf8_and_utf8mb3_collation_names_are_the_same():
+    # P7: MariaDB 10.6+ and MySQL 8.0.30+ report utf8mb3_*, older servers utf8_*.
+    dbcopy = load_tool()
+    assert dbcopy.missing_collations({"utf8_general_ci"}, {"utf8mb3_general_ci"}) == []
+    assert dbcopy.missing_collations({"utf8mb3_bin"}, {"utf8_bin"}) == []
+    assert dbcopy.missing_collations({"utf8mb4_bin"}, {"utf8_bin"}) == ["utf8mb4_bin"]
+    assert dbcopy.norm_collation("utf8_unicode_ci") == "utf8mb3_unicode_ci"
+    assert dbcopy.norm_collation("utf8mb4_unicode_ci") == "utf8mb4_unicode_ci"
