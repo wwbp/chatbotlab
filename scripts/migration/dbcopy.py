@@ -1321,7 +1321,11 @@ def load_dump(dst, path):
     """Feed the dump file to the client. Target only, ever."""
     if dst.role != "target":
         raise Refuse("refusing to load a dump into the source")
-    command, env = _command(CLIENT, dst, "--max-allowed-packet=1G")
+    # --show-warnings: dumps switch strict mode off, so bad data is only a
+    # warning; restore treats any warning as failure.
+    command, env = _command(
+        CLIENT, dst, "--max-allowed-packet=1G", "--show-warnings", "--skip-force"
+    )
     with path.open("rb") as handle:
         proc = _popen(
             command,
@@ -1396,10 +1400,22 @@ def step_restore(args):
     result = load_dump(dst, path)
     loaded = len(_objects(dst)["TABLE"])
     args.record.update(sha256=actual, bytes=dump["bytes"], tables=loaded)
-    if result.returncode != 0 or loaded < dump["tables"]:
+    output = (result.stdout + result.stderr).decode(errors="replace").strip()
+    warnings = [
+        w
+        for w in re.findall(r"(?m)^(?:Warning|Error) \(Code \d+\).*$", output)
+        # The one harmless warning: an event was created while the target's
+        # scheduler is off (it is defined, just not running).
+        if not w.startswith("Warning (Code 1105): Event scheduler is switched off")
+    ]
+    if output:
+        say(f"restore: client output:\n{output}")
+    if result.returncode != 0 or warnings or loaded < dump["tables"]:
+        args.record.update(client_exit_code=result.returncode, warnings=warnings[:20])
         say(
-            "restore FAILED: "
-            + (result.stderr.decode(errors="replace").strip() or "tables are missing")
+            f"restore FAILED (client exit code {result.returncode}, "
+            f"{len(warnings)} warning(s)): "
+            + (output[-2000:] or "tables are missing")
             + f"\nThe target now holds a partial copy ({loaded} of {dump['tables']} "
             "tables). Nothing on the source was changed. Run `reset-target`, "
             "then `restore` again."
