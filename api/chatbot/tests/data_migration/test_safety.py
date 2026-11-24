@@ -1,12 +1,18 @@
 """Guarantees that hold for every step: the source cannot be written, and
 credentials never reach the command line, the output or the run log."""
 
+import signal
+import subprocess
+import sys
+import time
+
 import pytest
 
 from .conftest import (
     DST,
     DST_DB,
     DST_PASSWORD,
+    SCRIPT,
     SRC,
     SRC_DB,
     SRC_PASSWORD,
@@ -16,6 +22,7 @@ from .conftest import (
     plain_copy,
     read_log,
     reset_target,
+    shim,
     tool,
     tool_env,
     tool_recording_commands,
@@ -193,3 +200,29 @@ def test_run_log_records_failures_and_refusals(same_flavour, tmp_path):
     assert failed["differences"] == 2  # the row count, and the missing row
     assert refused["status"] == "refused"
     assert "MIG_TARGET_DATABASE" in refused["message"]
+
+
+def test_run_log_says_crashed_not_refused(source_db, tmp_path):
+    # V8: a client that prints nothing and succeeds makes the tool fail
+    # unexpectedly; the log must not call that a refusal.
+    env = shim(tmp_path, "mariadb", "cat >/dev/null; exit 0")
+    result = tool("--run-dir", str(tmp_path / "run"), "verify", env=env)
+    assert result.returncode == 2, result.stdout + result.stderr
+    (entry,) = read_log(tmp_path / "run")
+    assert entry["status"] == "crashed"
+    assert entry["exit_code"] == 2
+
+
+def test_run_log_says_interrupted_not_refused(source_db, tmp_path):
+    env = shim(tmp_path, "mariadb", "cat >/dev/null; exec sleep 5")
+    proc = subprocess.Popen(
+        [sys.executable, str(SCRIPT), "--run-dir", str(tmp_path / "run"), "verify"],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    time.sleep(1)
+    proc.send_signal(signal.SIGINT)
+    assert proc.wait(timeout=30) == 2
+    (entry,) = read_log(tmp_path / "run")
+    assert entry["status"] == "interrupted"
