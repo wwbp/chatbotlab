@@ -179,6 +179,10 @@ def _spawn(conn, sql, writable=False):
     )
     if not writable:
         preamble += "SET SESSION TRANSACTION READ ONLY;"
+    if conn.role == "source":
+        # Fail in seconds on a held metadata lock rather than wait (default: a
+        # year) with the app's own statements queued behind us.
+        preamble += "SET SESSION lock_wait_timeout = 10;"
     if conn.version and conn.flavour == "mysql":
         # MySQL 8 caches information_schema statistics (AUTO_INCREMENT) for a day.
         preamble += "SET SESSION information_schema_stats_expiry = 0;"
