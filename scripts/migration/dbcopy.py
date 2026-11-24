@@ -182,9 +182,18 @@ def query(conn, sql, writable=False):
     return [[_field(f) for f in line.split("\t")] for line in out.splitlines()]
 
 
+ABC_SHA256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+
 def connect(role):
     conn = Conn.from_env(role)
-    conn.version = query(conn, "SELECT VERSION()")[0][0]
+    conn.version, digest = query(conn, "SELECT VERSION(), SHA2('abc', 256)")[0]
+    # Everything verify proves rests on the server's SHA2 (NULL on a server
+    # built without it).
+    if digest != ABC_SHA256:
+        raise Refuse(
+            f"{role}: SHA2('abc', 256) returned {digest!r}, not the known digest"
+        )
     return conn
 
 
