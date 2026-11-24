@@ -131,6 +131,16 @@ def test_dump_file_checksum_is_recorded_and_true(copy):
     assert (run_dir / "dump.sql").stat().st_mode & 0o077 == 0
 
 
+def test_every_file_in_the_run_directory_is_private(copy):
+    # Review 1: reports, run.log and the checksum file as well as the dump.
+    run_dir, _ = copy
+    modes = {p.name: oct(p.stat().st_mode & 0o777) for p in run_dir.iterdir()}
+    assert {"dump.sql", "dump.sql.sha256", "run.log", "verify-report.json"} <= set(
+        modes
+    )
+    assert set(modes.values()) == {"0o600"}, modes
+
+
 def test_dump_is_deterministic(copy, dumped):
     first = entry(copy[0], "dump")["sha256"]
     assert entry(dumped, "dump")["sha256"] == first
