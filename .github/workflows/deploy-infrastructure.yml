@@ -224,7 +224,9 @@ jobs:
   # apply — started by hand, approved through the GitHub Environment
   # ════════════════════════════════════════════════════════════════════════════
   apply:
-    name: ${{ inputs.action }} (${{ inputs.environment }})
+    # A fixed name: on pull requests this job is skipped, and GitHub shows a
+    # skipped job's name without filling in expressions.
+    name: Plan or apply (manual run)
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     # Required reviewers set on this Environment must approve the run before
