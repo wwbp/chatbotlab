@@ -804,6 +804,11 @@ def quiesced_problem(src, seconds):
     watch. This is a sample, not a proof: stop the app first. The proof is
     verify, which fails if the source changed after the dump.
     """
+    if missing_privileges(src, ["PROCESS"]) and missing_privileges(src, ["SUPER"]):
+        return (
+            "the source account cannot see other sessions (they would all look "
+            "absent); grant PROCESS on *.* to it"
+        )
     sessions = int(
         query(
             src,
