@@ -35,6 +35,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -178,6 +179,22 @@ def _command(binary, conn, *options):
     return [*args, conn.database], env
 
 
+_CHILDREN = []  # every client started; stopped if the step is interrupted
+
+
+def _popen(*args, **kwargs):
+    proc = subprocess.Popen(*args, **kwargs)
+    _CHILDREN.append(proc)
+    return proc
+
+
+def _stop_children():
+    for proc in _CHILDREN:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
 def _spawn(conn, sql, writable=False):
     """Run SQL in a client session. Every query of every step goes through here.
 
@@ -220,7 +237,7 @@ def _spawn(conn, sql, writable=False):
         "--skip-reconnect",  # a new connection would lack the session setup
         f"--init-command={preamble.rstrip(';')}",
     )
-    proc = subprocess.Popen(
+    proc = _popen(
         args,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -1249,9 +1266,7 @@ def step_dump(args):
     with os.fdopen(
         os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb"
     ) as out:
-        proc = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env
-        )
+        proc = _popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         while chunk := proc.stdout.read(1 << 20):
             out.write(chunk)
             digest.update(chunk)
@@ -1308,9 +1323,15 @@ def load_dump(dst, path):
         raise Refuse("refusing to load a dump into the source")
     command, env = _command(CLIENT, dst, "--max-allowed-packet=1G")
     with path.open("rb") as handle:
-        return subprocess.run(
-            command, stdin=handle, capture_output=True, env=env, check=False
+        proc = _popen(
+            command,
+            stdin=handle,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
         )
+        stdout, stderr = proc.communicate()
+    return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
 
 
 def step_restore(args):
@@ -1575,6 +1596,10 @@ def step_verify(args):
 # ── command line ─────────────────────────────────────────────────────────────
 
 
+def _interrupt(signum, _frame):
+    raise KeyboardInterrupt(signal.Signals(signum).name)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -1616,6 +1641,10 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     args.record = {}
+    # A closed terminal or a plain `kill` is handled like Ctrl-C: the step
+    # stops, its database clients are stopped, and the outcome is logged.
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, _interrupt)
     started = time.monotonic()
     status, code = "refused", 2
     try:
@@ -1626,9 +1655,11 @@ def main(argv=None):
         sys.stderr.write(scrub(f"REFUSED: {error}\n"))
     except KeyboardInterrupt:
         status = "interrupted"
+        _stop_children()
         sys.stderr.write("INTERRUPTED: stopped before finishing; nothing was proven.\n")
     except Exception as error:  # noqa: BLE001 - any bug must be exit 2, not 1
         status = "crashed"
+        _stop_children()
         message = f"{type(error).__name__}: {error}"
         args.record["message"] = message
         sys.stderr.write(scrub(f"CRASHED: {message}\nNothing was proven.\n"))
