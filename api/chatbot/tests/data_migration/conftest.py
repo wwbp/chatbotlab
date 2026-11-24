@@ -10,11 +10,13 @@ The source gets the app's real schema (``manage.py migrate``) plus the data in
 ``fixture_data.py``.
 """
 
+import importlib.util
 import json
 import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import NamedTuple
@@ -255,3 +257,44 @@ def same_flavour(source_db):
 
 def read_report(run_dir):
     return json.loads((Path(run_dir) / "verify-report.json").read_text())
+
+
+def load_tool():
+    """Import scripts/migration/dbcopy.py as a module (it is not a package)."""
+    spec = importlib.util.spec_from_file_location("dbcopy", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["dbcopy"] = module  # dataclasses look the module up by name
+    spec.loader.exec_module(module)
+    return module
+
+
+def read_log(run_dir):
+    lines = (Path(run_dir) / "run.log").read_text().splitlines()
+    return [json.loads(line) for line in lines]
+
+
+def tool_watching_processes(*args, env=None):
+    """Run the tool while recording every command line on the machine.
+
+    Returns (result, set of command lines seen while it ran), read from /proc
+    as `ps` would.
+    """
+    seen = set()
+    done = threading.Event()
+
+    def watch():
+        while not done.is_set():
+            for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
+                try:
+                    seen.add(cmdline.read_bytes().replace(b"\0", b" ").decode())
+                except OSError:
+                    continue
+
+    watcher = threading.Thread(target=watch)
+    watcher.start()
+    try:
+        result = tool(*args, env=env)
+    finally:
+        done.set()
+        watcher.join()
+    return result, seen
