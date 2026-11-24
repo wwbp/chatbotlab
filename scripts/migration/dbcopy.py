@@ -440,11 +440,20 @@ def row_hash_sql(table, columns, primary_key):
     * rows are read ORDER BY primary key, so the result does not depend on how
       or in what order either server stores them.
 
-    Numbers and datetimes are hashed as the server renders them as text; the
+    Numbers and datetimes are hashed as the server renders them as text
+    (FLOAT widened to DOUBLE first, see ``cell``); the
     session time zone is pinned to UTC. That rendering is the same for two
     servers of the same flavour, which is all verify accepts.
     """
-    cells = ", ".join(f"IFNULL(SHA2({q(c)}, 256), 'NULL')" for c in columns)
+
+    def cell(name):
+        # FLOAT renders with only 6 significant digits; widened to DOUBLE it
+        # renders exactly (every float is exactly representable as a double).
+        if columns[name]["data_type"] == "float":
+            return f"{q(name)} + 0E0"
+        return q(name)
+
+    cells = ", ".join(f"IFNULL(SHA2({cell(c)}, 256), 'NULL')" for c in columns)
     row = f"SHA2(CONCAT_WS('|', {cells}), 256)"
     if primary_key:
         keys = ", ".join(q(c) for c in primary_key)
@@ -468,7 +477,7 @@ def compare_table(src, dst, name, table):
 
     Memory use is constant: nothing is collected. Returns (result, diffs).
     """
-    sql = row_hash_sql(name, list(table["column"]), table["primary_key"])
+    sql = row_hash_sql(name, table["column"], table["primary_key"])
     integer_key = table["primary_key"] and all(
         table["column"][c]["data_type"] in INTEGER_TYPES for c in table["primary_key"]
     )
