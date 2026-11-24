@@ -443,6 +443,21 @@ def test_restore_feeds_the_bytes_it_checked(same_flavour, tmp_path):
     assert entry(run_dir, "restore")["fed_sha256"] == entry(run_dir, "dump")["sha256"]
 
 
+def test_recorded_collation_is_never_pasted_into_sql(dumped, tmp_path):
+    # P1 audit: restore builds ALTER DATABASE ... COLLATE <recorded name>.
+    run_dir = fresh_run_with_dump(dumped, tmp_path)
+    log = run_dir / "run.log"
+    entries = [json.loads(line) for line in log.read_text().splitlines()]
+    for e in entries:
+        if e["step"] == "dump":
+            e["database_collation"] = "utf8mb4_bin; CREATE TABLE mig_injected (i INT)"
+    log.write_text("".join(json.dumps(e) + "\n" for e in entries))
+    reset_target()
+    result = tool("--run-dir", str(run_dir), "restore")
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert target_tables() == []
+
+
 # ── restore must not swallow warnings (D4) ─────────────────────────────────
 
 # Like a real dump, it turns strict mode off: 'abc' into an INT is then a
