@@ -2,34 +2,47 @@ Viewing Data
 ============
 
 You can review all collected conversation and participant data from the
-**ChatbotLab Admin Panel** or by connecting to the database directly.
+**ChatbotLab admin panel** or by connecting to the database directly.
 
-Admin Panel
+Admin panel
 -----------
 
 Access the admin interface at:
 
 ``https://<your-domain>/api/admin``
 
-Within the admin panel, you can browse:
+Participant data needs the **Data viewer** role (or a superuser account).
+Under **Participant data** you can browse:
 
-- **Conversations:** Full transcript per participant  
-- **Utterances:** Individual messages with timestamps  
-- **Participants:** Linked survey or recruitment IDs  
-- **Personas and Bots:** Configuration metadata
+- **Studies:** one row per study name, with conversation, condition and
+  utterance counts, links to that study's conversations and utterances, and a
+  one-file download (see :doc:`exporting`)
+- **Conversations:** one row per session; opening one shows the full
+  transcript
+- **Utterances:** individual messages with timestamps and moderation results
+- **Survey responses:** answers the survey tool sent before the chat
+- **Keystrokes:** typing and time-on-page logs
+
+Bots and personas are under **Study setup**.
 
 Filtering
 ---------
 
-Filter conversations by:
+Start from **Studies** to jump to one study's conversations or utterances.
+On the lists themselves, the sidebar filters are:
 
-- Bot name
-- Participant ID
-- Time range
-- Model provider
+- **Conversations:** study, condition, bot, start date (presets, or a
+  **date range** with a from and a to date, both included), and session health
+  (no bot reply, two or fewer messages, no survey answers)
+- **Utterances:** flagged by moderation, date range, study, condition, speaker
+  and moderation category
 
-Export Options
+The search box on Conversations takes an exact conversation ID or the start of
+a participant ID. Dates are in UTC.
+
+Export options
 --------------
 
-From the admin interface, you can export a CSV or JSON snapshot of
-conversation-level or utterance-level data.
+Download one study as a zip of CSV files from the Studies page, or use the
+**Export** button on a list to export the rows it currently shows. See
+:doc:`exporting`.

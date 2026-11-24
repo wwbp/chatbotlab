@@ -39,6 +39,7 @@ class TestBotsView(TestCase):
             username=f"staff_{uuid.uuid4().hex[:6]}",
             password="pass",
             is_staff=True,
+            is_superuser=True,
             is_active=True,
         )
         self.bot = Bot.objects.create(

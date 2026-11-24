@@ -92,7 +92,7 @@ resources is ``{PROJECT_PREFIX}-production``, where ``{PROJECT_PREFIX}`` is the 
      - One per AWS account. See gotcha below.
    * - Terraform state bucket
      - (created by workflow script)
-     - ``{PROJECT_PREFIX}-tfstate-{ACCOUNT_ID}``, versioned, AES-256 encrypted
+     - ``{PROJECT_PREFIX}-tfstate-{ACCOUNT_ID}``, versioned, AES-256 encrypted. One state file per environment: ``{PROJECT_PREFIX}/{environment}/terraform.tfstate``, locked with an S3 lock file
 
 
 Deployment workflows
@@ -105,15 +105,14 @@ Runs ``terraform apply`` against the remote S3 state backend. Steps:
 
 1. **Check required secrets**. Validates presence and GH_PAT write access before touching AWS.
 2. **Bootstrap state bucket**. Creates ``{PROJECT_PREFIX}-tfstate-{ACCOUNT_ID}`` if absent (idempotent).
-3. **Terraform init**. Points to the remote state bucket.
-4. **Reconcile orphaned resources**. Handles partial failures from previous runs. VPC-scoped resources (RDS, ElastiCache, EB environment) are purged if the VPC ID changed. Non-VPC resources are imported.
-5. **ACM certificate** (custom domain only). Targeted apply, so the validation CNAME can be printed before the full apply blocks waiting for DNS.
-6. **Print DNS validation record** (custom domain only). Written to the workflow Summary.
-7. **``terraform apply``**. Full infrastructure apply.
-8. **Write deployment secrets**. Uses ``GH_PAT`` to write all downstream secrets (``AWS_ROLE_NAME``, ``AWS_S3_PROD_BUCKET_NAME_FRONTEND``, etc.) directly into the GitHub repo via ``gh secret set``.
-9. **Trigger application deployment**. Calls ``gh workflow run production.yml``, so the app deploys without a second manual click.
-10. **Rollback on failure**. If any step fails, ``terraform destroy`` cleans up all created resources.
-11. **Summary**. Writes the chatbot URL and admin panel URL to the workflow Summary.
+3. **Terraform init**. Points to the state file of the environment selected in the ``environment`` input. A second run on the same environment stops with a lock error.
+4. **ACM certificate** (custom domain only). Targeted apply, so the validation CNAME can be printed before the full apply blocks waiting for DNS.
+5. **Print DNS validation record** (custom domain only). Written to the workflow Summary.
+6. **``terraform apply``**. Full infrastructure apply.
+7. **Write deployment secrets**. Uses ``GH_PAT`` to write all downstream secrets (``AWS_ROLE_NAME``, ``AWS_S3_PROD_BUCKET_NAME_FRONTEND``, etc.) directly into the GitHub repo via ``gh secret set``.
+8. **Trigger application deployment**. Calls ``gh workflow run production.yml``, so the app deploys without a second manual click.
+9. **Report failure**. If any step fails, the workflow writes a notice to the Summary and changes nothing. It does not destroy, delete or import resources.
+10. **Summary**. Writes the chatbot URL and admin panel URL to the workflow Summary.
 
 ``production.yml`` (triggers on push to ``main`` or ``workflow_dispatch``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -121,6 +120,30 @@ Runs ``terraform apply`` against the remote S3 state backend. Steps:
 1. Runs the CI suite (``ci.yml``) as a prerequisite
 2. **Frontend:** builds React with ``VITE_API_URL`` injected, syncs to S3, invalidates CloudFront cache
 3. **Backend:** runs ``eb deploy`` via the AWS EB CLI, which packages and uploads the Docker image and triggers a rolling deployment on EB
+4. **Smoke test:** once both deploys finish, runs ``scripts/smoke.sh <site-url>``, which polls ``/api/health/ready/`` for up to five minutes and then checks that ``/`` serves the app. The workflow fails if either check does not pass. It reports a broken deploy; it does not roll it back. ``staging.yml`` does the same.
+
+The site URL is ``https://bot.wwbp.org`` (``https://dev.bot.wwbp.org`` for staging) in the ``wwbp/chatbotlab`` repository. Any other deployment sets the repository variable ``PRODUCTION_SITE_URL`` (``STAGING_SITE_URL``) to its own URL, for example ``https://xxxx.cloudfront.net``; without it the smoke test is skipped with a warning.
+
+
+Health endpoints
+-----------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Path
+     - Purpose
+   * - ``/health/``
+     - Liveness. Returns 200 whenever Django is running and checks nothing else. This is the Elastic Beanstalk / load balancer health check path, so it must not depend on the database: a brief database blip would mark every instance unhealthy and trigger replacements. CloudFront does not forward it, so it is not reachable from the internet.
+   * - ``/api/health/ready/``
+     - Readiness. Runs ``SELECT 1`` on the database and a set/get on the Redis cache. Returns 200 ``{"status": "ok", ...}`` when both work, otherwise 503 with ``"database"`` or ``"cache"`` marked ``"failed"``. The cause is in the application log, never in the response. Public and unauthenticated, under ``/api/`` so that it is reachable through CloudFront.
+
+Unapplied migrations are not checked: ``entrypoint.sh`` runs ``migrate`` under ``set -e`` before the server starts, so a container whose migrations failed never serves requests.
+
+Run the smoke test by hand at any time::
+
+    scripts/smoke.sh https://dev.bot.wwbp.org
 
 
 GitHub OIDC (passwordless CI/CD)
@@ -224,12 +247,14 @@ CloudFront references ``aws_elastic_beanstalk_environment.chatbot_api.cname`` (i
 
 **Workaround in use:** ``ALLOWED_HOSTS`` uses ``.cloudfront.net`` (leading dot = Django subdomain wildcard) so it matches any CloudFront domain without referencing the specific distribution. ``FRONTEND_URL`` is only set when ``var.domain_name`` is provided (a static string), not derived from the CloudFront resource. ``CSRF_TRUSTED_ORIGINS`` includes ``https://*.cloudfront.net`` statically in ``settings.py``.
 
-4. VPC-scoped resource reconciliation
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+4. A failed apply is not rolled back
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-RDS subnet groups and ElastiCache caches are created in specific VPC subnets. If the VPC is destroyed (e.g., a failed rollback) and recreated, the new VPC has different subnet IDs. AWS rejects updates to a subnet group that change the underlying VPC, with: ``Subnets are not in the same VPC``.
+If ``terraform apply`` fails, the resources it already created stay in AWS and in the Terraform state. The workflow used to run ``terraform destroy`` on any failure, and to delete the database when the state looked wrong. On a re-run against a stack that holds study data, that deleted the stack. Both steps are removed.
 
-**Workaround:** The reconcile step in ``deploy-infrastructure.yml`` detects this by comparing the VPC ID in Terraform state against the VPC ID of the existing RDS subnet group. If they diverge, it purges all VPC-scoped resources from both state and AWS before running ``terraform apply``, allowing Terraform to recreate them cleanly.
+**What to do:** read the failed step's log, fix the cause and run the workflow again. Terraform continues from the state. To remove a stack on purpose, run the Destroy Infrastructure workflow.
+
+**If a resource exists in AWS but not in the state** (``AlreadyExists`` errors), do not delete it from a script. Find out which state owns it first, then run ``terraform import`` or remove the resource by hand.
 
 5. GitHub OIDC provider is a singleton per AWS account
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -292,4 +317,4 @@ Re-running the infrastructure workflow
 
 The workflow is safe to re-run at any time. Terraform is idempotent. It compares the desired state (in ``.tf`` files) against the current state (in S3) and only changes what is different. Re-running to change instance sizes, rotate secrets, or add a custom domain is the intended use pattern.
 
-The reconcile step handles partial failures automatically. You do not need to manually clean up AWS resources before re-running.
+A failed run leaves its resources in place and in the state (see gotcha 4). Run the workflow again after you fix the cause.

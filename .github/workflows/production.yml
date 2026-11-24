@@ -100,3 +100,29 @@ jobs:
           eb init -p docker ${{ secrets.AWS_BACKEND_APPLICATION_NAME }} --region us-east-1
           eb use ${{ secrets.AWS_PROD_BACKEND_ENVIRONMENT_NAME }}
           eb deploy --timeout 30
+
+  # ── Check the deployed site actually works ───────────────────────────────────
+  # `eb deploy` succeeding only means the new version was rolled out. This
+  # fails the workflow if the API cannot reach its database or cache, or the
+  # frontend is not being served. It reports a broken deploy; it does not roll
+  # one back.
+  smoke:
+    name: Smoke test Production
+    runs-on: ubuntu-latest
+    needs: [deploy_frontend, deploy_backend]
+    env:
+      # Other deployments of this repository: set the repository variable
+      # PRODUCTION_SITE_URL to your site's URL (e.g. https://xxxx.cloudfront.net).
+      SITE_URL: ${{ vars.PRODUCTION_SITE_URL || (github.repository == 'wwbp/chatbotlab' && 'https://bot.wwbp.org') || '' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Smoke test the deployed site
+        run: |
+          if [ -z "$SITE_URL" ]; then
+            echo "::warning::PRODUCTION_SITE_URL is not set — skipping the post-deploy smoke test."
+            exit 0
+          fi
+          bash scripts/smoke.sh "$SITE_URL"

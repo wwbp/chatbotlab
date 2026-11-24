@@ -301,6 +301,26 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
     value     = var.survey_ingest_token
   }
 
+  # ----- Email ---------------------------------------------------------------
+  # Staff invites and password resets (api/chatbot/staff_auth.py). An unset
+  # value is left out rather than sent empty: settings.py reads these with
+  # os.getenv(name, default), and an empty string would replace the default.
+  # The matching SES permission is in iam.tf.
+  dynamic "setting" {
+    for_each = {
+      for name, value in {
+        SITE_URL           = local.site_url
+        EMAIL_BACKEND      = var.email_backend
+        DEFAULT_FROM_EMAIL = var.default_from_email
+      } : name => value if value != ""
+    }
+    content {
+      namespace = "aws:elasticbeanstalk:application:environment"
+      name      = setting.key
+      value     = setting.value
+    }
+  }
+
   # ----- Admin panel ---------------------------------------------------------
   # DJANGO_SUPERUSER_* env vars trigger superuser creation on first deploy.
   # api/entrypoint.sh calls `manage.py createsuperuser --noinput` when these

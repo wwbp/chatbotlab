@@ -86,6 +86,38 @@ variable "admin_panel_password" {
 }
 
 # -----------------------------------------------------------------------
+# Email — staff invites and password resets
+# -----------------------------------------------------------------------
+
+variable "site_url" {
+  description = "The public URL of the site, e.g. https://chatbot.mylab.org, with no trailing slash. The application builds invite and password-reset links from it (SITE_URL). Leave empty to use https://<domain_name> when a custom domain is set. With neither set, invites fail with a warning in the admin."
+  type        = string
+  default     = ""
+}
+
+variable "email_backend" {
+  description = "The Django email backend (EMAIL_BACKEND). Leave empty to leave the setting alone: Terraform then sends nothing, a value set by hand on the environment is kept, and the application falls back to printing emails to its log. Set chatbot.email_backend.SESBackend to send through Amazon SES, which also needs default_from_email."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.email_backend != "chatbot.email_backend.SESBackend" || var.default_from_email != ""
+    error_message = "The SES backend needs default_from_email: the instance role is only allowed to send from that address."
+  }
+}
+
+variable "default_from_email" {
+  description = "The sender of invites and password resets (DEFAULT_FROM_EMAIL), as an address or as 'Name <address>', e.g. \"ChatbotLab <no-reply@mylab.org>\". Setting it also lets the instance role send through SES from exactly that address. Leave empty for a stack that sends no email."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.default_from_email == "" || can(regex("^[^@\\s<>]+@[^@\\s<>]+$", trimspace(try(regex("<([^<>]*)>\\s*$", var.default_from_email)[0], var.default_from_email))))
+    error_message = "default_from_email must be an address (no-reply@mylab.org) or a name and an address (ChatbotLab <no-reply@mylab.org>)."
+  }
+}
+
+# -----------------------------------------------------------------------
 # GitHub — used to set up passwordless CI/CD via OIDC
 # -----------------------------------------------------------------------
 

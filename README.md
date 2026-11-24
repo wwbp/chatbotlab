@@ -216,6 +216,8 @@ Deploys are triggered by pushing to a branch. CI must pass first.
 
 Each deploy builds the React app to S3 behind CloudFront, and the Django app to Elastic Beanstalk. On boot the production container applies migrations, collects static files, loads bots, and creates the superuser if `DJANGO_SUPERUSER_PASSWORD` is set — see [`api/entrypoint.sh`](api/entrypoint.sh).
 
+After both halves are deployed, the workflow runs [`scripts/smoke.sh`](scripts/smoke.sh) against the site and fails if `/api/health/ready/` (database and cache reachable) or the frontend root is not healthy. It reports a broken deploy; it does not roll one back. Run it by hand with `scripts/smoke.sh https://dev.bot.wwbp.org`.
+
 Production runtime configuration lives in Elastic Beanstalk environment variables, not in a `.env` file. `SECRET_KEY`, database credentials, and LLM API keys must be set there before the first deploy.
 
 ### Infrastructure
@@ -255,6 +257,31 @@ The MariaDB user is created only on first initialisation. Run `make reset` to re
 
 Branch from `main`, keep CI green, and open a pull request. See [CONTRIBUTING.md](CONTRIBUTING.md) for the working conventions.
 
+## Citation
+
+If you use ChatbotLab in your research, please cite:
+
+> Giorgi, S., Sedoc, J., Singh, A. P., Kjell, O. N. E., Lee, S., & Ungar, L. H. (2026, August 15).
+> *ChatbotLab: An Open Framework for Human-Like Chatbot Interaction and Survey Data Collection.*
+> PsyArXiv. https://osf.io/preprints/psyarxiv/f6xua_v1
+
+## Acknowledgements
+
+ChatbotLab is developed at the World Well-Being Project (WWBP). The roles below are the
+contributions stated in the paper above.
+
+| Person | Contribution |
+|---|---|
+| Salvatore Giorgi | Conceptualization; Formal analysis; Methodology; Resources; Software; Supervision; Visualization; Writing (original draft, review and editing) |
+| João Sedoc | Conceptualization; Methodology; Software; Supervision; Writing (review and editing) |
+| Abhay Singh | Formal analysis; Software; Writing (review and editing). Current maintainer of this repository |
+| Oscar Kjell | Formal analysis; Visualization; Writing (original draft) |
+| Soojin Lee | Formal analysis; Software; Writing (review and editing) |
+| Lyle H. Ungar | Conceptualization; Methodology; Funding acquisition; Resources; Supervision; Writing (original draft, review and editing) |
+
+Code contributions have also come from Sourabh Swargam, Manvi Kaul and Kostiantyn Dementiev.
+ChatbotLab builds on [Kani](https://github.com/zhudotexe/kani).
+
 ## License
 
-No license file is currently present, so default copyright applies and reuse rights are not granted. Maintainers: adding a `LICENSE` would let others use and contribute to this work.
+ChatbotLab is released under the [MIT License](LICENSE).

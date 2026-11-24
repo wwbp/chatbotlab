@@ -1,0 +1,13 @@
+{# Sidebar filter for chatbot.admin.DateRangeFilter: a GET form, since Django's own filters are lists of links. #}
+<details data-filter-title="{{ title }}" open>
+  <summary>By {{ title }}</summary>
+  {% for choice in choices %}
+  <form method="get" class="date-range-filter">
+    {% for name, value in choice.other %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+    <label>From <input type="date" name="{{ choice.from_name }}" value="{{ choice.from_value }}"></label>
+    <label>To <input type="date" name="{{ choice.to_name }}" value="{{ choice.to_value }}"></label>
+    <input type="submit" value="Apply">
+    {% if choice.from_value or choice.to_value %}<a href="{{ choice.clear_url }}">Clear dates</a>{% endif %}
+  </form>
+  {% endfor %}
+</details>

@@ -49,7 +49,7 @@ nothing to configure in the AWS console after apply completes.
 | VPC | 10.0.0.0/16 across 2 AZs | Private network — nothing reaches the DB or cache except the app |
 | Public subnets | 10.0.1/24, 10.0.2/24 | Load balancer and application instances |
 | Private subnets | 10.0.10/24, 10.0.11/24 | RDS and ElastiCache — no internet route |
-| Security groups | 4 (ALB → EB → RDS/Cache) | Least-privilege firewall chain |
+| Security groups | 4 (CloudFront → ALB → EB → RDS/Cache) | Least-privilege firewall chain; the ALB accepts CloudFront only |
 | RDS MariaDB 10.11 | db.t3.micro (staging) | Primary database, encrypted, automated backups |
 | ElastiCache Serverless Redis | TLS-only | Django session cache |
 | S3 frontend bucket | Private + CloudFront OAC | Compiled React app |
@@ -58,7 +58,7 @@ nothing to configure in the AWS console after apply completes.
 | Elastic Beanstalk | Docker on AL2023, ALB | Django API server |
 | IAM instance role | Least privilege | App reads/writes S3, calls Bedrock — no hardcoded keys |
 | IAM GitHub OIDC role | Scoped to this repo | GitHub Actions deploys without storing AWS keys |
-| Terraform state | S3 + DynamoDB | Shared, locked, encrypted — created by bootstrap |
+| Terraform state | S3 | One bucket, `<project_name>-tfstate-<account id>`. One state file per environment (`<project_name>/<environment>/terraform.tfstate`), encrypted, locked with an S3 lock file (`use_lockfile`) |
 
 ---
 
@@ -67,7 +67,7 @@ nothing to configure in the AWS console after apply completes.
 Install these before running anything:
 
 ```bash
-# Terraform >= 1.9
+# Terraform >= 1.11
 brew install terraform          # macOS
 # or: https://developer.hashicorp.com/terraform/install
 
@@ -76,7 +76,7 @@ brew install awscli             # macOS
 # or: https://aws.amazon.com/cli/
 
 # Verify
-terraform version               # should show >= 1.9.x
+terraform version               # should show >= 1.11.x
 aws --version                   # should show aws-cli/2.x
 ```
 
@@ -141,7 +141,7 @@ making any changes.
 
 What the script does:
 1. Checks that `terraform`, `aws`, and credentials are ready
-2. Runs the bootstrap step (creates the S3 state bucket and DynamoDB lock table)
+2. Runs the bootstrap step (creates the S3 state bucket)
 3. Runs `terraform init` pointing at that state bucket
 4. Shows you the full plan — review it before confirming
 5. Applies the plan
@@ -192,6 +192,24 @@ curl $(terraform output -raw backend_api_url)/health/
 ```
 
 ---
+
+## Offline checks
+
+`terraform test` checks the plan against a mocked AWS provider, so it needs no
+account or credentials. CI runs it on every pull request:
+
+```bash
+terraform init -backend=false && terraform validate && terraform test
+```
+
+`tests/check_workflows.py` reads the infrastructure workflows as text and fails
+if a known hazard comes back (destroy on failure, a hardcoded environment, a
+state key shared by both environments, a missing state lock). CI runs it in the
+same job:
+
+```bash
+python3 infra/terraform/tests/check_workflows.py   # from the repository root
+```
 
 ## Testing on a separate AWS account
 
@@ -249,6 +267,42 @@ On production, you must first disable deletion protection:
 AWS_PROFILE=test-account terraform apply -var-file=terraform.tfvars
 AWS_PROFILE=test-account terraform destroy -var-file=terraform.tfvars
 ```
+
+---
+
+## Email (staff invites and password resets)
+
+The application sends invites and password resets through Amazon SES, using
+the instance role. Three variables control it:
+
+| Variable | Sets | Value |
+|---|---|---|
+| `site_url` | `SITE_URL` | The public URL, e.g. `https://chatbot.mylab.org`. Empty: `https://<domain_name>` if a custom domain is set, otherwise unset (invites then fail with a warning in the admin) |
+| `email_backend` | `EMAIL_BACKEND` | `chatbot.email_backend.SESBackend` to send. Empty by default: Terraform then leaves the setting alone (a value set by hand on the environment is kept) and the application prints emails to its log |
+| `default_from_email` | `DEFAULT_FROM_EMAIL` | The sender, e.g. `"ChatbotLab <no-reply@mylab.org>"` |
+
+When `default_from_email` is set, Terraform also gives the instance role one
+permission: `ses:SendEmail` / `ses:SendRawEmail` on SES identities in this
+account and region, only when the From address equals the address in
+`default_from_email`. With it empty the role gets no SES permission.
+
+**Terraform does not verify the sender or leave the SES sandbox. Do both by
+hand, once per AWS account and region, before you set `email_backend` to SES:**
+
+1. In the SES console (same region as `aws_region`), open **Identities →
+   Create identity**. Choose the domain of the sender (e.g. `mylab.org`), or
+   the single address.
+2. For a domain, add the DKIM CNAME records SES shows to the domain's DNS and
+   wait for the status **Verified**. For an address, click the link in the
+   confirmation email.
+3. A new account is in the SES sandbox and can send only to verified
+   addresses. In **Account dashboard → Request production access**, ask AWS to
+   lift it. Until then, invites to other people are rejected.
+4. Send a test: in the admin, invite a user, or use **Send set-password
+   email** on an existing one.
+
+These steps are manual because each needs a person: a DNS change or a click in
+a mailbox, and a support request that AWS reviews.
 
 ---
 
@@ -392,7 +446,7 @@ aws cloudfront create-invalidation \
 | `https://<cloudfront-domain>/` | React frontend |
 | `https://<cloudfront-domain>/api/` | Django REST API |
 | `https://<cloudfront-domain>/api/admin/` | Django admin (login with superuser credentials above) |
-| `https://<cloudfront-domain>/health/` | Health check |
+| `https://<cloudfront-domain>/api/health/ready/` | Readiness check (database + cache) |
 
 ---
 
@@ -421,7 +475,7 @@ deploy both frontend and backend automatically.
 
 Not yet done. Suggested baseline before any load test:
 
-1. **Health endpoint** — `curl https://<cf-domain>/health/` should return 200 in < 200 ms
+1. **Health endpoint** — `curl https://<cf-domain>/api/health/ready/` should return 200 in < 200 ms
 2. **API under load** — use `ab` or `k6` against `/api/` endpoints; watch EB CPU and RDS connections
 3. **WebSocket** — verify the `/ws/` path stays open under concurrent connections
 4. **CloudFront cache hit rate** — check CloudFront metrics in the AWS console after serving real traffic
@@ -432,7 +486,7 @@ Not yet done. Suggested baseline before any load test:
 
 | File | What it does |
 |---|---|
-| `bootstrap/main.tf` | Creates the S3 bucket and DynamoDB table for Terraform state. Run once. |
+| `bootstrap/main.tf` | Creates the S3 bucket for Terraform state. Run once per AWS account. |
 | `main.tf` | AWS provider (v6.4) and empty S3 backend declaration |
 | `variables.tf` | All input variables with descriptions |
 | `locals.tf` | Shared naming convention and common tags |
