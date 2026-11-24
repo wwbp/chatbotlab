@@ -6,6 +6,7 @@ delivers it. FromEmailAddress is passed explicitly because the IAM policy
 conditions on ses:FromAddress, which a raw send does not otherwise set.
 """
 
+import unittest
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -59,3 +60,15 @@ def test_errors_raise_unless_fail_silently(ses):
     with pytest.raises(RuntimeError):
         SESBackend().send_messages([message()])
     assert SESBackend(fail_silently=True).send_messages([message()]) == 0
+
+
+def test_silent_failure_is_still_logged_without_the_address(ses):
+    _, client = ses
+    client.send_email.side_effect = RuntimeError("rejected: a@upenn.edu")
+    with unittest.TestCase().assertLogs("chatbot.email_backend", "ERROR") as logs:
+        assert SESBackend(fail_silently=True).send_messages([message()]) == 0
+    (line,) = logs.output
+    assert "RuntimeError" in line
+    assert "Subject" in line
+    assert "upenn.edu" in line
+    assert "a@upenn.edu" not in line

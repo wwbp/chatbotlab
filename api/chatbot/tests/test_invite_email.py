@@ -28,15 +28,20 @@ Coverage:
     unknown emails get none, and the same done page
   - access log: password_reset_requested and password_set rows, no token
   - a send failure or missing SITE_URL keeps the user and shows a warning
+  - an SES rejection is logged at ERROR with its code and the purpose, but
+    never the full address or the token; the reset page stays the same
 """
 
+import logging
 import re
+import unittest
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
 import pytest
+from botocore.exceptions import ClientError
 from django.contrib.admin.models import LogEntry
 from django.contrib.auth.models import Group, Permission, User
 from django.contrib.auth.tokens import default_token_generator
@@ -485,3 +490,81 @@ def test_access_log_records_request_and_password_set_without_token(admin_client)
     for row in AccessLog.objects.all():
         assert token not in row.path + row.query
         assert uid not in row.path + row.query
+
+
+# ── Send failures are logged ──────────────────────────────────────────────────
+
+# What SES (sandbox mode) said on staging: the message names the address.
+REJECTED_ADDRESS = "secret.person@upenn.edu"
+
+
+@pytest.fixture
+def ses_rejects(settings):
+    """SESBackend with a boto3 client that rejects; yields the raw sends."""
+    settings.EMAIL_BACKEND = "chatbot.email_backend.SESBackend"
+    raws = []
+
+    def reject(**kwargs):
+        raws.append(kwargs["Content"]["Raw"]["Data"].decode())
+        raise ClientError(
+            {
+                "Error": {
+                    "Code": "MessageRejected",
+                    "Message": "Email address is not verified. The following "
+                    "identities failed the check in region US-EAST-1: "
+                    + REJECTED_ADDRESS,
+                }
+            },
+            "SendEmail",
+        )
+
+    with patch("chatbot.email_backend.boto3.client") as factory:
+        factory.return_value.send_email.side_effect = reject
+        yield raws
+
+
+def logged_text(logs):
+    # Formatted with tracebacks, as the log files store them.
+    return "\n".join(logging.Formatter().format(r) for r in logs.records)
+
+
+@pytest.mark.django_db
+def test_reset_send_failure_is_logged_without_address_or_token(ses_rejects):
+    staff_user(email=REJECTED_ADDRESS, username=REJECTED_ADDRESS)
+    with unittest.TestCase().assertLogs("chatbot", level="ERROR") as logs:
+        response = Client().post(RESET_URL, {"email": REJECTED_ADDRESS})
+
+    # Same page as a success or an unknown address: nothing leaks.
+    assert response.status_code == 302
+    assert response.url == "/api/auth/password_reset/done/"
+
+    text = logged_text(logs)
+    assert REJECTED_ADDRESS not in text.lower()
+    link = LINK_RE.search(ses_rejects[0]).group(0)
+    assert link.rstrip("/").rsplit("/", 1)[1] not in text  # the token
+    assert "ClientError" in text
+    assert "MessageRejected" in text
+    assert "Email address is not verified" in text
+    assert "Reset your ChatbotLab password" in text  # the purpose
+    assert "upenn.edu" in text  # the domain only
+
+
+@pytest.mark.django_db
+def test_invite_send_failure_is_logged_without_address_and_warns(
+    admin_client, roles, commit_now, ses_rejects
+):
+    case = unittest.TestCase()
+    # chatbot.admin does not propagate to chatbot, so capture both.
+    with (
+        case.assertLogs("chatbot", level="ERROR") as logs,
+        case.assertLogs("chatbot.admin", level="ERROR") as admin_logs,
+    ):
+        response = add_user(admin_client, roles.values(), email=REJECTED_ADDRESS)
+
+    assert "User saved, but the invite email could not be sent" in (
+        response.content.decode()
+    )
+    text = logged_text(logs) + logged_text(admin_logs)
+    assert REJECTED_ADDRESS not in text.lower()
+    assert "MessageRejected" in text
+    assert "Your ChatbotLab account" in text  # the purpose
