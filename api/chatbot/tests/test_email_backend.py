@@ -6,12 +6,13 @@ delivers it. FromEmailAddress is passed explicitly because the IAM policy
 conditions on ses:FromAddress, which a raw send does not otherwise set.
 """
 
+import unittest
 from unittest.mock import MagicMock, patch
 
 import pytest
 from django.core.mail import EmailMessage
 
-from chatbot.email_backend import SESBackend
+from chatbot.email_backend import SESBackend, describe_error
 
 
 def message():
@@ -59,3 +60,30 @@ def test_errors_raise_unless_fail_silently(ses):
     with pytest.raises(RuntimeError):
         SESBackend().send_messages([message()])
     assert SESBackend(fail_silently=True).send_messages([message()]) == 0
+
+
+def test_silent_failure_is_still_logged_without_the_address(ses):
+    _, client = ses
+    client.send_email.side_effect = RuntimeError("rejected: a@upenn.edu")
+    with unittest.TestCase().assertLogs("chatbot.email_backend", "ERROR") as logs:
+        assert SESBackend(fail_silently=True).send_messages([message()]) == 0
+    (line,) = logs.output
+    assert "RuntimeError" in line
+    assert "Subject" in line
+    assert "upenn.edu" in line
+    assert "a@upenn.edu" not in line
+
+
+@pytest.mark.parametrize(
+    ("raw", "redacted"),
+    [
+        ("to a@upenn.edu", "to ***@upenn.edu"),
+        ("a@x.com,b@y.org", "***@x.com,***@y.org"),
+        ("see mailto:a@x.com", "see mailto:***@x.com"),
+        ('"Smith, John" <j@x.com>', "***@x.com>"),
+        ('"john smith"@x.com', "***@x.com"),
+    ],
+    ids=["plain", "comma-separated", "mailto", "quoted-name", "quoted-local"],
+)
+def test_describe_error_keeps_only_the_domain(raw, redacted):
+    assert describe_error(ValueError(raw)) == f"ValueError: {redacted}"

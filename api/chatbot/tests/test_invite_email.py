@@ -28,15 +28,22 @@ Coverage:
     unknown emails get none, and the same done page
   - access log: password_reset_requested and password_set rows, no token
   - a send failure or missing SITE_URL keeps the user and shows a warning
+  - an SES rejection is logged at ERROR with its code and the purpose, but
+    never the full address or the token; the reset page stays the same
+  - a reset for an address with no active staff account is logged at INFO
+    with the domain only, and the response matches the matched case
 """
 
+import logging
 import re
+import unittest
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
 import pytest
+from botocore.exceptions import ClientError
 from django.contrib.admin.models import LogEntry
 from django.contrib.auth.models import Group, Permission, User
 from django.contrib.auth.tokens import default_token_generator
@@ -417,7 +424,9 @@ def test_unknown_email_gets_same_done_page_and_no_mail():
     assert len(mail.outbox) == 0
 
 
-@pytest.fixture
+# Autouse: rate-limit counters must not carry over between tests or runs
+# (every reset posts from 127.0.0.1, against a limit of 10 an hour).
+@pytest.fixture(autouse=True)
 def fresh_cache(settings):
     settings.CACHES = {
         "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}
@@ -430,7 +439,7 @@ def fresh_cache(settings):
 
 
 @pytest.mark.django_db
-def test_reset_is_rate_limited_per_email_silently(fresh_cache):
+def test_reset_is_rate_limited_per_email_silently():
     from chatbot.staff_auth import RESETS_PER_EMAIL_PER_HOUR
 
     staff_user(email="x@upenn.edu")
@@ -449,7 +458,7 @@ def test_reset_is_rate_limited_per_email_silently(fresh_cache):
 
 
 @pytest.mark.django_db
-def test_reset_is_rate_limited_per_ip(fresh_cache):
+def test_reset_is_rate_limited_per_ip():
     from chatbot.staff_auth import RESETS_PER_IP_PER_HOUR
 
     for i in range(RESETS_PER_IP_PER_HOUR + 1):
@@ -485,3 +494,101 @@ def test_access_log_records_request_and_password_set_without_token(admin_client)
     for row in AccessLog.objects.all():
         assert token not in row.path + row.query
         assert uid not in row.path + row.query
+
+
+# ── Send failures are logged ──────────────────────────────────────────────────
+
+# What SES (sandbox mode) said on staging: the message names the address.
+REJECTED_ADDRESS = "secret.person@upenn.edu"
+
+
+@pytest.fixture
+def ses_rejects(settings):
+    """SESBackend with a boto3 client that rejects; yields the raw sends."""
+    settings.EMAIL_BACKEND = "chatbot.email_backend.SESBackend"
+    raws = []
+
+    def reject(**kwargs):
+        raws.append(kwargs["Content"]["Raw"]["Data"].decode())
+        raise ClientError(
+            {
+                "Error": {
+                    "Code": "MessageRejected",
+                    "Message": "Email address is not verified. The following "
+                    "identities failed the check in region US-EAST-1: "
+                    + REJECTED_ADDRESS,
+                }
+            },
+            "SendEmail",
+        )
+
+    with patch("chatbot.email_backend.boto3.client") as factory:
+        factory.return_value.send_email.side_effect = reject
+        yield raws
+
+
+def logged_text(logs):
+    # Formatted with tracebacks, as the log files store them.
+    return "\n".join(logging.Formatter().format(r) for r in logs.records)
+
+
+@pytest.mark.django_db
+def test_reset_send_failure_is_logged_without_address_or_token(ses_rejects):
+    staff_user(email=REJECTED_ADDRESS, username=REJECTED_ADDRESS)
+    with unittest.TestCase().assertLogs("chatbot", level="ERROR") as logs:
+        response = Client().post(RESET_URL, {"email": REJECTED_ADDRESS})
+
+    # Same page as a success or an unknown address: nothing leaks.
+    assert response.status_code == 302
+    assert response.url == "/api/auth/password_reset/done/"
+
+    text = logged_text(logs)
+    assert REJECTED_ADDRESS not in text.lower()
+    link = LINK_RE.search(ses_rejects[0]).group(0)
+    assert link.rstrip("/").rsplit("/", 1)[1] not in text  # the token
+    assert "ClientError" in text
+    assert "MessageRejected" in text
+    assert "Email address is not verified" in text
+    assert "Reset your ChatbotLab password" in text  # the purpose
+    assert "upenn.edu" in text  # the domain only
+
+
+@pytest.mark.django_db
+def test_invite_send_failure_is_logged_without_address_and_warns(
+    admin_client, roles, commit_now, ses_rejects
+):
+    case = unittest.TestCase()
+    # chatbot.admin does not propagate to chatbot, so capture both.
+    with (
+        case.assertLogs("chatbot", level="ERROR") as logs,
+        case.assertLogs("chatbot.admin", level="ERROR") as admin_logs,
+    ):
+        response = add_user(admin_client, roles.values(), email=REJECTED_ADDRESS)
+
+    assert "User saved, but the invite email could not be sent" in (
+        response.content.decode()
+    )
+    text = logged_text(logs) + logged_text(admin_logs)
+    assert REJECTED_ADDRESS not in text.lower()
+    assert "MessageRejected" in text
+    assert "Your ChatbotLab account" in text  # the purpose
+
+
+@pytest.mark.django_db
+def test_reset_for_no_staff_account_is_logged_with_domain_only():
+    staff_user(email="known@upenn.edu", username="known@upenn.edu")
+    matched = Client().post(RESET_URL, {"email": "known@upenn.edu"}, follow=True)
+    with unittest.TestCase().assertLogs("chatbot", level="INFO") as logs:
+        unmatched = Client().post(
+            RESET_URL, {"email": "Other.Address@upenn.edu"}, follow=True
+        )
+
+    # Same response either way: nothing reveals which addresses exist.
+    assert unmatched.redirect_chain == matched.redirect_chain
+    assert unmatched.status_code == matched.status_code
+    assert unmatched.content == matched.content
+
+    text = logged_text(logs)
+    assert "other.address@upenn.edu" not in text.lower()
+    assert "no active staff account" in text
+    assert "upenn.edu" in text
