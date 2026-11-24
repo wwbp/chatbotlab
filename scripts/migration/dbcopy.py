@@ -92,6 +92,18 @@ class Conn:
         }
 
 
+def _defaults(conn):
+    """Option-file arguments; must come first on any client command line.
+
+    Only the file the operator named is read, never ~/.my.cnf or /etc/my.cnf:
+    an inherited ``safe-updates``, ``select_limit`` or ``force`` there would
+    silently cap or excuse what this tool reads.
+    """
+    if conn.defaults_file:
+        return [f"--defaults-file={conn.defaults_file}"]
+    return ["--no-defaults"]
+
+
 def _spawn(conn, sql, writable=False):
     """The only place a database client is started.
 
@@ -104,9 +116,7 @@ def _spawn(conn, sql, writable=False):
         raise Refuse("no `mariadb` or `mysql` client binary on PATH")
     if writable and conn.role != "target":
         raise Refuse("refusing to open a writable session on the source")
-    args = [CLIENT]
-    if conn.defaults_file:
-        args.append(f"--defaults-extra-file={conn.defaults_file}")  # must be first
+    args = [CLIENT, *_defaults(conn)]
     for flag, value in (("host", conn.host), ("port", conn.port), ("user", conn.user)):
         if value:
             args.append(f"--{flag}={value}")
@@ -116,9 +126,16 @@ def _spawn(conn, sql, writable=False):
         "--batch",
         "--skip-column-names",
         "--quick",  # stream rows; never buffer a whole table in the client
+        "--skip-force",  # stop at the first SQL error, even if a file says force
         conn.database,
     ]
-    preamble = "SET time_zone = '+00:00';"
+    # No row cap, whatever an option file's init-command or the server's
+    # global settings say (2^64-1 is "no limit").
+    preamble = (
+        "SET time_zone = '+00:00';"
+        "SET SESSION sql_select_limit = 18446744073709551615;"
+        "SET SESSION max_join_size = 18446744073709551615;"
+    )
     if not writable:
         preamble += "SET SESSION TRANSACTION READ ONLY;"
     if conn.version and conn.flavour == "mysql":
@@ -470,6 +487,14 @@ def compare_table(src, dst, name, table):
             first = lines
     _finish(src, procs[0])
     _finish(dst, procs[1])
+    # Independent of how the rows were read: every row the table has was hashed.
+    for side, conn in enumerate((src, dst)):
+        total = int(query(conn, f"SELECT COUNT(*) FROM {q(name)}")[0][0])
+        if total != counts[side]:
+            raise Refuse(
+                f"{name}: {conn.role} has {total} rows by COUNT(*) but only "
+                f"{counts[side]} row hashes were read; the comparison is incomplete"
+            )
 
     result = {
         "rows_source": counts[0],
