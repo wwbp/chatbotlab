@@ -218,6 +218,13 @@ def plain_copy():
     assert load.returncode == 0, load.stderr.decode()
 
 
+@pytest.fixture(autouse=True)
+def _needs_the_script():
+    # The dev container mounts only api/; CI checks out the whole repository.
+    if not SCRIPT.exists():
+        pytest.skip("needs scripts/migration/dbcopy.py, which is outside api/")
+
+
 @pytest.fixture(scope="session")
 def servers():
     if not (SRC.host and DST.host and ROOT_PASSWORD):
