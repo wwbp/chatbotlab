@@ -339,3 +339,23 @@ def test_utf8_and_utf8mb3_collation_names_are_the_same():
     assert dbcopy.missing_collations({"utf8mb4_bin"}, {"utf8_bin"}) == ["utf8mb4_bin"]
     assert dbcopy.norm_collation("utf8_unicode_ci") == "utf8mb3_unicode_ci"
     assert dbcopy.norm_collation("utf8mb4_unicode_ci") == "utf8mb4_unicode_ci"
+
+
+@pytest.mark.parametrize(
+    "leftover",
+    [
+        "CREATE PROCEDURE mig_left() DETERMINISTIC NO SQL DO 1",
+        "CREATE EVENT mig_left ON SCHEDULE EVERY 1 DAY DISABLE DO DO 1",
+    ],
+    ids=["routine", "event"],
+)
+def test_target_with_only_a_routine_or_event_is_not_empty(
+    leftover, same_or_newer_target, tmp_path
+):
+    # P8: no tables, but not empty either.
+    admin(DST, leftover, DST_DB)
+    result, report = preflight(tmp_path)
+    assert result.returncode == 1, result.stdout + result.stderr
+    failed = check(report, "target_empty")
+    assert failed["status"] == "fail"
+    assert "mig_left" in failed["detail"]
