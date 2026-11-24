@@ -91,6 +91,67 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6379
         run: cd api && pipenv run pytest --create-db
 
+  # The data-migration tool (scripts/migration/dbcopy.py) is tested against two
+  # real database servers, which the "Backend test" job does not have: there
+  # these tests skip. Not a required check; it runs on every pull request.
+  data-migration-test:
+    name: Data migration test (${{ matrix.source }} to ${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {source: "mariadb:10.11", target: "mariadb:10.11"}
+          - {source: "mariadb:11.4", target: "mariadb:11.4"}
+          - {source: "mysql:8.0", target: "mysql:8.0"}
+          # Different flavours: only the "refuses" tests run.
+          - {source: "mysql:8.0", target: "mariadb:10.11"}
+    services:
+      source:
+        image: ${{ matrix.source }}
+        env:
+          MYSQL_ROOT_PASSWORD: ci_root
+        ports:
+          - 3306:3306
+      target:
+        image: ${{ matrix.target }}
+        env:
+          MYSQL_ROOT_PASSWORD: ci_root
+        ports:
+          - 3307:3306
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: sudo apt-get update -q && sudo apt-get install -y libmariadb-dev build-essential pkg-config mariadb-client
+
+      - name: Install pipenv
+        run: pip install pipenv
+
+      - name: Install dependencies
+        run: cd api && pipenv install --dev
+
+      - name: Run data-migration tests
+        env:
+          DJANGO_SETTINGS_MODULE: generic_chatbot.settings
+          DEBUG: "True"
+          SECRET_KEY: "ci-secret-key-for-testing-only-not-for-production-use"
+          REDIS_URL: redis://127.0.0.1:6379
+          MIGTEST_SOURCE_HOST: 127.0.0.1
+          MIGTEST_SOURCE_PORT: "3306"
+          MIGTEST_TARGET_HOST: 127.0.0.1
+          MIGTEST_TARGET_PORT: "3307"
+          MIGTEST_ROOT_PASSWORD: ci_root
+        run: cd api && pipenv run pytest chatbot/tests/data_migration -v -rs
+
   frontend-lint:
     name: Frontend lint
     runs-on: ubuntu-latest
