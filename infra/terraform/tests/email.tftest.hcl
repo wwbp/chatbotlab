@@ -98,8 +98,11 @@ run "instance_role_may_send_from_the_configured_address_only" {
   }
 
   assert {
-    condition     = jsondecode(aws_iam_role_policy.eb_instance_send_email[0].policy).Statement[0].Resource == "arn:aws:ses:us-east-1:123456789012:identity/*"
-    error_message = "The SES statement must be limited to identities in this account and region."
+    condition = toset(jsondecode(aws_iam_role_policy.eb_instance_send_email[0].policy).Statement[0].Resource) == toset([
+      "arn:aws:ses:us-east-1:123456789012:identity/no-reply@example.org",
+      "arn:aws:ses:us-east-1:123456789012:identity/example.org",
+    ])
+    error_message = "The SES statement must name only the sender's address identity and its domain identity, not every identity in the account."
   }
 
 }
@@ -108,6 +111,7 @@ run "a_plain_sender_address_is_used_as_is" {
   command = plan
 
   variables {
+    email_backend      = "chatbot.email_backend.SESBackend"
     default_from_email = "no-reply@example.org"
   }
 
@@ -142,10 +146,8 @@ run "no_email_by_default" {
     condition = tomap(nonsensitive({
       for s in aws_elastic_beanstalk_environment.chatbot_api.setting :
       s.name => s.value if contains(["SITE_URL", "EMAIL_BACKEND", "DEFAULT_FROM_EMAIL"], s.name)
-      })) == tomap({
-      EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
-    })
-    error_message = "With nothing configured, only EMAIL_BACKEND (console) is set; empty values must not be sent to the application."
+    })) == tomap({})
+    error_message = "With nothing configured, no email setting may be sent: a stack whose EMAIL_BACKEND was set by hand must not be reset, and the application defaults to the console backend on its own."
   }
 }
 
@@ -157,4 +159,60 @@ run "ses_backend_needs_a_sender" {
   }
 
   expect_failures = [var.email_backend]
+}
+
+# The address is taken the way Python's parseaddr takes it in
+# email_backend.py: the last bracketed group, without surrounding spaces.
+run "a_bracketed_display_name_does_not_fool_the_parser" {
+  command = plan
+
+  variables {
+    email_backend      = "chatbot.email_backend.SESBackend"
+    default_from_email = "\"Lab <team@other.org>\" <no-reply@example.org>"
+  }
+
+  assert {
+    condition     = jsondecode(aws_iam_role_policy.eb_instance_send_email[0].policy).Statement[0].Condition.StringEquals["ses:FromAddress"] == "no-reply@example.org"
+    error_message = "The sender is the last bracketed address, not one inside a quoted display name."
+  }
+}
+
+run "spaces_inside_the_brackets_are_trimmed" {
+  command = plan
+
+  variables {
+    email_backend      = "chatbot.email_backend.SESBackend"
+    default_from_email = "ChatbotLab < no-reply@example.org >"
+  }
+
+  assert {
+    condition     = jsondecode(aws_iam_role_policy.eb_instance_send_email[0].policy).Statement[0].Condition.StringEquals["ses:FromAddress"] == "no-reply@example.org"
+    error_message = "Spaces around the address inside the brackets must be removed."
+  }
+}
+
+run "a_sender_that_is_not_an_address_is_rejected" {
+  command = plan
+
+  variables {
+    email_backend      = "chatbot.email_backend.SESBackend"
+    default_from_email = "ChatbotLab staging"
+  }
+
+  expect_failures = [var.default_from_email]
+}
+
+# Least privilege: a sender alone, with emails still going to the log, must
+# not grant permission to send.
+run "a_sender_without_the_ses_backend_grants_nothing" {
+  command = plan
+
+  variables {
+    default_from_email = "ChatbotLab <no-reply@example.org>"
+  }
+
+  assert {
+    condition     = length(aws_iam_role_policy.eb_instance_send_email) == 0
+    error_message = "The SES permission must exist only when the SES backend is selected."
+  }
 }
