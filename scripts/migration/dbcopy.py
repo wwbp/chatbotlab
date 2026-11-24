@@ -24,6 +24,7 @@ crashed or interrupted. Anything but 0 means stop.
 
 import argparse
 import contextlib
+import functools
 import hashlib
 import itertools
 import json
@@ -38,6 +39,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 CLIENT = shutil.which("mariadb") or shutil.which("mysql")
+
+
+@functools.cache
+def _sandbox():
+    """--sandbox (no \\! shell, no file access from SQL text) where the client
+    has it: MariaDB clients since 10.5.25 / 10.6.18 / 10.11.8 / 11.0.6."""
+    out = subprocess.run(
+        [CLIENT, "--no-defaults", "--help"], capture_output=True, text=True, check=False
+    ).stdout
+    return ["--sandbox"] if "--sandbox" in out else []
 
 
 class Refuse(Exception):
@@ -142,7 +153,8 @@ def _spawn(conn, sql, writable=False):
         "--skip-column-names",
         "--quick",  # stream rows; never buffer a whole table in the client
         "--skip-force",  # stop at the first SQL error, even if a file says force
-        conn.database,
+        *_sandbox(),
+        f"--database={conn.database}",  # never read as an option
     ]
     # No row cap, whatever an option file's init-command or the server's
     # global settings say (2^64-1 is "no limit").
@@ -739,11 +751,13 @@ def table_activity(conn):
     counts = {}
     if base:
         # COUNT(*), because information_schema.TABLE_ROWS is only an estimate.
+        # Never put database text in a string literal: select each table's
+        # position and map it back here. (Identifiers go through q().)
         union = " UNION ALL ".join(
-            f"SELECT '{r['table_name']}', COUNT(*) FROM {q(r['table_name'])}"
-            for r in base
+            f"SELECT {i}, COUNT(*) FROM {q(r['table_name'])}"
+            for i, r in enumerate(base)
         )
-        counts = {name: int(n) for name, n in query(conn, union)}
+        counts = {base[int(i)]["table_name"]: int(n) for i, n in query(conn, union)}
     for row in base:
         row["rows"] = counts[row["table_name"]]
     return listed, base
