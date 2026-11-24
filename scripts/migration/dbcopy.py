@@ -68,6 +68,17 @@ def scrub(text):
     return text
 
 
+def scrub_values(value):
+    """scrub() every string inside a JSON-able structure."""
+    if isinstance(value, str):
+        return scrub(value)
+    if isinstance(value, dict):
+        return {k: scrub_values(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [scrub_values(v) for v in value]
+    return value
+
+
 def say(message):
     sys.stdout.write(scrub(message) + "\n")
 
@@ -918,7 +929,9 @@ def step_preflight(args):
 
     a, b = server_info(src), server_info(dst)
     problem = ""
-    if norm_collation(a["database_collation"]) != norm_collation(b["database_collation"]):
+    if norm_collation(a["database_collation"]) != norm_collation(
+        b["database_collation"]
+    ):
         problem = (
             f"target database default is {b['database_character_set']}/"
             f"{b['database_collation']}, source is {a['database_character_set']}/"
@@ -1058,7 +1071,7 @@ def step_preflight(args):
     }
     args.run_dir.mkdir(parents=True, exist_ok=True)
     path = args.run_dir / "preflight-report.json"
-    path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    path.write_text(json.dumps(scrub_values(report), indent=2, sort_keys=True) + "\n")
     args.record.update(
         source_tables=len(base),
         source_rows=sum(a["tables"].values()),
@@ -1161,7 +1174,7 @@ def step_verify(args):
     }
     args.run_dir.mkdir(parents=True, exist_ok=True)
     path = report_path
-    text = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    text = json.dumps(scrub_values(report), indent=2, sort_keys=True) + "\n"
     path.write_text(text)
     args.record.update(
         tables_compared=report["tables_compared"],
@@ -1252,7 +1265,8 @@ def main(argv=None):
         }
         args.run_dir.mkdir(parents=True, exist_ok=True)
         with (args.run_dir / "run.log").open("a") as log:
-            log.write(scrub(json.dumps(entry, sort_keys=True)) + "\n")
+            # Scrub the values, before JSON escapes ", \ or non-ASCII in them.
+            log.write(json.dumps(scrub_values(entry), sort_keys=True) + "\n")
     return code
 
 

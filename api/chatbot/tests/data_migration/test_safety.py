@@ -288,7 +288,8 @@ def test_each_client_gets_only_its_own_password(same_flavour, tmp_path):
             seen["target"] += 1
             leaked = SRC_PASSWORD in environment
         assert not leaked, f"the other side's password passed to: {argv}"
-    assert seen["source"] > 5 and seen["target"] > 5
+    assert seen["source"] > 5
+    assert seen["target"] > 5
 
 
 def test_password_not_in_repr():
