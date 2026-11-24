@@ -7,7 +7,7 @@ The copy is done and proven by ``scripts/migration/dbcopy.py``. What it guarante
 
 - It cannot write to the source. Every session it opens there is ``READ ONLY`` and the server enforces it. **Rollback is therefore always "send traffic back to the old environment".**
 - ``verify`` compares schema and every row (SHA-256 per cell, in primary-key order) and exits non-zero on any difference, naming the table and the first differing key. It refuses (rather than passing) when it cannot see everything: missing privileges, unreadable routine bodies, object types it cannot compare, fewer rows hashed than ``COUNT(*)``, a source with no tables, or source and target being the same database. See `What verify does not compare`_.
-- Every step has ``--dry-run`` and appends to ``<run-dir>/run.log``. Keep the run directory: it is the record of the migration.
+- Every step has ``--dry-run`` and appends to ``<run-dir>/run.log``. Keep the run directory: it is the record of the migration. Every file the tool writes there is mode 600. A differing row is named by its key only when the key is an integer; any other key (``django_session.session_key`` is a login token) is shown as ``sha256:`` and the first 12 hex digits of its hash.
 
 .. warning::
 
