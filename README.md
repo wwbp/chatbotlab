@@ -168,6 +168,8 @@ docker exec chatbotlab-backend-1 python manage.py migrate chatbot <previous_numb
 make migrate
 ```
 
+In production, migrations are applied when the container starts, one instance at a time (see [Deployment](#deployment)). An instance that waits more than `MIGRATE_LOCK_TIMEOUT` seconds for another instance's migrations fails to start, so say so in the PR if a migration could run longer than ten minutes on production data.
+
 ### CI
 
 Every push runs [`ci.yml`](.github/workflows/ci.yml): backend lint (`ruff check`, `ruff format --check`, `isort --check`), backend tests against MariaDB and Redis, frontend lint, and frontend tests. All four must pass before a deploy workflow will run.
@@ -193,6 +195,7 @@ All configuration is environment variables, loaded from `api/.env` and `web/.env
 | `MOCK_LLM` | `true` skips all LLM **and moderation** calls and returns canned replies |
 | `DJANGO_SUPERUSER_*` | Used by `make superuser`; on Elastic Beanstalk the entrypoint creates the user on first boot |
 | `GUNICORN_WORKERS` | Production worker count (default 4) |
+| `MIGRATE_LOCK_TIMEOUT` | Production only: seconds a starting instance waits for another instance's migrations before failing (default 600) |
 
 ### Frontend (`web/.env`)
 
@@ -214,7 +217,7 @@ Deploys are triggered by pushing to a branch. CI must pass first.
 | `main` | `bot.wwbp.org` | [`production.yml`](.github/workflows/production.yml) |
 | `docs` | [GitHub Pages](https://wwbp.github.io/chatbotlab/) | [`docs.yml`](.github/workflows/docs.yml) |
 
-Each deploy builds the React app to S3 behind CloudFront, and the Django app to Elastic Beanstalk. On boot the production container applies migrations, collects static files, loads bots, and creates the superuser if `DJANGO_SUPERUSER_PASSWORD` is set — see [`api/entrypoint.sh`](api/entrypoint.sh).
+Each deploy builds the React app to S3 behind CloudFront, and the Django app to Elastic Beanstalk. On boot the production container applies migrations, loads bots, creates the superuser if `DJANGO_SUPERUSER_PASSWORD` is set, and collects static files — see [`api/entrypoint.sh`](api/entrypoint.sh). The database steps run under a database lock (`manage.py migrate_locked`), so instances starting together apply migrations one at a time.
 
 Production runtime configuration lives in Elastic Beanstalk environment variables, not in a `.env` file. `SECRET_KEY`, database credentials, and LLM API keys must be set there before the first deploy.
 

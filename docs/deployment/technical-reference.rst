@@ -153,6 +153,8 @@ Application stack
 
 **Database connection pooling is disabled (``CONN_MAX_AGE = 0``).** Django's async (ASGI) stack with MySQL is thread-sensitive: all ORM calls are serialized through a single shared thread per worker. Reusing connections across requests causes state corruption under concurrent load. See the comment in ``api/generic_chatbot/settings.py`` for details.
 
+**Startup database steps run under a named lock.** ``api/entrypoint.sh`` runs ``python manage.py migrate_locked`` on every container start. It takes the MariaDB named lock ``<DATABASE_NAME>.startup`` (``GET_LOCK``) on a dedicated connection, then runs ``migrate``, ``load_bots`` and, if ``DJANGO_SUPERUSER_PASSWORD`` is set, ``createsuperuser``. When several instances start together during a deploy, one applies the migrations while the others wait, then find nothing left to apply and start normally. An instance that waits longer than ``MIGRATE_LOCK_TIMEOUT`` seconds (default 600) exits non-zero instead of starting on a schema that is still changing; raise it for a release with a migration slower than that. If the instance holding the lock dies, the server frees the lock when its connection drops. The lock only orders start-up: it does not make a migration safe for old code still serving traffic during a rolling deploy.
+
 
 Security configuration
 -----------------------
