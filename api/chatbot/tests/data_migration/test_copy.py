@@ -840,6 +840,7 @@ def test_option_file_cannot_make_the_dump_flush_or_lock(same_flavour, tmp_path):
     for name in ("HOST", "PORT", "USER", "PASSWORD"):
         del env[f"MIG_SOURCE_{name}"]
     run_dir = tmp_path / "run"
+    assert tool("--run-dir", str(run_dir), *SNAPSHOT, env=env).returncode == 0
     result = tool("--run-dir", str(run_dir), "dump", env=env)
     assert result.returncode == 0, result.stdout + result.stderr
 
