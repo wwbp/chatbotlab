@@ -86,6 +86,37 @@ variable "admin_panel_password" {
 }
 
 # -----------------------------------------------------------------------
+# Email — staff invites and password resets
+# -----------------------------------------------------------------------
+
+variable "site_url" {
+  description = "The public URL of the site, e.g. https://chatbot.mylab.org, with no trailing slash. The application builds invite and password-reset links from it (SITE_URL). Leave empty to use https://<domain_name> when a custom domain is set. With neither set, invites fail with a warning in the admin."
+  type        = string
+  default     = ""
+}
+
+variable "email_backend" {
+  description = "The Django email backend (EMAIL_BACKEND). The default prints emails to the application log and sends nothing. Set chatbot.email_backend.SESBackend to send through Amazon SES; that also needs default_from_email, and the sender must be verified in SES by hand (see README)."
+  type        = string
+  default     = "django.core.mail.backends.console.EmailBackend"
+
+  validation {
+    condition     = var.email_backend != ""
+    error_message = "email_backend must not be empty. Use django.core.mail.backends.console.EmailBackend to send nothing."
+  }
+  validation {
+    condition     = var.email_backend != "chatbot.email_backend.SESBackend" || var.default_from_email != ""
+    error_message = "The SES backend needs default_from_email: the instance role is only allowed to send from that address."
+  }
+}
+
+variable "default_from_email" {
+  description = "The sender of invites and password resets (DEFAULT_FROM_EMAIL), as an address or as 'Name <address>', e.g. \"ChatbotLab <no-reply@mylab.org>\". Setting it also lets the instance role send through SES from exactly that address. Leave empty for a stack that sends no email."
+  type        = string
+  default     = ""
+}
+
+# -----------------------------------------------------------------------
 # GitHub — used to set up passwordless CI/CD via OIDC
 # -----------------------------------------------------------------------
 

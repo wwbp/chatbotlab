@@ -37,6 +37,16 @@ locals {
     "https://*.cloudfront.net",
   ]))
 
+  # Where invite and password-reset links point. This cannot fall back to the
+  # CloudFront domain: CloudFront's origin is the Elastic Beanstalk
+  # environment, so naming the distribution in an EB setting is a cycle.
+  site_url = var.site_url != "" ? var.site_url : (var.domain_name != "" ? "https://${var.domain_name}" : "")
+
+  # The bare address out of "Name <address>". api/chatbot/email_backend.py
+  # passes exactly this to SES as FromEmailAddress, and the IAM policy in
+  # iam.tf conditions on it.
+  ses_from_address = try(regex("<([^<>]+)>", var.default_from_email)[0], trimspace(var.default_from_email))
+
   # Use the caller-supplied key if provided; otherwise use the auto-generated
   # one from random_password.django_secret_key (stored in state, stable across
   # re-deploys so active user sessions are never invalidated).
