@@ -230,3 +230,14 @@ def test_broken_sha2_is_refused(copied, tmp_path):
     result = verify(tmp_path / "run", env)
     assert result.returncode == 2, result.stdout + result.stderr
     assert "SHA2" in result.stderr
+
+
+# ── V7: no stale report survives a later run ─────────────────────────────────
+
+
+def test_stale_ok_report_removed_by_a_refused_run(copied, tmp_path):
+    stale = tmp_path / "verify-report.json"
+    stale.write_text('{"ok": true}\n')
+    result = verify(tmp_path, tool_env(MIG_TARGET_DATABASE=""))
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert not stale.exists()
