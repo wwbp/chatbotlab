@@ -180,7 +180,10 @@ def query(conn, sql, writable=False):
     proc = _spawn(conn, sql, writable)
     out = proc.stdout.read().decode()
     _finish(conn, proc)
-    return [[_field(f) for f in line.split("\t")] for line in out.splitlines()]
+    # Only "\n" ends a row: the client escapes it inside values, but not
+    # U+2028, \r or the other breaks splitlines() would also split on.
+    lines = out.removesuffix("\n").split("\n") if out else []
+    return [[_field(f) for f in line.split("\t")] for line in lines]
 
 
 ABC_SHA256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
