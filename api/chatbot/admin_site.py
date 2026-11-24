@@ -8,7 +8,7 @@ because the default site is imported before chatbot/admin.py runs.
 """
 
 from django.contrib import admin
-from django.urls import reverse
+from django.urls import path, reverse
 
 # (heading, slug, models as "app_label.ModelName"), in display order.
 GROUPS = (
@@ -26,6 +26,7 @@ GROUPS = (
         "Participant data",
         "participant-data",
         (
+            "chatbot.Studies",  # a page, not a model: see get_app_list
             "chatbot.Conversation",
             "chatbot.Utterance",
             "chatbot.SurveyResponse",
@@ -38,6 +39,24 @@ GROUPS = (
 
 
 class ChatbotLabAdminSite(admin.AdminSite):
+    def get_urls(self):
+        # Imported here: it needs the models, and this module loads before
+        # the app registry is ready.
+        from . import admin_studies
+
+        # Ahead of Django's own patterns, which end in a catch-all.
+        return [
+            path(
+                "studies/", self.admin_view(admin_studies.studies_view), name="studies"
+            ),
+            path(
+                "studies/export/",
+                self.admin_view(admin_studies.studies_export_view),
+                name="studies_export",
+            ),
+            *super().get_urls(),
+        ]
+
     def get_app_list(self, request, app_label=None):
         """Regroup Django's permission-filtered app list (index and sidebar).
 
@@ -52,6 +71,16 @@ class ChatbotLabAdminSite(admin.AdminSite):
             for app in self._build_app_dict(request).values()
             for m in app["models"]
         }
+        # The Studies page summarises conversations, so it is listed for
+        # whoever may view those (the same check studies_view makes).
+        if request.user.has_perm("chatbot.view_conversation"):
+            models["chatbot.Studies"] = {
+                "name": "Studies",
+                "object_name": "Studies",
+                "admin_url": reverse("admin:studies", current_app=self.name),
+                "add_url": None,
+                "view_only": True,
+            }
         groups = [
             (name, slug, [models.pop(label, None) for label in labels])
             for name, slug, labels in GROUPS

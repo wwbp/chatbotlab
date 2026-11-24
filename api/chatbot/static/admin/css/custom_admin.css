@@ -462,3 +462,41 @@ form .aligned ul.related-records {
     padding: 0;
     list-style: none;
 }
+
+/* ===== Studies page, and the from-to date filter in changelist sidebars ===== */
+.studies-filter {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 8px 24px;
+    margin: 16px 0;
+}
+
+.studies-filter label {
+    display: block;
+    font-weight: 700;
+}
+
+#studies td,
+#studies th {
+    vertical-align: top;
+}
+
+#studies ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+#studies td a {
+    margin-right: 12px;
+}
+
+.date-range-filter {
+    padding: 0 15px 15px;
+}
+
+.date-range-filter label {
+    display: block;
+    margin-bottom: 6px;
+}

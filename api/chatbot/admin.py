@@ -1,3 +1,4 @@
+import datetime as dt
 import io
 import json
 import logging
@@ -9,6 +10,8 @@ import uuid
 from django import forms
 from django.contrib import admin, messages
 from django.contrib.admin.forms import AdminAuthenticationForm
+from django.contrib.admin.options import IncorrectLookupParameters
+from django.contrib.admin.views.main import PAGE_VAR
 from django.contrib.admin.widgets import AdminTextareaWidget
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth.models import Group, User
@@ -30,6 +33,7 @@ from PIL import Image
 from simple_history.admin import SimpleHistoryAdmin
 
 from .access_log import client_ip
+from .admin_studies import in_date_range
 from .models import (
     MODERATION_CATEGORIES,
     AccessLog,
@@ -472,6 +476,59 @@ class ConditionFilter(admin.AllValuesFieldListFilter):
         self.title = "Condition"
 
 
+class DateRangeFilter(admin.FieldListFilter):
+    """Two date boxes in the sidebar: rows from one day to another, inclusive.
+
+    Django's date filter only offers presets (today, past 7 days, this month)
+    and date_hierarchy only one year, month or day, so neither can pick, say,
+    a study's three weeks of data collection. Parameters are <field>_from and
+    <field>_to (YYYY-MM-DD); either may be left empty.
+    """
+
+    template = "admin/date_range_filter.html"
+
+    def __init__(self, field, request, params, model, model_admin, field_path):
+        self.param_from = f"{field_path}_from"
+        self.param_to = f"{field_path}_to"
+        super().__init__(field, request, params, model, model_admin, field_path)
+        self.title = "date range"
+
+    def expected_parameters(self):
+        return [self.param_from, self.param_to]
+
+    def _value(self, param):
+        # Django keeps every occurrence of a parameter, as a list.
+        return self.used_parameters.get(param, [""])[-1]
+
+    def queryset(self, request, queryset):
+        try:
+            start, end = (
+                dt.date.fromisoformat(value) if value else None
+                for value in map(self._value, self.expected_parameters())
+            )
+        except ValueError as e:
+            # The admin turns this into its usual "?e=1" redirect.
+            raise IncorrectLookupParameters(e) from e
+        return in_date_range(queryset, self.field_path, start, end)
+
+    def choices(self, changelist):
+        # One "choice": what the template needs to draw the form. The other
+        # filters and the search travel as hidden inputs; the page number is
+        # dropped because the result set changes.
+        yield {
+            "from_name": self.param_from,
+            "from_value": self._value(self.param_from),
+            "to_name": self.param_to,
+            "to_value": self._value(self.param_to),
+            "other": [
+                (name, value)
+                for name, value in changelist.params.items()
+                if name not in (*self.expected_parameters(), PAGE_VAR)
+            ],
+            "clear_url": changelist.get_query_string(remove=self.expected_parameters()),
+        }
+
+
 class SessionHealthFilter(admin.SimpleListFilter):
     """Find sessions that went wrong, so they can be checked or excluded.
 
@@ -526,6 +583,7 @@ class ConversationAdmin(DataExportMixin, ReadOnlyDataAdmin):
         ("user_group", ConditionFilter),
         "bot_name",
         "started_time",
+        ("started_time", DateRangeFilter),
         SessionHealthFilter,
     )
     date_hierarchy = "started_time"
@@ -846,6 +904,7 @@ class UtteranceAdmin(DataExportMixin, ReadOnlyDataAdmin):
     # the (much smaller) Conversation table.
     list_filter = (
         FlaggedFilter,
+        ("created_time", DateRangeFilter),
         ("conversation__study_name", titled_filter("study")),
         ("conversation__user_group", titled_filter("condition")),
         choices_filter(
