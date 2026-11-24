@@ -188,6 +188,39 @@ def connect(role):
     return conn
 
 
+# Without these, information_schema silently hides triggers (TRIGGER), events
+# (EVENT), routines (EXECUTE) and view bodies (SHOW VIEW): both sides would
+# show nothing and agree.
+DEFINITION_PRIVILEGES = ("SELECT", "SHOW VIEW", "TRIGGER", "EVENT", "EXECUTE")
+
+
+def missing_privileges(conn, needed):
+    """Privileges in ``needed`` the account holds neither globally nor on the
+    database. Grants made through roles are not seen here: this fails safe."""
+    me = "REPLACE(GRANTEE, CHAR(39), '') = CURRENT_USER()"
+    held = {
+        row[0]
+        for row in query(
+            conn,
+            f"SELECT PRIVILEGE_TYPE FROM information_schema.USER_PRIVILEGES WHERE {me}"
+            " UNION SELECT PRIVILEGE_TYPE FROM information_schema.SCHEMA_PRIVILEGES"
+            f" WHERE {me} AND DATABASE() LIKE TABLE_SCHEMA",
+        )
+    }
+    return [p for p in needed if p not in held]
+
+
+def require_definition_privileges(conn):
+    missing = missing_privileges(conn, DEFINITION_PRIVILEGES)
+    if missing:
+        raise Refuse(
+            f"{conn.role}: the account lacks {', '.join(missing)} on {conn.database}; "
+            "without them triggers, events, routines or view definitions are "
+            "invisible and would compare as equal. Grant "
+            f"{', '.join(DEFINITION_PRIVILEGES)} on the database.",
+        )
+
+
 # ── schema ───────────────────────────────────────────────────────────────────
 
 _HERE = "TABLE_SCHEMA = DATABASE()"
@@ -341,6 +374,12 @@ def read_schema(conn):
     ):  # fmt: skip
         where = f"{table[:-1]}_SCHEMA = DATABASE()"
         for row in _rows(conn, [name, *columns], table, where=where):
+            if row["definition_sha256"] is None:
+                raise Refuse(
+                    f"{conn.role}: cannot read the body of {kind[:-1]} {row[name.lower()]}; "
+                    "the account must be its definer or hold SHOW_ROUTINE (MySQL) / "
+                    "SHOW CREATE ROUTINE or SELECT on mysql.proc (MariaDB)",
+                )
             schema[kind][row.pop(name.lower())] = row
     # Each side's definition names its own database: drop that qualifier.
     for row in _rows(
@@ -588,6 +627,8 @@ def check_same_flavour(src, dst):
 def step_verify(args):
     src, dst = connect("source"), connect("target")
     check_same_flavour(src, dst)
+    for conn in (src, dst):
+        require_definition_privileges(conn)
     if args.dry_run:
         say(
             "dry-run: would compare schema and every row of "
