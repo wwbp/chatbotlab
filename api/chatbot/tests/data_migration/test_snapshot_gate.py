@@ -5,7 +5,10 @@ dump until the operator has stated, on the record, which snapshot protects
 the source and that restoring it was proven.
 """
 
-from .conftest import SNAPSHOT, SRC, SRC_DB, read_log, tool, tool_env
+from .conftest import SNAPSHOT, read_log, tool, tool_env
+
+# The first two run in the one-server "Backend test" job, where no MIG_*
+# connection settings exist: the missing flag must be named first (S1).
 
 
 def test_refuses_without_a_snapshot_id(tmp_path):
@@ -26,8 +29,10 @@ def test_refuses_without_the_operators_assertion(tmp_path):
 
 
 def test_records_the_snapshot_against_the_source(tmp_path):
-    # No database connection is needed: this step only records.
-    result = tool("--run-dir", str(tmp_path), *SNAPSHOT)
+    # No database connection is needed: this step only records. So it runs in
+    # the one-server "Backend test" job too, with a source that need not exist.
+    env = tool_env(MIG_SOURCE_HOST="old-db.internal", MIG_SOURCE_DATABASE="chatbot_db")
+    result = tool("--run-dir", str(tmp_path), *SNAPSHOT, env=env)
     assert result.returncode == 0, result.stderr
     assert SNAPSHOT[2] in result.stdout
     entry = read_log(tmp_path)[-1]
@@ -35,8 +40,8 @@ def test_records_the_snapshot_against_the_source(tmp_path):
     assert entry["status"] == "ok"
     assert entry["snapshot_id"] == SNAPSHOT[2]
     assert entry["snapshot_verified"] is True
-    assert entry["source"]["host"] == SRC.host
-    assert entry["source"]["database"] == SRC_DB
+    assert entry["source"]["host"] == "old-db.internal"
+    assert entry["source"]["database"] == "chatbot_db"
     assert entry["time"].endswith("+00:00")
 
 
