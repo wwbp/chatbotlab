@@ -17,20 +17,26 @@ import time
 import pytest
 
 from .conftest import (
+    CLIENT,
     DST,
     DST_DB,
     DST_PASSWORD,
+    DUMP,
+    ROOT_PASSWORD,
     SCRIPT,
     SNAPSHOT,
     SRC,
     SRC_DB,
     SRC_PASSWORD,
+    _root_args,
     admin,
     db_collation,
     django,
     read_log,
     read_report,
+    recorded_stdin,
     reset_target,
+    shim,
     tool,
     tool_env,
     tool_recording_commands,
@@ -44,6 +50,14 @@ WRITE_VERBS = (
     "INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP|TRUNCATE|RENAME|GRANT|REVOKE"
     "|LOCK|FLUSH|CALL|LOAD|OPTIMIZE|ANALYZE|REPAIR"
 )
+
+
+CONFIRM = f"{DST.host}/{DST_DB}"
+
+
+def snapshot(run_dir):
+    """Record the snapshot gate, which dump requires, in ``run_dir``."""
+    assert tool("--run-dir", str(run_dir), *SNAPSHOT).returncode == 0
 
 
 def target_tables():
@@ -280,6 +294,222 @@ def test_restore_refuses_a_file_this_run_did_not_dump(dumped, tmp_path):
     assert target_tables() == []
 
 
+# ── a dump that fails (D2) ───────────────────────────────────────────────────
+
+BROKEN_DUMPS = {
+    "half_then_error": f'"{DUMP}" "$@" | head -c 200000; exit 2',
+    "no_trailer_exit_0": f'"{DUMP}" "$@" | grep -v "Dump completed"; exit 0',
+}
+
+
+@pytest.mark.parametrize("kind", BROKEN_DUMPS)
+def test_a_failed_dump_leaves_nothing_restore_could_use(kind, same_flavour, tmp_path):
+    env = shim(tmp_path, "mariadb-dump", BROKEN_DUMPS[kind])
+    run_dir = tmp_path / "run"
+    snapshot(run_dir)
+    result = tool("--run-dir", str(run_dir), "dump", env=env)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "dump failed or is incomplete" in result.stderr
+    assert sorted(p.name for p in run_dir.iterdir()) == ["run.log"]
+    assert [e["status"] for e in read_log(run_dir) if e["step"] == "dump"] == [
+        "refused"
+    ]
+    reset_target()
+    result = tool("--run-dir", str(run_dir), "restore")
+    assert result.returncode == 2
+    assert "no dump is recorded" in result.stderr
+    assert target_tables() == []
+
+
+def test_dump_with_a_lot_on_stderr_does_not_deadlock(same_flavour, tmp_path):
+    # D5: 200 KB of stderr before any output fills the pipe if nobody reads it.
+    noisy = f'head -c 200000 /dev/zero | tr "\\0" x >&2; exec "{DUMP}" "$@"'
+    env = shim(tmp_path, "mariadb-dump", noisy)
+    run_dir = tmp_path / "run"
+    snapshot(run_dir)
+    try:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--run-dir", str(run_dir), "dump"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("dump deadlocked on a full stderr pipe")
+    assert result.returncode == 0, result.stdout + result.stderr[-2000:]
+    assert (run_dir / "dump.sql").exists()
+
+
+def test_float_the_dump_would_round_is_refused(same_flavour, tmp_path):
+    # D7: mariadb-dump writes FLOAT with 6 significant digits; 1.500001 would
+    # come back as 1.5. Values that survive that (the fixture's) are copied.
+    admin(
+        SRC,
+        "CREATE TABLE mig_flt (id INT PRIMARY KEY, x FLOAT);"
+        "INSERT INTO mig_flt VALUES (1, 1.5), (2, 1.500001)",
+        SRC_DB,
+    )
+    snapshot(tmp_path)
+    try:
+        result = tool("--run-dir", str(tmp_path), "dump")
+    finally:
+        admin(SRC, "DROP TABLE mig_flt", SRC_DB)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "mig_flt.x" in result.stderr
+    assert not (tmp_path / "dump.sql").exists()
+
+
+# ── D6: the smaller ways a dump or restore can go wrong ─────────────────────
+
+
+def test_missing_dump_binary_is_a_clean_refusal(same_flavour, tmp_path):
+    bin_dir = tmp_path / "only-client"
+    bin_dir.mkdir()
+    (bin_dir / "mariadb").symlink_to(CLIENT)
+    env = tool_env(PATH=str(bin_dir))
+    snapshot(tmp_path / "run")
+    result = tool("--run-dir", str(tmp_path / "run"), "dump", env=env)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "REFUSED" in result.stderr
+    assert "mariadb-dump" in result.stderr
+
+
+def test_dump_failure_names_the_exit_code(same_flavour, tmp_path):
+    env = shim(tmp_path, "mariadb-dump", BROKEN_DUMPS["half_then_error"])
+    snapshot(tmp_path / "run")
+    result = tool("--run-dir", str(tmp_path / "run"), "dump", env=env)
+    assert result.returncode == 2
+    assert "exit code 2" in result.stderr
+
+
+def test_disk_full_during_dump_leaves_no_partial_file(same_flavour, tmp_path):
+    # A file-size limit stands in for a full disk: writes fail with EFBIG.
+    run_dir = tmp_path / "run"
+    snapshot(run_dir)
+    result = subprocess.run(
+        ["sh", "-c", 'ulimit -f 2000; exec "$@"', "sh", sys.executable, str(SCRIPT),
+         "--run-dir", str(run_dir), "dump"],
+        env=tool_env(),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )  # fmt: skip
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "REFUSED" in result.stderr
+    assert sorted(p.name for p in run_dir.iterdir()) == ["run.log"]
+
+
+def test_a_torn_last_line_in_run_log_does_not_break_the_run(dumped, tmp_path):
+    run_dir = fresh_run_with_dump(dumped, tmp_path)
+    with (run_dir / "run.log").open("a") as log:
+        log.write('{"step": "restore", "sta')  # the machine died mid-write
+    reset_target()
+    result = tool("--run-dir", str(run_dir), "restore")
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = (run_dir / "run.log").read_text().splitlines()
+    assert lines[-3] == '{"step": "restore", "sta'
+    assert json.loads(lines[-1])["status"] == "ok"
+
+
+@pytest.mark.parametrize(
+    ("create", "drop"),
+    [
+        ("CREATE SEQUENCE mig_seq", "DROP SEQUENCE IF EXISTS mig_seq"),
+        (
+            "CREATE EVENT mig_live ON SCHEDULE EVERY 1 DAY ENABLE DO DO 1",
+            "DROP EVENT IF EXISTS mig_live",
+        ),
+    ],
+    ids=["sequence", "enabled_event"],
+)
+def test_dump_refuses_objects_it_cannot_copy_safely(
+    create, drop, same_flavour, tmp_path
+):
+    # A sequence is not a view; an enabled event would start writing to the
+    # target the moment it is restored.
+    if "SEQUENCE" in create and same_flavour != "mariadb":
+        pytest.skip("MariaDB-only object")
+    admin(SRC, create, SRC_DB)
+    snapshot(tmp_path)
+    try:
+        result = tool("--run-dir", str(tmp_path), "dump")
+    finally:
+        admin(SRC, drop, SRC_DB)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "mig_" in result.stderr
+    assert not (tmp_path / "dump.sql").exists()
+
+
+def test_dump_reports_definers(copy):
+    run_dir, results = copy
+    assert "DEFINER" in results["dump"].stdout
+    assert entry(run_dir, "dump")["definers"]
+
+
+def test_restore_feeds_the_bytes_it_checked(same_flavour, tmp_path):
+    run_dir = tmp_path / "run"
+    reset_target()
+    snapshot(run_dir)
+    for step in ("dump", "restore"):
+        result, _ = tool_recording_commands(tmp_path, "--run-dir", str(run_dir), step)
+        assert result.returncode == 0, result.stderr
+    (sent,) = [
+        s for argv, s in recorded_stdin(tmp_path) if "--max-allowed-packet" in argv
+    ]
+    assert hashlib.sha256(sent.encode()).hexdigest() == entry(run_dir, "dump")["sha256"]
+    assert entry(run_dir, "restore")["fed_sha256"] == entry(run_dir, "dump")["sha256"]
+
+
+def test_recorded_collation_is_never_pasted_into_sql(dumped, tmp_path):
+    # P1 audit: restore builds ALTER DATABASE ... COLLATE <recorded name>.
+    run_dir = fresh_run_with_dump(dumped, tmp_path)
+    log = run_dir / "run.log"
+    entries = [json.loads(line) for line in log.read_text().splitlines()]
+    for e in entries:
+        if e["step"] == "dump":
+            e["database_collation"] = "utf8mb4_bin; CREATE TABLE mig_injected (i INT)"
+    log.write_text("".join(json.dumps(e) + "\n" for e in entries))
+    reset_target()
+    result = tool("--run-dir", str(run_dir), "restore")
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert target_tables() == []
+
+
+# ── restore must not swallow warnings (D4) ─────────────────────────────────
+
+# Like a real dump, it turns strict mode off: 'abc' into an INT is then a
+# warning, and the row is stored as 0.
+LOSSY_DUMP = b"""/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
+CREATE TABLE mig_w (id INT PRIMARY KEY, n INT);
+INSERT INTO mig_w VALUES (1, 'abc');
+-- Dump completed
+"""
+
+
+def run_with_handmade_dump(dumped, run_dir, data):
+    """A run directory whose recorded dump is ``data`` (checksum and all)."""
+    (entry_,) = [e for e in read_log(dumped) if e["step"] == "dump"]
+    (run_dir / "dump.sql").write_bytes(data)
+    entry_.update(
+        sha256=hashlib.sha256(data).hexdigest(),
+        bytes=len(data),
+        tables=1,
+        object_names=["TABLE mig_w"],
+    )
+    (run_dir / "run.log").write_text(json.dumps(entry_) + "\n")
+    return run_dir
+
+
+def test_restore_fails_on_any_warning(dumped, tmp_path):
+    run_dir = run_with_handmade_dump(dumped, tmp_path, LOSSY_DUMP)
+    reset_target()
+    result = tool("--run-dir", str(run_dir), "restore")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "1366" in result.stdout + result.stderr  # Incorrect integer value
+    assert entry(run_dir, "restore", "failed")
+
+
 # ── --dry-run ────────────────────────────────────────────────────────────────
 
 
@@ -322,6 +552,39 @@ def _kill_restore_midway(run_dir):
     proc.wait()
 
 
+def _target_sessions():
+    return admin(
+        DST,
+        "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE USER = 'mig_user'",
+    )[0][0]
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP], ids=["TERM", "HUP"])
+def test_a_signalled_restore_stops_its_client_and_logs_the_outcome(
+    sig, dumped, tmp_path
+):
+    # D3: only the Python process is signalled, as a closed terminal or a
+    # plain `kill` would. Its database client must not carry on loading.
+    run_dir = fresh_run_with_dump(dumped, tmp_path)
+    reset_target()
+    proc = subprocess.Popen(
+        [sys.executable, str(SCRIPT), "--run-dir", str(run_dir), "restore"],
+        env=tool_env(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 60
+    while len(target_tables()) < 3:
+        assert proc.poll() is None, "restore finished before it could be signalled"
+        assert time.monotonic() < deadline
+    proc.send_signal(sig)
+    assert proc.wait(timeout=30) == 2
+    time.sleep(2)
+    assert _target_sessions() == "0", "the restore's client is still loading"
+    statuses = [e["status"] for e in read_log(run_dir) if e["step"] == "restore"]
+    assert statuses == ["started", "interrupted"]
+
+
 def test_interrupted_restore_is_detected_cleaned_up_and_redone(dumped, tmp_path):
     run_dir = fresh_run_with_dump(dumped, tmp_path)
     reset_target()
@@ -345,7 +608,7 @@ def test_interrupted_restore_is_detected_cleaned_up_and_redone(dumped, tmp_path)
     result = tool("--run-dir", str(run_dir), "reset-target")
     assert result.returncode == 2
     result = tool(
-        "--run-dir", str(run_dir), "reset-target", "--confirm-database", "wrong_name"
+        "--run-dir", str(run_dir), "reset-target", "--confirm", f"{DST.host}/wrong_name"
     )
     assert result.returncode == 2
     assert target_tables() == partial
@@ -354,16 +617,14 @@ def test_interrupted_restore_is_detected_cleaned_up_and_redone(dumped, tmp_path)
         "--run-dir",
         str(run_dir),
         "reset-target",
-        "--confirm-database",
-        DST_DB,
+        "--confirm",
+        CONFIRM,
         "--dry-run",
     )
     assert result.returncode == 0, result.stderr
     assert target_tables() == partial
 
-    result = tool(
-        "--run-dir", str(run_dir), "reset-target", "--confirm-database", DST_DB
-    )
+    result = tool("--run-dir", str(run_dir), "reset-target", "--confirm", CONFIRM)
     assert result.returncode == 0, result.stderr
     assert target_tables() == []
 
@@ -389,8 +650,8 @@ def test_reset_target_only_empties_a_database_this_run_loaded(dumped, tmp_path):
         "--run-dir",
         str(run_dir),
         "reset-target",
-        "--confirm-database",
-        SRC_DB,
+        "--confirm",
+        f"{SRC.host}/{SRC_DB}",
         env=as_if_source_were_target,
     )
     assert result.returncode == 2
@@ -403,8 +664,8 @@ def test_reset_target_only_empties_a_database_this_run_loaded(dumped, tmp_path):
         "--run-dir",
         str(run_dir),
         "reset-target",
-        "--confirm-database",
-        SRC_DB,
+        "--confirm",
+        f"{SRC.host}/{SRC_DB}",
         env=as_if_source_were_target,
     )
     assert result.returncode == 2
@@ -422,12 +683,93 @@ def test_reset_target_refuses_a_database_that_was_not_empty_before(dumped, tmp_p
         ).returncode
         == 0
     )
-    result = tool(
-        "--run-dir", str(run_dir), "reset-target", "--confirm-database", DST_DB
-    )
+    result = tool("--run-dir", str(run_dir), "reset-target", "--confirm", CONFIRM)
     assert result.returncode == 2
     assert "was not empty" in result.stderr
     assert "precious" in target_tables()
+
+
+# ── reset-target must never empty the wrong database (D1) ──────────────────
+
+
+def reset(run_dir, confirm=CONFIRM, env=None):
+    return tool(
+        "--run-dir", str(run_dir), "reset-target", "--confirm", confirm, env=env
+    )
+
+
+def test_reset_target_refuses_after_a_successful_verify(copy):
+    run_dir, results = copy
+    assert results["verify"].returncode == 0
+    before = target_tables()
+    result = reset(run_dir)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "verif" in result.stderr
+    assert target_tables() == before
+
+
+@pytest.fixture
+def half_restored(dumped, tmp_path):
+    run_dir = fresh_run_with_dump(dumped, tmp_path)
+    reset_target()
+    _kill_restore_midway(run_dir)
+    time.sleep(1)  # let the server notice its client is gone
+    return run_dir
+
+
+def test_reset_target_refuses_objects_the_dump_did_not_name(half_restored):
+    admin(DST, "CREATE TABLE mig_stowaway (id INT PRIMARY KEY)", DST_DB)
+    result = reset(half_restored)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "mig_stowaway" in result.stderr
+    assert "mig_stowaway" in target_tables()
+
+
+def test_reset_target_checks_the_server_identity_by_query(half_restored):
+    # As if the recorded restore had reached some other server.
+    log = half_restored / "run.log"
+    entries = [json.loads(line) for line in log.read_text().splitlines()]
+    for e in entries:
+        if e["step"] == "restore" and e["status"] == "started":
+            e["target_identity"] = {
+                **e.get("target_identity", {}),
+                "hostname": "elsewhere",
+            }
+    log.write_text("".join(json.dumps(e) + "\n" for e in entries))
+    before = target_tables()
+    result = reset(half_restored)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "identity" in result.stderr
+    assert target_tables() == before
+
+
+def test_reset_target_refuses_while_others_are_connected(half_restored):
+    idle = subprocess.Popen(
+        [CLIENT, *_root_args(DST), DST_DB],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={"MYSQL_PWD": ROOT_PASSWORD, "PATH": "/usr/bin:/bin"},
+    )
+    idle.stdin.write(b"DO SLEEP(6);")
+    idle.stdin.close()
+    time.sleep(0.5)
+    before = target_tables()
+    try:
+        result = reset(half_restored)
+    finally:
+        idle.wait()
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "session" in result.stderr
+    assert target_tables() == before
+
+
+def test_reset_target_confirmation_names_host_and_database(half_restored):
+    before = target_tables()
+    result = reset(half_restored, confirm=DST_DB)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "host/database" in result.stderr
+    assert target_tables() == before
 
 
 # ── and the app, last (it writes on login) ───────────────────────────────────

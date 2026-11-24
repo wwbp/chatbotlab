@@ -141,6 +141,12 @@ Set these environment variables on each Elastic Beanstalk environment:
 .. note::
    Verify the sender address in Amazon SES before you send email.
 
+On a stack built with Terraform, do not set these variables by hand. Set the
+Terraform variables ``site_url``, ``email_backend`` and ``default_from_email``.
+Terraform then sets the three environment variables and lets the instance role
+send from that sender address only. Terraform does not verify the sender in
+Amazon SES. The steps are in ``infra/terraform/README.md``, section "Email".
+
 The links are not in the access log. Each link is in the nginx, load balancer
 and CloudFront access logs one time. The links work one time and expire after
 3 days.

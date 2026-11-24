@@ -23,26 +23,44 @@ are visible in the process list):
 Only the standard library and the ``mariadb`` and ``mariadb-dump`` client
 binaries are used.
 
-Exit status: 0 success, 1 the check found a problem, 2 could not run.
+Exit status: 0 succeeded; 1 a check or comparison found a problem; 2 refused,
+crashed or interrupted. Anything but 0 means stop.
 """
 
 import argparse
 import contextlib
+import functools
 import hashlib
 import itertools
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 CLIENT = shutil.which("mariadb") or shutil.which("mysql")
 DUMP = shutil.which("mariadb-dump") or shutil.which("mysqldump")
+
+
+@functools.cache
+def _sandbox():
+    """--sandbox (no \\! shell, no file access from SQL text) where the client
+    has it: MariaDB clients since 10.5.25 / 10.6.18 / 10.11.8 / 11.0.6."""
+    out = subprocess.run(
+        [CLIENT, "--no-defaults", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_child_env(),
+    ).stdout
+    return ["--sandbox"] if "--sandbox" in out else []
 
 
 class Refuse(Exception):
@@ -58,6 +76,17 @@ def scrub(text):
     return text
 
 
+def scrub_values(value):
+    """scrub() every string inside a JSON-able structure."""
+    if isinstance(value, str):
+        return scrub(value)
+    if isinstance(value, dict):
+        return {k: scrub_values(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [scrub_values(v) for v in value]
+    return value
+
+
 def say(message):
     sys.stdout.write(scrub(message) + "\n")
 
@@ -71,7 +100,7 @@ class Conn:
     host: str
     port: str
     user: str
-    password: str
+    password: str = field(repr=False)
     database: str
     defaults_file: str
     version: str = ""
@@ -90,6 +119,8 @@ class Conn:
             get("DATABASE"),
             get("DEFAULTS_FILE"),
         )
+        if conn.database.startswith("-"):
+            raise Refuse(f"{role}: MIG_{role.upper()}_DATABASE must not start with '-'")
         if not conn.database or not (conn.host or conn.defaults_file):
             raise Refuse(
                 f"{role}: set MIG_{role.upper()}_DATABASE and MIG_{role.upper()}_HOST "
@@ -112,21 +143,58 @@ class Conn:
         }
 
 
+def _defaults(conn):
+    """Option-file arguments; must come first on any client command line.
+
+    Only the file the operator named is read, never ~/.my.cnf or /etc/my.cnf:
+    an inherited ``safe-updates``, ``select_limit`` or ``force`` there would
+    silently cap or excuse what this tool reads.
+    """
+    if conn.defaults_file:
+        return [f"--defaults-file={conn.defaults_file}"]
+    return ["--no-defaults"]
+
+
+def _child_env():
+    """The environment for a child process: no password from either side.
+    The caller adds MYSQL_PWD for the one side that child talks to."""
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if k != "MYSQL_PWD" and not (k.startswith("MIG_") and k.endswith("_PASSWORD"))
+    }
+
+
 def _command(binary, conn, *options):
-    """(argv, environment) for a client binary. Credentials are never in argv."""
+    """(argv, environment) for a client binary. Credentials are never in argv,
+    and the child sees only this side's password."""
     if not binary:
         raise Refuse("the mariadb / mariadb-dump client binaries are not on PATH")
-    args = [binary]
-    if conn.defaults_file:
-        args.append(f"--defaults-extra-file={conn.defaults_file}")  # must be first
+    args = [binary, *_defaults(conn)]
     for flag, value in (("host", conn.host), ("port", conn.port), ("user", conn.user)):
         if value:
             args.append(f"--{flag}={value}")
     args += ["--protocol=tcp", "--default-character-set=utf8mb4", *options]
-    env = dict(os.environ)
+    env = _child_env()
     if conn.password:
         env["MYSQL_PWD"] = conn.password  # environment, not argv
     return [*args, conn.database], env
+
+
+_CHILDREN = []  # every client started; stopped if the step is interrupted
+
+
+def _popen(*args, **kwargs):
+    proc = subprocess.Popen(*args, **kwargs)
+    _CHILDREN.append(proc)
+    return proc
+
+
+def _stop_children():
+    for proc in _CHILDREN:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
 
 
 def _spawn(conn, sql, writable=False):
@@ -142,15 +210,36 @@ def _spawn(conn, sql, writable=False):
     """
     if writable and conn.role != "target":
         raise Refuse("refusing to open a writable session on the source")
-    # --quick: stream rows; never buffer a whole table in the client.
-    args, env = _command(CLIENT, conn, "--batch", "--skip-column-names", "--quick")
-    preamble = "SET time_zone = '+00:00';"
+    # No row cap, whatever an option file's init-command or the server's
+    # global settings say (2^64-1 is "no limit").
+    preamble = (
+        "SET time_zone = '+00:00';"
+        "SET SESSION sql_select_limit = 18446744073709551615;"
+        "SET SESSION max_join_size = 18446744073709551615;"
+    )
     if not writable:
         preamble += "SET SESSION TRANSACTION READ ONLY;"
+    if conn.role == "source":
+        # Fail in seconds on a held metadata lock rather than wait (default: a
+        # year) with the app's own statements queued behind us.
+        preamble += "SET SESSION lock_wait_timeout = 10;"
     if conn.version and conn.flavour == "mysql":
         # MySQL 8 caches information_schema statistics (AUTO_INCREMENT) for a day.
         preamble += "SET SESSION information_schema_stats_expiry = 0;"
-    proc = subprocess.Popen(
+    # In --init-command, which the client runs on connecting: nothing on
+    # stdin can come before it, and it overrides any init-command in a file.
+    args, env = _command(
+        CLIENT,
+        conn,
+        "--batch",
+        "--skip-column-names",
+        "--quick",  # stream rows; never buffer a whole table in the client
+        "--skip-force",  # stop at the first SQL error, even if a file says force
+        *_sandbox(),
+        "--skip-reconnect",  # a new connection would lack the session setup
+        f"--init-command={preamble.rstrip(';')}",
+    )
+    proc = _popen(
         args,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -158,7 +247,7 @@ def _spawn(conn, sql, writable=False):
         env=env,
     )
     # SQL goes in on stdin. Statements here are small; the pipe never fills.
-    proc.stdin.write((preamble + sql).encode())
+    proc.stdin.write(sql.encode())
     proc.stdin.close()
     return proc
 
@@ -188,10 +277,71 @@ def query(conn, sql, writable=False):
     return [[_field(f) for f in line.split("\t")] for line in out.splitlines()]
 
 
+ABC_SHA256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+
 def connect(role):
     conn = Conn.from_env(role)
-    conn.version = query(conn, "SELECT VERSION()")[0][0]
+    conn.version, digest = query(conn, "SELECT VERSION(), SHA2('abc', 256)")[0]
+    # Everything verify proves rests on the server's SHA2 (NULL on a server
+    # built without it).
+    if digest != ABC_SHA256:
+        raise Refuse(
+            f"{role}: SHA2('abc', 256) returned {digest!r}, not the known digest"
+        )
     return conn
+
+
+def identity(conn):
+    """Which server and database this session really reached, by asking it.
+
+    Host names in the environment prove nothing: a tunnel, an alias or a
+    renamed endpoint can lead anywhere.
+    """
+    names = ["hostname", "port", "datadir", "database"]
+    sql = "SELECT @@hostname, @@port, @@datadir, DATABASE()"
+    if conn.flavour == "mysql":
+        names.append("server_uuid")
+        sql += ", @@server_uuid"
+    return dict(zip(names, query(conn, sql)[0], strict=True))
+
+
+def check_different(src, dst):
+    if identity(src) == identity(dst):
+        raise Refuse("source and target are the same database on the same server")
+
+
+# Without these, information_schema silently hides triggers (TRIGGER), events
+# (EVENT), routines (EXECUTE) and view bodies (SHOW VIEW): both sides would
+# show nothing and agree.
+DEFINITION_PRIVILEGES = ("SELECT", "SHOW VIEW", "TRIGGER", "EVENT", "EXECUTE")
+
+
+def missing_privileges(conn, needed):
+    """Privileges in ``needed`` the account holds neither globally nor on the
+    database. Grants made through roles are not seen here: this fails safe."""
+    me = "REPLACE(GRANTEE, CHAR(39), '') = CURRENT_USER()"
+    held = {
+        row[0]
+        for row in query(
+            conn,
+            f"SELECT PRIVILEGE_TYPE FROM information_schema.USER_PRIVILEGES WHERE {me}"
+            " UNION SELECT PRIVILEGE_TYPE FROM information_schema.SCHEMA_PRIVILEGES"
+            f" WHERE {me} AND DATABASE() LIKE TABLE_SCHEMA",
+        )
+    }
+    return [p for p in needed if p not in held]
+
+
+def require_definition_privileges(conn):
+    missing = missing_privileges(conn, DEFINITION_PRIVILEGES)
+    if missing:
+        raise Refuse(
+            f"{conn.role}: the account lacks {', '.join(missing)} on {conn.database}; "
+            "without them triggers, events, routines or view definitions are "
+            "invisible and would compare as equal. Grant "
+            f"{', '.join(DEFINITION_PRIVILEGES)} on the database.",
+        )
 
 
 def connect_both(args):
@@ -202,9 +352,7 @@ def connect_both(args):
     dst = connect("target")
     args.record["target"] = dst.describe()
     check_same_flavour(src, dst)
-    identity = "SELECT @@hostname, @@port, @@datadir, DATABASE()"
-    if query(src, identity) == query(dst, identity):
-        raise Refuse("source and target are the same database on the same server")
+    check_different(src, dst)
     return src, dst
 
 
@@ -239,7 +387,7 @@ def read_schema(conn):
             "default collation": default[1],
         },
         "tables": {},
-        "views": [],
+        "views": {},
         "routines": {},
         "triggers": {},
         "events": {},
@@ -256,12 +404,13 @@ def read_schema(conn):
         ],
         "TABLES",
     ):
+        if row["table_type"] == "VIEW":
+            continue  # read below, from information_schema.VIEWS
         if row["table_type"] != "BASE TABLE":
-            # ponytail: views are compared by name only (their definitions embed
-            # the database name). The app has none; compare definitions if it
-            # ever does.
-            schema["views"].append(row["table_name"])
-            continue
+            raise Refuse(
+                f"{conn.role}: {row['table_name']} is a {row['table_type']}; "
+                "verify can only compare base tables and views",
+            )
         schema["tables"][row.pop("table_name")] = {
             "options": {
                 "engine": row["engine"],
@@ -350,18 +499,53 @@ def read_schema(conn):
     for row in checks:
         tables[row["table_name"]]["check"][row["constraint_name"]] = row["check_clause"]
     for kind, table, name, columns in (
-        ("routines", "ROUTINES", "ROUTINE_NAME",
-         ["ROUTINE_TYPE", "SHA2(ROUTINE_DEFINITION, 256) AS definition_sha256", "SQL_MODE"]),
-        ("triggers", "TRIGGERS", "TRIGGER_NAME",
+        # A function and a procedure may share a name: key by both.
+        ("routines", "ROUTINES", "CONCAT(ROUTINE_TYPE, ' ', ROUTINE_NAME) AS name",
+         ["DTD_IDENTIFIER", "IS_DETERMINISTIC", "SECURITY_TYPE", "SQL_DATA_ACCESS",
+          "SHA2(ROUTINE_DEFINITION, 256) AS definition_sha256", "SQL_MODE"]),
+        ("triggers", "TRIGGERS", "TRIGGER_NAME AS name",
          ["EVENT_OBJECT_TABLE", "ACTION_TIMING", "EVENT_MANIPULATION",
           "SHA2(ACTION_STATEMENT, 256) AS definition_sha256"]),
-        ("events", "EVENTS", "EVENT_NAME",
-         ["STATUS", "SHA2(EVENT_DEFINITION, 256) AS definition_sha256"]),
+        ("events", "EVENTS", "EVENT_NAME AS name",
+         ["STATUS", "EVENT_TYPE", "EXECUTE_AT", "INTERVAL_VALUE", "INTERVAL_FIELD",
+          "STARTS", "ENDS", "ON_COMPLETION", "TIME_ZONE",
+          "SHA2(EVENT_DEFINITION, 256) AS definition_sha256"]),
     ):  # fmt: skip
         where = f"{table[:-1]}_SCHEMA = DATABASE()"
         for row in _rows(conn, [name, *columns], table, where=where):
-            schema[kind][row.pop(name.lower())] = row
-    schema["views"].sort()
+            if row["definition_sha256"] is None:
+                raise Refuse(
+                    f"{conn.role}: cannot read the body of {kind[:-1]} {row['name']}; "
+                    "the account must be its definer or hold SHOW_ROUTINE (MySQL) / "
+                    "SHOW CREATE ROUTINE or SELECT on mysql.proc (MariaDB)",
+                )
+            schema[kind][row.pop("name")] = row
+    # Parameters, and a function's return type (position 0).
+    for row in _rows(
+        conn,
+        ["CONCAT(ROUTINE_TYPE, ' ', SPECIFIC_NAME) AS name", "ORDINAL_POSITION",
+         "PARAMETER_MODE", "PARAMETER_NAME", "DTD_IDENTIFIER"],
+        "PARAMETERS",
+        where="SPECIFIC_SCHEMA = DATABASE()",
+        order="ROUTINE_TYPE, SPECIFIC_NAME, ORDINAL_POSITION",
+    ):  # fmt: skip
+        routine = schema["routines"].get(row.pop("name"))
+        if routine is not None:
+            routine.setdefault("parameters", []).append(row)
+    # Each side's definition names its own database: drop that qualifier.
+    for row in _rows(
+        conn,
+        ["TABLE_NAME",
+         "REPLACE(VIEW_DEFINITION, CONCAT('`', DATABASE(), '`.'), '') AS definition",
+         "CHECK_OPTION", "SECURITY_TYPE"],
+        "VIEWS",
+    ):  # fmt: skip
+        if not row["definition"]:
+            raise Refuse(
+                f"{conn.role}: cannot read the definition of view "
+                f"{row['table_name']}; grant SHOW VIEW on the database",
+            )
+        schema["views"][row.pop("table_name")] = row
     return schema
 
 
@@ -396,9 +580,7 @@ def diff_schema(src, dst):
                 key,
                 _explain(src["database"][key], dst["database"][key]),
             )
-    if src["views"] != dst["views"]:
-        add(None, "database", "views", _explain(src["views"], dst["views"]))
-    for kind in ("routines", "triggers", "events"):
+    for kind in ("views", "routines", "triggers", "events"):
         for name in sorted(src[kind].keys() | dst[kind].keys()):
             a, b = src[kind].get(name), dst[kind].get(name)
             if a != b:
@@ -420,15 +602,17 @@ def diff_schema(src, dst):
                 if a[part].get(item) != b[part].get(item):
                     detail = _explain(a[part].get(item), b[part].get(item))
                     add(name, "schema", f"{part} {item}", detail)
-        # The target's counter may be ahead (rows added since), never behind:
-        # behind means new rows would reuse ids that deleted rows once had.
-        if (a["auto_increment"] or 0) > (b["auto_increment"] or 0):
+        # Must be equal. Behind means new rows would reuse ids that deleted rows
+        # once had; ahead means the target is not a copy of this source state
+        # (it was written to, or copied from a later source). The dump carries
+        # the counter exactly, so a faithful copy is always equal.
+        if a["auto_increment"] != b["auto_increment"]:
             add(
                 name,
                 "auto_increment",
                 None,
                 f"source={a['auto_increment']} target={b['auto_increment']} "
-                "(target must be at least the source's)",
+                "(must be equal)",
             )
     return diffs
 
@@ -460,11 +644,20 @@ def row_hash_sql(table, columns, primary_key):
     * rows are read ORDER BY primary key, so the result does not depend on how
       or in what order either server stores them.
 
-    Numbers and datetimes are hashed as the server renders them as text; the
+    Numbers and datetimes are hashed as the server renders them as text
+    (FLOAT widened to DOUBLE first, see ``cell``); the
     session time zone is pinned to UTC. That rendering is the same for two
     servers of the same flavour, which is all verify accepts.
     """
-    cells = ", ".join(f"IFNULL(SHA2({q(c)}, 256), 'NULL')" for c in columns)
+
+    def cell(name):
+        # FLOAT renders with only 6 significant digits; widened to DOUBLE it
+        # renders exactly (every float is exactly representable as a double).
+        if columns[name]["data_type"] == "float":
+            return f"{q(name)} + 0E0"
+        return q(name)
+
+    cells = ", ".join(f"IFNULL(SHA2({cell(c)}, 256), 'NULL')" for c in columns)
     row = f"SHA2(CONCAT_WS('|', {cells}), 256)"
     if primary_key:
         keys = ", ".join(q(c) for c in primary_key)
@@ -488,7 +681,7 @@ def compare_table(src, dst, name, table):
 
     Memory use is constant: nothing is collected. Returns (result, diffs).
     """
-    sql = row_hash_sql(name, list(table["column"]), table["primary_key"])
+    sql = row_hash_sql(name, table["column"], table["primary_key"])
     integer_key = table["primary_key"] and all(
         table["column"][c]["data_type"] in INTEGER_TYPES for c in table["primary_key"]
     )
@@ -507,6 +700,14 @@ def compare_table(src, dst, name, table):
             first = lines
     _finish(src, procs[0])
     _finish(dst, procs[1])
+    # Independent of how the rows were read: every row the table has was hashed.
+    for side, conn in enumerate((src, dst)):
+        total = int(query(conn, f"SELECT COUNT(*) FROM {q(name)}")[0][0])
+        if total != counts[side]:
+            raise Refuse(
+                f"{name}: {conn.role} has {total} rows by COUNT(*) but only "
+                f"{counts[side]} row hashes were read; the comparison is incomplete"
+            )
 
     result = {
         "rows_source": counts[0],
@@ -571,11 +772,22 @@ def missing_collations(used, available):
     (``uca1400_ai_ci``) while columns report the full name
     (``utf8mb4_uca1400_ai_ci``), so both spellings are accepted.
     """
+    available = {norm_collation(c) for c in available}
     return sorted(
         c
         for c in used
-        if c and c not in available and c.partition("_")[2] not in available
+        if c
+        and norm_collation(c) not in available
+        and c.partition("_")[2] not in available
     )
+
+
+def norm_collation(name):
+    """utf8_* and utf8mb3_* are one collation under two names (older servers
+    say utf8_, MariaDB 10.6+ and MySQL 8.0.30+ say utf8mb3_)."""
+    if name and name.startswith("utf8_"):
+        return "utf8mb3_" + name[len("utf8_") :]
+    return name
 
 
 def _version(conn):
@@ -618,26 +830,29 @@ def table_activity(conn):
     counts = {}
     if base:
         # COUNT(*), because information_schema.TABLE_ROWS is only an estimate.
+        # Never put database text in a string literal: select each table's
+        # position and map it back here. (Identifiers go through q().)
         union = " UNION ALL ".join(
-            f"SELECT '{r['table_name']}', COUNT(*) FROM {q(r['table_name'])}"
-            for r in base
+            f"SELECT {i}, COUNT(*) FROM {q(r['table_name'])}"
+            for i, r in enumerate(base)
         )
-        counts = {name: int(n) for name, n in query(conn, union)}
+        counts = {base[int(i)]["table_name"]: int(n) for i, n in query(conn, union)}
     for row in base:
         row["rows"] = counts[row["table_name"]]
     return listed, base
 
 
-def has_select_on_database(conn):
-    # An account granted only some tables sees a smaller database and nothing
-    # errors. Grants made through roles are not seen here: this fails safe.
-    me = "REPLACE(GRANTEE, CHAR(39), '') = CURRENT_USER() AND PRIVILEGE_TYPE = 'SELECT'"
-    sql = (
-        f"SELECT (SELECT COUNT(*) FROM information_schema.USER_PRIVILEGES WHERE {me})"
-        f" + (SELECT COUNT(*) FROM information_schema.SCHEMA_PRIVILEGES WHERE {me}"
-        " AND DATABASE() LIKE TABLE_SCHEMA)"
-    )
-    return query(conn, sql)[0][0] != "0"
+def routines_and_events(conn):
+    """Names of the database's routines and events, e.g. "PROCEDURE p"."""
+    return [
+        row[0]
+        for row in query(
+            conn,
+            "SELECT CONCAT(ROUTINE_TYPE, ' ', ROUTINE_NAME) FROM information_schema.ROUTINES"
+            " WHERE ROUTINE_SCHEMA = DATABASE() UNION ALL SELECT CONCAT('EVENT ', EVENT_NAME)"
+            " FROM information_schema.EVENTS WHERE EVENT_SCHEMA = DATABASE()",
+        )
+    ]
 
 
 SCRATCH = "_dbcopy_preflight"
@@ -669,6 +884,11 @@ def quiesced_problem(src, seconds):
     watch. This is a sample, not a proof: stop the app first. The proof is
     verify, which fails if the source changed after the dump.
     """
+    if missing_privileges(src, ["PROCESS"]) and missing_privileges(src, ["SUPER"]):
+        return (
+            "the source account cannot see other sessions (they would all look "
+            "absent); grant PROCESS on *.* to it"
+        )
     sessions = int(
         query(
             src,
@@ -717,7 +937,11 @@ def step_preflight(args):
         checks.append({"name": name, "status": status, "detail": problem or detail})
 
     client = subprocess.run(
-        [CLIENT, "--version"], capture_output=True, text=True, check=False
+        [CLIENT, "--no-defaults", "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_child_env(),
     ).stdout.strip()
     check(
         "client",
@@ -741,7 +965,9 @@ def step_preflight(args):
 
     a, b = server_info(src), server_info(dst)
     problem = ""
-    if a["database_collation"] != b["database_collation"]:
+    if norm_collation(a["database_collation"]) != norm_collation(
+        b["database_collation"]
+    ):
         problem = (
             f"target database default is {b['database_character_set']}/"
             f"{b['database_collation']}, source is {a['database_character_set']}/"
@@ -808,28 +1034,48 @@ def step_preflight(args):
         fatal=not args.require_quiesced,
     )
     problem = ""
-    if not has_select_on_database(src):
+    missing = missing_privileges(src, DEFINITION_PRIVILEGES)
+    if missing:
         problem = (
-            "the source account does not hold the SELECT privilege on the "
-            "whole database; tables it cannot see would silently be left out"
+            f"the source account lacks {', '.join(missing)} on the whole database; "
+            "tables, views, triggers, events or routines it cannot see would "
+            "silently be left out of the dump"
+        )
+    unreadable = [
+        r[0]
+        for r in query(
+            src,
+            "SELECT CONCAT(ROUTINE_TYPE, ' ', ROUTINE_NAME) FROM information_schema.ROUTINES"
+            " WHERE ROUTINE_SCHEMA = DATABASE() AND ROUTINE_DEFINITION IS NULL",
+        )
+    ]
+    if unreadable:
+        problem = "; ".join(
+            filter(None, [problem, f"cannot read the body of {', '.join(unreadable)}"])
         )
     check(
         "source_privileges",
         problem,
-        f"SELECT on the whole database; {len(base)} tables readable",
+        f"{', '.join(DEFINITION_PRIVILEGES)} on the whole database; "
+        f"{len(base)} tables readable",
     )
 
     target_listed, target_base = table_activity(dst)
     b["tables"] = {r["table_name"]: r["rows"] for r in target_base}
-    present = [r["table_name"] for r in target_listed]
+    present = [r["table_name"] for r in target_listed] + routines_and_events(dst)
     problem = ""
     if present:
         problem = (
-            f"target already has {len(present)} table(s): {', '.join(present[:10])}"
+            f"target already has {len(present)} object(s): {', '.join(present[:10])}"
         )
         if not args.allow_non_empty_target:
             problem += "; pass --allow-non-empty-target to accept"
-    check("target_empty", problem, "no tables", fatal=not args.allow_non_empty_target)
+    check(
+        "target_empty",
+        problem,
+        "no tables, views, routines or events",
+        fatal=not args.allow_non_empty_target,
+    )
     check(
         "target_privileges",
         target_can_load(dst) or "",
@@ -861,7 +1107,7 @@ def step_preflight(args):
     }
     args.run_dir.mkdir(parents=True, exist_ok=True)
     path = args.run_dir / "preflight-report.json"
-    path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    path.write_text(json.dumps(scrub_values(report), indent=2, sort_keys=True) + "\n")
     args.record.update(
         source_tables=len(base),
         source_rows=sum(a["tables"].values()),
@@ -916,14 +1162,32 @@ def run_log(args):
     path = args.run_dir / "run.log"
     if not path.exists():
         return []
-    return [json.loads(line) for line in path.read_text().splitlines()]
+    lines = path.read_text().splitlines()
+    entries = []
+    for number, line in enumerate(lines, 1):
+        try:
+            entries.append(json.loads(line))
+        except ValueError:
+            if number == len(lines):
+                continue  # torn by a crash mid-write; it recorded nothing usable
+            raise Refuse(
+                f"{path} line {number} is not a log entry; inspect it"
+            ) from None
+    return entries
 
 
 def append_log(args, **entry):
     args.run_dir.mkdir(parents=True, exist_ok=True)
     entry = {"time": datetime.now(UTC).isoformat(timespec="seconds"), **entry}
-    with (args.run_dir / "run.log").open("a") as log:
-        log.write(scrub(json.dumps(entry, sort_keys=True)) + "\n")
+    path = args.run_dir / "run.log"
+    torn = (
+        path.exists() and path.stat().st_size and not path.read_bytes().endswith(b"\n")
+    )
+    with path.open("a") as log:
+        if torn:
+            log.write("\n")  # never glue an entry onto a torn last line
+        # Scrub the values, before JSON escapes ", \ or non-ASCII in them.
+        log.write(json.dumps(scrub_values(entry), sort_keys=True) + "\n")
 
 
 def _sha256(path):
@@ -952,6 +1216,62 @@ def _objects(conn):
     return found
 
 
+def _names(objects):
+    return sorted(f"{kind} {name}" for kind, names in objects.items() for name in names)
+
+
+def _other_sessions(conn):
+    """Other sessions using this database. Without PROCESS they are invisible,
+    so that refuses rather than reporting none."""
+    if missing_privileges(conn, ["PROCESS"]) and missing_privileges(conn, ["SUPER"]):
+        raise Refuse(
+            f"the {conn.role} account cannot see other sessions; grant PROCESS on *.*"
+        )
+    return int(
+        query(
+            conn,
+            "SELECT COUNT(*) FROM information_schema.PROCESSLIST "
+            "WHERE DB = DATABASE() AND ID <> CONNECTION_ID()",
+        )[0][0]
+    )
+
+
+def _definers(conn):
+    """{definer: ["VIEW v", ...]} for everything the dump re-creates AS a user."""
+    found = {}
+    for kind, table, name, schema in (
+        ("VIEW", "VIEWS", "TABLE_NAME", "TABLE_SCHEMA"),
+        ("ROUTINE", "ROUTINES", "ROUTINE_NAME", "ROUTINE_SCHEMA"),
+        ("TRIGGER", "TRIGGERS", "TRIGGER_NAME", "TRIGGER_SCHEMA"),
+        ("EVENT", "EVENTS", "EVENT_NAME", "EVENT_SCHEMA"),
+    ):
+        for row in _rows(conn, [name, "DEFINER"], table, f"{schema} = DATABASE()"):
+            found.setdefault(row["definer"], []).append(f"{kind} {row[name.lower()]}")
+    return found
+
+
+def lossy_floats(conn):
+    """FLOAT columns holding a value that does not survive the server's text
+    rendering (what mariadb-dump writes), as "table.column (n rows)"."""
+    found = []
+    for row in _rows(
+        conn,
+        ["TABLE_NAME", "COLUMN_NAME"],
+        "COLUMNS",
+        "TABLE_SCHEMA = DATABASE() AND DATA_TYPE = 'float'",
+        order="TABLE_NAME, ORDINAL_POSITION",
+    ):
+        t, c = q(row["table_name"]), q(row["column_name"])
+        sql = (
+            f"SELECT COUNT(*) FROM {t} WHERE {c} IS NOT NULL "
+            f"AND NOT CAST(CONCAT({c}, '') AS FLOAT) + 0E0 = {c} + 0E0"
+        )
+        n = int(query(conn, sql)[0][0])
+        if n:
+            found.append(f"{row['table_name']}.{row['column_name']} ({n} rows)")
+    return found
+
+
 def step_dump(args):
     src = connect("source")
     args.record["source"] = src.describe()
@@ -959,11 +1279,16 @@ def step_dump(args):
     if path.exists():
         raise Refuse(f"{path} already exists; use a new --run-dir for a new dump")
     args.record["snapshot_id"] = _recorded_snapshot(args, src)
+    if not DUMP:
+        raise Refuse(
+            "no mariadb-dump (or mysqldump) on PATH; install the MariaDB client"
+        )
     version = subprocess.run(
-        [DUMP or "mariadb-dump", "--version"],
+        [DUMP, "--no-defaults", "--version"],
         capture_output=True,
         text=True,
         check=False,
+        env=_child_env(),
     ).stdout
     if "MariaDB" not in version:
         raise Refuse(
@@ -982,6 +1307,32 @@ def step_dump(args):
             "consistent for these if nothing is writing; stop the app and pass "
             "--source-is-quiesced.",
         )
+    odd = [
+        f"{r['table_name']} ({r['table_type']})"
+        for r in _rows(src, ["TABLE_NAME", "TABLE_TYPE"], "TABLES")
+        if r["table_type"] not in ("BASE TABLE", "VIEW")
+    ]
+    if odd:
+        raise Refuse(f"cannot copy and verify: {', '.join(odd)}")
+    enabled = [r[0] for r in query(
+        src,
+        "SELECT EVENT_NAME FROM information_schema.EVENTS "
+        "WHERE EVENT_SCHEMA = DATABASE() AND STATUS = 'ENABLED'",
+    )]  # fmt: skip
+    if enabled:
+        raise Refuse(
+            f"enabled event(s) {', '.join(enabled)} would start running on the "
+            "target as soon as they are restored; disable them on the source "
+            "(the app is stopped anyway) and re-enable after cutover",
+        )
+    definers = _definers(src)
+    lossy = lossy_floats(src)
+    if lossy:
+        raise Refuse(
+            "mariadb-dump writes FLOAT with 6 significant digits, so these "
+            f"values would change in the copy: {', '.join(lossy)}. Convert the "
+            "column(s) to DOUBLE on the source first, or copy them another way.",
+        )
     options = list(DUMP_OPTIONS)
     if objects["PROCEDURE"] or objects["FUNCTION"]:
         options.append("--routines")
@@ -998,27 +1349,45 @@ def step_dump(args):
     digest = hashlib.sha256()
     size = 0
     tail = b""
+    # stderr to a file, not a pipe: a pipe nobody reads until the end fills
+    # up and blocks the dump forever.
+    errors = args.run_dir / "dump.stderr"
     # 0600 from creation: this file is the whole database in plain text.
-    with os.fdopen(
-        os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb"
-    ) as out:
-        proc = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env
-        )
-        while chunk := proc.stdout.read(1 << 20):
-            out.write(chunk)
-            digest.update(chunk)
-            size += len(chunk)
-            tail = (tail + chunk)[-200:]
-        out.flush()
-        os.fsync(out.fileno())
-    stderr = proc.stderr.read().decode(errors="replace").strip()
+    try:
+        with (
+            os.fdopen(
+                os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb"
+            ) as out,
+            errors.open("wb") as err,
+        ):
+            proc = _popen(command, stdout=subprocess.PIPE, stderr=err, env=env)
+            while chunk := proc.stdout.read(1 << 20):
+                out.write(chunk)
+                digest.update(chunk)
+                size += len(chunk)
+                tail = (tail + chunk)[-200:]
+            out.flush()
+            os.fsync(out.fileno())
+    except BaseException as error:
+        # Disk full, Ctrl-C, anything: stop the dump and keep no partial file.
+        _stop_children()
+        partial.unlink(missing_ok=True)
+        errors.unlink(missing_ok=True)
+        if isinstance(error, OSError):
+            raise Refuse(
+                f"writing the dump failed: {error}; nothing was kept"
+            ) from None
+        raise
+    proc.wait()
+    stderr = errors.read_bytes()[-4000:].decode(errors="replace").strip()
+    errors.unlink()
     # mariadb-dump can die mid-table and still leave a plausible-looking file;
     # its last line is the only proof it reached the end.
     if proc.wait() != 0 or TRAILER not in tail:
         partial.unlink()
         raise Refuse(
-            f"dump failed or is incomplete: {stderr or 'no completion marker'}"
+            f"dump failed or is incomplete (mariadb-dump exit code "
+            f"{proc.returncode}): {stderr or 'no completion marker'}"
         )
     partial.rename(path)
     (args.run_dir / "dump.sql.sha256").write_text(f"{digest.hexdigest()}  dump.sql\n")
@@ -1027,10 +1396,19 @@ def step_dump(args):
         bytes=size,
         sha256=digest.hexdigest(),
         tables=len(objects["TABLE"]),
+        # What reset-target may drop, and the server it must never touch.
+        object_names=_names(objects),
+        source_identity=identity(src),
         database_character_set=info["database_character_set"],
         database_collation=info["database_collation"],
         options=options,
+        definers=definers,
     )
+    for definer, names in sorted(definers.items()):
+        say(
+            f"dump: DEFINER {definer}: {', '.join(names)} (the target needs that "
+            "account, or the restoring account needs SET_USER_ID / SUPER)"
+        )
     say(
         f"dump: {len(objects['TABLE'])} tables, {size / 1e6:.1f} MB written to {path}\n"
         f"dump: sha256 {digest.hexdigest()}"
@@ -1107,11 +1485,36 @@ def load_dump(dst, path):
     """Feed the dump file to the client. Target only, ever."""
     if dst.role != "target":
         raise Refuse("refusing to load a dump into the source")
-    command, env = _command(CLIENT, dst, "--max-allowed-packet=1G")
-    with path.open("rb") as handle:
-        return subprocess.run(
-            command, stdin=handle, capture_output=True, env=env, check=False
+    # --show-warnings: dumps switch strict mode off, so bad data is only a
+    # warning; restore treats any warning as failure.
+    command, env = _command(
+        CLIENT, dst, "--max-allowed-packet=1G", "--show-warnings", "--skip-force"
+    )
+    # One handle, hashed as it is fed: the bytes loaded are the bytes checked.
+    digest = hashlib.sha256()
+    with (
+        path.open("rb") as handle,
+        tempfile.TemporaryFile() as out,
+        tempfile.TemporaryFile() as err,
+    ):
+        proc = _popen(command, stdin=subprocess.PIPE, stdout=out, stderr=err, env=env)
+        try:
+            while chunk := handle.read(1 << 20):
+                digest.update(chunk)
+                proc.stdin.write(chunk)
+        except BrokenPipeError:
+            pass  # the client stopped early; its exit code and output say why
+        finally:
+            with contextlib.suppress(BrokenPipeError):
+                proc.stdin.close()
+        proc.wait()
+        out.seek(0)
+        err.seek(0)
+        result = subprocess.CompletedProcess(
+            command, proc.returncode, out.read(), err.read()
         )
+    result.sha256 = digest.hexdigest()
+    return result
 
 
 def step_restore(args):
@@ -1128,6 +1531,8 @@ def step_restore(args):
             f"(recorded {dump['sha256']}, file is {actual}); it was changed, "
             "truncated or swapped. Dump again.",
         )
+    if identity(dst) == dump.get("source_identity"):
+        raise Refuse("MIG_TARGET_* reaches the server and database this run dumped")
     if dump["source"]["flavour"] != dst.flavour:
         raise Refuse(
             f"the dump is from {dump['source']['flavour']} {dump['source']['version']} "
@@ -1140,6 +1545,9 @@ def step_restore(args):
             f"{', '.join(existing[:10])}). If this is a failed restore from this "
             "run, clean up with `reset-target`; otherwise check MIG_TARGET_*.",
         )
+    for key in ("database_character_set", "database_collation"):
+        if not re.fullmatch(r"[A-Za-z0-9_]+", dump.get(key) or ""):
+            raise Refuse(f"run.log records an invalid {key}: {dump.get(key)!r}")
     info = server_info(dst)
     align = ""
     if info["database_collation"] != dump["database_collation"]:
@@ -1165,6 +1573,7 @@ def step_restore(args):
         status="started",
         dry_run=False,
         target=dst.describe(),
+        target_identity=identity(dst),
         target_was_empty=not existing,
         sha256=actual,
     )
@@ -1173,10 +1582,25 @@ def step_restore(args):
     result = load_dump(dst, path)
     loaded = len(_objects(dst)["TABLE"])
     args.record.update(sha256=actual, bytes=dump["bytes"], tables=loaded)
-    if result.returncode != 0 or loaded < dump["tables"]:
+    args.record["fed_sha256"] = result.sha256
+    output = (result.stdout + result.stderr).decode(errors="replace").strip()
+    warnings = [
+        w
+        for w in re.findall(r"(?m)^(?:Warning|Error) \(Code \d+\).*$", output)
+        # The one harmless warning: an event was created while the target's
+        # scheduler is off (it is defined, just not running).
+        if not w.startswith("Warning (Code 1105): Event scheduler is switched off")
+    ]
+    if output:
+        say(f"restore: client output:\n{output}")
+    if result.sha256 != dump["sha256"]:
+        warnings.append("the bytes fed to the client do not match the dump's checksum")
+    if result.returncode != 0 or warnings or loaded < dump["tables"]:
+        args.record.update(client_exit_code=result.returncode, warnings=warnings[:20])
         say(
-            "restore FAILED: "
-            + (result.stderr.decode(errors="replace").strip() or "tables are missing")
+            f"restore FAILED (client exit code {result.returncode}, "
+            f"{len(warnings)} warning(s)): "
+            + (output[-2000:] or "tables are missing")
             + f"\nThe target now holds a partial copy ({loaded} of {dump['tables']} "
             "tables). Nothing on the source was changed. Run `reset-target`, "
             "then `restore` again."
@@ -1189,35 +1613,65 @@ def step_restore(args):
 
 
 def step_reset_target(args):
+    """Empty the target after a failed restore, and nothing else, ever.
+
+    Every guard is checked against the server by query, never against
+    environment strings (a tunnel or a renamed endpoint can lead anywhere).
+    """
     dst = connect("target")
     args.record["target"] = dst.describe()
-    me = _identity(dst)
-    if args.confirm_database != dst.database:
+    expected = f"{dst.host}/{dst.database}"
+    if args.confirm != expected:
         raise Refuse(
-            "reset-target drops every table in the target database. Confirm "
-            f"with --confirm-database {dst.database}",
+            "reset-target drops everything in the target database. Confirm with "
+            f"--confirm {expected} (host/database, exactly as configured)",
         )
-    source = {k: os.environ.get(f"MIG_SOURCE_{k.upper()}", "") for k in me}
-    if me == {**source, "port": source["port"] or "default"}:
-        raise Refuse("MIG_TARGET_* points at the source database")
-    started = [
-        e
-        for e in run_log(args)
-        if e["step"] == "restore"
-        and e["status"] == "started"
-        and {k: e["target"][k] for k in me} == me
+    me = identity(dst)
+    entries = run_log(args)
+    restores = [
+        i
+        for i, e in enumerate(entries)
+        if e["step"] == "restore" and e["status"] == "started"
     ]
-    # The guard against emptying the wrong database: only one that this run
-    # found empty and then started loading can be reset.
-    if not started:
+    # Only a database this run found empty and then started loading.
+    if not [i for i in restores if entries[i].get("target_identity") == me]:
         raise Refuse(
-            f"{args.run_dir / 'run.log'} records no restore into {dst.database} "
-            f"on {dst.host}; reset-target only empties a database this run loaded",
+            f"{args.run_dir / 'run.log'} records no restore into this server and "
+            f"database (identity by query: {me}); reset-target only empties a "
+            "database this run loaded",
         )
-    if not all(e["target_was_empty"] for e in started):
+    if entries[restores[-1]].get("target_identity") != me:
+        raise Refuse("the last restore this run started went to another server")
+    if not all(entries[i]["target_was_empty"] for i in restores):
         raise Refuse(
             "the target was not empty before this run restored into it, so "
             "reset-target cannot tell the copy from what was there. Clean up by hand.",
+        )
+    if any(
+        e["step"] == "verify" and e["status"] == "ok" and not e.get("dry_run")
+        for e in entries[restores[-1] :]
+    ):
+        raise Refuse(
+            "verify passed after the last restore: the target is a proven copy, "
+            "possibly already in use. reset-target will not empty it.",
+        )
+    dump = _recorded_dump(args)
+    if me == dump.get("source_identity"):
+        raise Refuse("MIG_TARGET_* reaches the server and database this run dumped")
+    if os.environ.get("MIG_SOURCE_DATABASE"):
+        check_different(connect("source"), dst)
+    unknown = sorted(set(_names(_objects(dst))) - set(dump.get("object_names", [])))
+    if unknown:
+        raise Refuse(
+            "the target holds object(s) the dump did not create: "
+            f"{', '.join(unknown[:10])}. reset-target only removes a partial "
+            "restore; clean up by hand.",
+        )
+    sessions = _other_sessions(dst)
+    if sessions:
+        raise Refuse(
+            f"{sessions} other session(s) are connected to the target database; "
+            "it may be in use. Disconnect them first.",
         )
     objects = _objects(dst)
     count = sum(len(names) for names in objects.values())
@@ -1253,7 +1707,12 @@ def check_same_flavour(src, dst):
 
 
 def step_verify(args):
+    # First: whatever happens next, no earlier "ok" report may survive it.
+    report_path = args.run_dir / "verify-report.json"
+    report_path.unlink(missing_ok=True)
     src, dst = connect_both(args)
+    for conn in (src, dst):
+        require_definition_privileges(conn)
     if args.dry_run:
         say(
             "dry-run: would compare schema and every row of "
@@ -1263,6 +1722,10 @@ def step_verify(args):
         return 0
     started = time.monotonic()
     schema_src, schema_dst = read_schema(src), read_schema(dst)
+    if not schema_src["tables"]:
+        raise Refuse(
+            f"source database {src.database} has no tables: nothing to compare"
+        )
     diffs = diff_schema(schema_src, schema_dst)
     tables = {}
     for name, table in sorted(schema_src["tables"].items()):
@@ -1301,8 +1764,8 @@ def step_verify(args):
         "tables": tables,
     }
     args.run_dir.mkdir(parents=True, exist_ok=True)
-    path = args.run_dir / "verify-report.json"
-    text = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    path = report_path
+    text = json.dumps(scrub_values(report), indent=2, sort_keys=True) + "\n"
     path.write_text(text)
     args.record.update(
         tables_compared=report["tables_compared"],
@@ -1332,6 +1795,10 @@ def step_verify(args):
 
 
 # ── command line ─────────────────────────────────────────────────────────────
+
+
+def _interrupt(signum, _frame):
+    raise KeyboardInterrupt(signal.Signals(signum).name)
 
 
 def main(argv=None):
@@ -1380,10 +1847,14 @@ def main(argv=None):
     restore.add_argument("--allow-non-empty-target", action="store_true")
     step("verify", step_verify, "prove source and target are identical")
     reset = step("reset-target", step_reset_target, "empty a target this run loaded")
-    reset.add_argument("--confirm-database", default="", metavar="NAME")
+    reset.add_argument("--confirm", default="", metavar="HOST/DATABASE")
 
     args = parser.parse_args(argv)
     args.record = {}
+    # A closed terminal or a plain `kill` is handled like Ctrl-C: the step
+    # stops, its database clients are stopped, and the outcome is logged.
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, _interrupt)
     started = time.monotonic()
     status, code = "refused", 2
     try:
@@ -1392,6 +1863,16 @@ def main(argv=None):
     except Refuse as error:
         args.record["message"] = str(error)
         sys.stderr.write(scrub(f"REFUSED: {error}\n"))
+    except KeyboardInterrupt:
+        status = "interrupted"
+        _stop_children()
+        sys.stderr.write("INTERRUPTED: stopped before finishing; nothing was proven.\n")
+    except Exception as error:  # noqa: BLE001 - any bug must be exit 2, not 1
+        status = "crashed"
+        _stop_children()
+        message = f"{type(error).__name__}: {error}"
+        args.record["message"] = message
+        sys.stderr.write(scrub(f"CRASHED: {message}\nNothing was proven.\n"))
     finally:
         append_log(
             args,

@@ -73,3 +73,13 @@ db_instance_class = "db.t3.micro"
 
 # Maximum number of app servers the auto-scaling group may launch
 eb_max_instances = 1
+
+# -----------------------------------------------------------------------------
+# Email — staff invites and password resets (optional)
+# Leave these out for a stack that sends no email. Before you switch to the
+# SES backend, verify the sender in Amazon SES by hand: see README, "Email".
+# -----------------------------------------------------------------------------
+
+# site_url           = "https://chatbot.mylab.org"
+# email_backend      = "chatbot.email_backend.SESBackend"
+# default_from_email = "ChatbotLab <no-reply@mylab.org>"

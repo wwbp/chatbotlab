@@ -90,7 +90,7 @@ def test_identical_copy_passes(clean_report):
     assert keystrokes["rows_source"] == N_KEYSTROKES
     # The fixture deleted the newest rows: the counter is above MAX(id)+1.
     assert keystrokes["auto_increment_source"] > N_KEYSTROKES + N_DELETED_KEYSTROKES
-    assert keystrokes["auto_increment_target"] >= keystrokes["auto_increment_source"]
+    assert keystrokes["auto_increment_target"] == keystrokes["auto_increment_source"]
 
     # Different tables must not share a checksum by accident of construction.
     checksums = [
@@ -162,7 +162,11 @@ def row_added(_):
         " VALUES ('conv_00001', 1, 1, 1, '2025-01-01 00:00:00')"
     )
     new_id = one("SELECT MAX(id) FROM chatbot_keystroke")
-    undo = f"DELETE FROM chatbot_keystroke WHERE id = {new_id}"
+    # Put the counter back too: verify requires it equal to the source's.
+    undo = (
+        f"DELETE FROM chatbot_keystroke WHERE id = {new_id};"
+        f"ALTER TABLE chatbot_keystroke AUTO_INCREMENT = {new_id}"
+    )
     return undo, ("chatbot_keystroke", "row_extra_on_target", new_id)
 
 
@@ -233,6 +237,16 @@ def double_changed_in_last_digit(_):
     t("UPDATE mig_types SET dbl_col = 0.3E0 WHERE id = 3")
     undo = "UPDATE mig_types SET dbl_col = 3.0000000000000004E-1 WHERE id = 3"
     return undo, ("mig_types", "row_differs", "3")
+
+
+def float_changed_in_seventh_digit(_):
+    # FLOAT renders with 6 significant digits: 1.500001 shows as 1.5.
+    t("UPDATE mig_types SET flt_col = 1.500001 WHERE id = 3")
+    return "UPDATE mig_types SET flt_col = 1.5 WHERE id = 3", (
+        "mig_types",
+        "row_differs",
+        "3",
+    )
 
 
 def json_array_reordered(_):
@@ -325,6 +339,19 @@ def auto_increment_lowered(_):
     return undo, ("chatbot_keystroke", "auto_increment", None)
 
 
+def auto_increment_raised(_):
+    # A faithful copy carries the counter exactly; ahead means the target was
+    # written to (or the copy came from a later state of the source).
+    original = (
+        t("SHOW CREATE TABLE chatbot_keystroke")[0][1]
+        .split("AUTO_INCREMENT=")[1]
+        .split()[0]
+    )
+    t(f"ALTER TABLE chatbot_keystroke AUTO_INCREMENT = {int(original) + 10}")
+    undo = f"ALTER TABLE chatbot_keystroke AUTO_INCREMENT = {original}"
+    return undo, ("chatbot_keystroke", "auto_increment", None)
+
+
 def table_missing(_):
     t("DROP TABLE mig_empty")
     undo = "CREATE TABLE mig_empty (id INT PRIMARY KEY, note VARCHAR(10) NULL)"
@@ -369,6 +396,7 @@ MUTATIONS = [
     null_became_empty_string,
     datetime_shifted_one_microsecond,
     double_changed_in_last_digit,
+    float_changed_in_seventh_digit,
     json_array_reordered,
     json_keys_reordered,
     duplicate_row_lost_in_table_without_key,
@@ -377,6 +405,7 @@ MUTATIONS = [
     index_dropped,
     foreign_key_dropped,
     auto_increment_lowered,
+    auto_increment_raised,
     table_missing,
     table_extra,
     migration_record_missing,
