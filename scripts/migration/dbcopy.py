@@ -393,23 +393,39 @@ def read_schema(conn):
     for row in checks:
         tables[row["table_name"]]["check"][row["constraint_name"]] = row["check_clause"]
     for kind, table, name, columns in (
-        ("routines", "ROUTINES", "ROUTINE_NAME",
-         ["ROUTINE_TYPE", "SHA2(ROUTINE_DEFINITION, 256) AS definition_sha256", "SQL_MODE"]),
-        ("triggers", "TRIGGERS", "TRIGGER_NAME",
+        # A function and a procedure may share a name: key by both.
+        ("routines", "ROUTINES", "CONCAT(ROUTINE_TYPE, ' ', ROUTINE_NAME) AS name",
+         ["DTD_IDENTIFIER", "IS_DETERMINISTIC", "SECURITY_TYPE", "SQL_DATA_ACCESS",
+          "SHA2(ROUTINE_DEFINITION, 256) AS definition_sha256", "SQL_MODE"]),
+        ("triggers", "TRIGGERS", "TRIGGER_NAME AS name",
          ["EVENT_OBJECT_TABLE", "ACTION_TIMING", "EVENT_MANIPULATION",
           "SHA2(ACTION_STATEMENT, 256) AS definition_sha256"]),
-        ("events", "EVENTS", "EVENT_NAME",
-         ["STATUS", "SHA2(EVENT_DEFINITION, 256) AS definition_sha256"]),
+        ("events", "EVENTS", "EVENT_NAME AS name",
+         ["STATUS", "EVENT_TYPE", "EXECUTE_AT", "INTERVAL_VALUE", "INTERVAL_FIELD",
+          "STARTS", "ENDS", "ON_COMPLETION", "TIME_ZONE",
+          "SHA2(EVENT_DEFINITION, 256) AS definition_sha256"]),
     ):  # fmt: skip
         where = f"{table[:-1]}_SCHEMA = DATABASE()"
         for row in _rows(conn, [name, *columns], table, where=where):
             if row["definition_sha256"] is None:
                 raise Refuse(
-                    f"{conn.role}: cannot read the body of {kind[:-1]} {row[name.lower()]}; "
+                    f"{conn.role}: cannot read the body of {kind[:-1]} {row['name']}; "
                     "the account must be its definer or hold SHOW_ROUTINE (MySQL) / "
                     "SHOW CREATE ROUTINE or SELECT on mysql.proc (MariaDB)",
                 )
-            schema[kind][row.pop(name.lower())] = row
+            schema[kind][row.pop("name")] = row
+    # Parameters, and a function's return type (position 0).
+    for row in _rows(
+        conn,
+        ["CONCAT(ROUTINE_TYPE, ' ', SPECIFIC_NAME) AS name", "ORDINAL_POSITION",
+         "PARAMETER_MODE", "PARAMETER_NAME", "DTD_IDENTIFIER"],
+        "PARAMETERS",
+        where="SPECIFIC_SCHEMA = DATABASE()",
+        order="ROUTINE_TYPE, SPECIFIC_NAME, ORDINAL_POSITION",
+    ):  # fmt: skip
+        routine = schema["routines"].get(row.pop("name"))
+        if routine is not None:
+            routine.setdefault("parameters", []).append(row)
     # Each side's definition names its own database: drop that qualifier.
     for row in _rows(
         conn,
