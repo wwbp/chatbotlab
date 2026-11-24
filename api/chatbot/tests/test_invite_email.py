@@ -424,7 +424,9 @@ def test_unknown_email_gets_same_done_page_and_no_mail():
     assert len(mail.outbox) == 0
 
 
-@pytest.fixture
+# Autouse: rate-limit counters must not carry over between tests or runs
+# (every reset posts from 127.0.0.1, against a limit of 10 an hour).
+@pytest.fixture(autouse=True)
 def fresh_cache(settings):
     settings.CACHES = {
         "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}
@@ -437,7 +439,7 @@ def fresh_cache(settings):
 
 
 @pytest.mark.django_db
-def test_reset_is_rate_limited_per_email_silently(fresh_cache):
+def test_reset_is_rate_limited_per_email_silently():
     from chatbot.staff_auth import RESETS_PER_EMAIL_PER_HOUR
 
     staff_user(email="x@upenn.edu")
@@ -456,7 +458,7 @@ def test_reset_is_rate_limited_per_email_silently(fresh_cache):
 
 
 @pytest.mark.django_db
-def test_reset_is_rate_limited_per_ip(fresh_cache):
+def test_reset_is_rate_limited_per_ip():
     from chatbot.staff_auth import RESETS_PER_IP_PER_HOUR
 
     for i in range(RESETS_PER_IP_PER_HOUR + 1):
