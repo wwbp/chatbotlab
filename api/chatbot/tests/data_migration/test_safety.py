@@ -21,6 +21,9 @@ from .conftest import (
     tool_watching_processes,
 )
 
+# Enough for preflight to pass against a filled target on any same-flavour pair.
+PREFLIGHT_FLAGS = ["--allow-non-empty-target", "--allow-version-downgrade"]
+
 WRITES = [
     "INSERT INTO mig_empty VALUES (1, 'x')",
     "UPDATE chatbot_conversation SET study_name = 'tampered'",
@@ -85,7 +88,7 @@ def _assert_no_secret(text, where):
 
 def test_no_credential_in_process_list_output_or_log(same_flavour, tmp_path):
     plain_copy()
-    for step in (["preflight", "--allow-non-empty-target"], ["verify"]):
+    for step in (["preflight", *PREFLIGHT_FLAGS], ["verify"]):
         result, command_lines = tool_watching_processes(
             "--run-dir", str(tmp_path), *step
         )
@@ -115,6 +118,10 @@ def test_credentials_can_come_from_a_client_option_file(same_flavour, tmp_path):
     option_file = tmp_path / "source.cnf"
     option_file.write_text(
         f"[client]\nhost={SRC.host}\nport={SRC.port}\nuser={USER}\npassword={SRC_PASSWORD}\n"
+        # MariaDB 11.4+ clients verify the server's TLS certificate by default
+        # and the test servers have none worth trusting. A real option file
+        # would carry ssl-ca=<the provider's CA bundle> instead.
+        "ssl-verify-server-cert=0\n"
     )
     option_file.chmod(0o600)
     env = tool_env(MIG_SOURCE_DEFAULTS_FILE=str(option_file))
@@ -146,10 +153,7 @@ def test_passwords_are_not_accepted_as_arguments(tmp_path):
 def test_run_log_records_each_step(same_flavour, tmp_path):
     plain_copy()
     assert (
-        tool(
-            "--run-dir", str(tmp_path), "preflight", "--allow-non-empty-target"
-        ).returncode
-        == 0
+        tool("--run-dir", str(tmp_path), "preflight", *PREFLIGHT_FLAGS).returncode == 0
     )
     assert tool("--run-dir", str(tmp_path), "verify").returncode == 0
     assert tool("--run-dir", str(tmp_path), "verify", "--dry-run").returncode == 0

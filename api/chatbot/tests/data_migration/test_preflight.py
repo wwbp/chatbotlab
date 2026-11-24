@@ -178,6 +178,8 @@ def test_collations_missing_on_the_target_are_named():
     available = {"utf8mb4_bin", "utf8mb4_unicode_ci"}
     assert dbcopy.missing_collations(used, available) == ["utf8mb4_uca1400_ai_ci"]
     assert dbcopy.missing_collations({"utf8mb4_bin", None}, available) == []
+    # MariaDB 10.10+ lists UCA-14 collations without the character set.
+    assert dbcopy.missing_collations(used, available | {"uca1400_ai_ci"}) == []
 
 
 # ── --require-quiesced ───────────────────────────────────────────────────────

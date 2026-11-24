@@ -3,7 +3,11 @@
 
 Steps (each runs on its own):
 
+    preflight   check both servers; fail on anything that would spoil the copy
     verify      prove source and target hold the same schema and the same data
+
+Every step takes --dry-run, and appends one line to <run-dir>/run.log saying
+what ran, against which host and database, how long it took and what it found.
 
 Connections come from the environment, never from the command line (arguments
 are visible in the process list):
@@ -18,6 +22,7 @@ Exit status: 0 success, 1 the check found a problem, 2 could not run.
 """
 
 import argparse
+import contextlib
 import hashlib
 import itertools
 import json
@@ -38,8 +43,17 @@ class Refuse(Exception):
     """A precondition failed or the step could not run. Exit status 2."""
 
 
+def scrub(text):
+    """Belt and braces: no configured password may reach output or the log."""
+    for role in ("SOURCE", "TARGET"):
+        secret = os.environ.get(f"MIG_{role}_PASSWORD")
+        if secret:
+            text = text.replace(secret, "***")
+    return text
+
+
 def say(message):
-    sys.stdout.write(message + "\n")
+    sys.stdout.write(scrub(message) + "\n")
 
 
 # ── connections ──────────────────────────────────────────────────────────────
@@ -169,6 +183,20 @@ def connect(role):
     conn = Conn.from_env(role)
     conn.version = query(conn, "SELECT VERSION()")[0][0]
     return conn
+
+
+def connect_both(args):
+    """Connect to source and target, note them for the run log, and refuse
+    the pairings no step may run against."""
+    src = connect("source")
+    args.record["source"] = src.describe()
+    dst = connect("target")
+    args.record["target"] = dst.describe()
+    check_same_flavour(src, dst)
+    identity = "SELECT @@hostname, @@port, @@datadir, DATABASE()"
+    if query(src, identity) == query(dst, identity):
+        raise Refuse("source and target are the same database on the same server")
+    return src, dst
 
 
 # ── schema ───────────────────────────────────────────────────────────────────
@@ -524,6 +552,335 @@ def _key_exists(conn, table, primary_key, key):
     return query(conn, sql)[0][0] != "0"
 
 
+# ── preflight ────────────────────────────────────────────────────────────────
+
+
+def missing_collations(used, available):
+    """Collations the source uses that the target server does not have.
+
+    MariaDB 10.10+ lists its UCA-14 collations without a character set
+    (``uca1400_ai_ci``) while columns report the full name
+    (``utf8mb4_uca1400_ai_ci``), so both spellings are accepted.
+    """
+    return sorted(
+        c
+        for c in used
+        if c and c not in available and c.partition("_")[2] not in available
+    )
+
+
+def _version(conn):
+    return tuple(int(x) for x in re.findall(r"\d+", conn.version)[:2])
+
+
+def server_info(conn):
+    row = query(
+        conn,
+        "SELECT @@character_set_server, @@collation_server, "
+        "@@lower_case_table_names, @@max_allowed_packet, @@sql_mode, "
+        "DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME "
+        "FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = DATABASE()",
+    )
+    if not row:
+        raise Refuse(f"{conn.role}: database {conn.database} not found")
+    row = row[0]
+    return {
+        **conn.describe(),
+        "server_character_set": row[0],
+        "server_collation": row[1],
+        "lower_case_table_names": row[2],
+        "max_allowed_packet": int(row[3]),
+        "sql_mode": row[4],
+        "database_character_set": row[5],
+        "database_collation": row[6],
+    }
+
+
+def table_activity(conn):
+    """(everything listed, base tables) with exact row counts on the latter."""
+    listed = _rows(
+        conn,
+        ["TABLE_NAME", "TABLE_TYPE", "ENGINE", "AUTO_INCREMENT", "UPDATE_TIME",
+         "DATA_LENGTH + INDEX_LENGTH AS bytes"],
+        "TABLES",
+        order="TABLE_NAME",
+    )  # fmt: skip
+    base = [r for r in listed if r["table_type"] == "BASE TABLE"]
+    counts = {}
+    if base:
+        # COUNT(*), because information_schema.TABLE_ROWS is only an estimate.
+        union = " UNION ALL ".join(
+            f"SELECT '{r['table_name']}', COUNT(*) FROM {q(r['table_name'])}"
+            for r in base
+        )
+        counts = {name: int(n) for name, n in query(conn, union)}
+    for row in base:
+        row["rows"] = counts[row["table_name"]]
+    return listed, base
+
+
+def has_select_on_database(conn):
+    # An account granted only some tables sees a smaller database and nothing
+    # errors. Grants made through roles are not seen here: this fails safe.
+    me = "REPLACE(GRANTEE, CHAR(39), '') = CURRENT_USER() AND PRIVILEGE_TYPE = 'SELECT'"
+    sql = (
+        f"SELECT (SELECT COUNT(*) FROM information_schema.USER_PRIVILEGES WHERE {me})"
+        f" + (SELECT COUNT(*) FROM information_schema.SCHEMA_PRIVILEGES WHERE {me}"
+        " AND DATABASE() LIKE TABLE_SCHEMA)"
+    )
+    return query(conn, sql)[0][0] != "0"
+
+
+SCRATCH = "_dbcopy_preflight"
+
+
+def target_can_load(dst):
+    """Do, on a scratch table, each kind of thing a restore does."""
+    try:
+        query(
+            dst,
+            f"CREATE TABLE {SCRATCH} (id INT AUTO_INCREMENT PRIMARY KEY, v INT, KEY (v));"
+            f"INSERT INTO {SCRATCH} (v) VALUES (1);"
+            f"ALTER TABLE {SCRATCH} AUTO_INCREMENT = 100;"
+            f"DROP TABLE {SCRATCH};",
+            writable=True,
+        )
+    except Refuse as error:
+        with contextlib.suppress(Refuse):
+            query(dst, f"DROP TABLE IF EXISTS {SCRATCH}", writable=True)
+        return str(error)
+    return None
+
+
+def quiesced_problem(src, seconds):
+    """Why the source does not look idle, or None.
+
+    Two signs are checked: another session connected to the database, and any
+    table whose row count, AUTO_INCREMENT or last-write time moves while we
+    watch. This is a sample, not a proof: stop the app first. The proof is
+    verify, which fails if the source changed after the dump.
+    """
+    sessions = int(
+        query(
+            src,
+            "SELECT COUNT(*) FROM information_schema.PROCESSLIST "
+            "WHERE DB = DATABASE() AND ID <> CONNECTION_ID()",
+        )[0][0]
+    )
+    if sessions:
+        return (
+            f"{sessions} other session(s) connected to the source database "
+            "(the app, or someone's client, is still attached)"
+        )
+
+    def sample():
+        return {
+            r["table_name"]: (r["rows"], r["auto_increment"], r["update_time"])
+            for r in table_activity(src)[1]
+        }
+
+    before = sample()
+    time.sleep(seconds)
+    after = sample()
+    moved = sorted(
+        t for t in before.keys() | after.keys() if before.get(t) != after.get(t)
+    )
+    if moved:
+        return f"written to during a {seconds}s watch: {', '.join(moved)}"
+    return None
+
+
+def step_preflight(args):
+    src, dst = connect_both(args)
+    if args.dry_run:
+        say(
+            f"dry-run: connected to source {src.database} on {src.host} "
+            f"({src.version}) and target {dst.database} on {dst.host} "
+            f"({dst.version}). Would check versions, character sets, settings, "
+            "privileges (creating and dropping one scratch table on the "
+            "target), that the target is empty, and count every source row.",
+        )
+        return 0
+    checks = []
+
+    def check(name, problem, detail="", fatal=True):
+        status = "ok" if not problem else "fail" if fatal else "warn"
+        checks.append({"name": name, "status": status, "detail": problem or detail})
+
+    client = subprocess.run(
+        [CLIENT, "--version"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    check(
+        "client",
+        ""
+        if "MariaDB" in client
+        else f"only tested with MariaDB's client, found: {client}",
+        client,
+    )
+
+    problem = ""
+    if _version(dst) < _version(src):
+        problem = f"target {dst.version} is older than source {src.version}"
+        if not args.allow_version_downgrade:
+            problem += "; pass --allow-version-downgrade to accept"
+    check(
+        "versions",
+        problem,
+        f"{src.flavour} {src.version} -> {dst.flavour} {dst.version}",
+        fatal=not args.allow_version_downgrade,
+    )
+
+    a, b = server_info(src), server_info(dst)
+    problem = ""
+    if a["database_collation"] != b["database_collation"]:
+        problem = (
+            f"target database default is {b['database_character_set']}/"
+            f"{b['database_collation']}, source is {a['database_character_set']}/"
+            f"{a['database_collation']}: the target's default must be changed to "
+            "match before loading (restore does this), or tables created later "
+            "would use a different collation"
+        )
+    check(
+        "database_defaults",
+        problem,
+        f"{a['database_character_set']}/{a['database_collation']} on both",
+        fatal=False,
+    )
+    used = {
+        r[0]
+        for r in query(
+            src,
+            "SELECT COLLATION_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() UNION SELECT TABLE_COLLATION "
+            "FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()",
+        )
+    } | {a["database_collation"]}
+    missing = missing_collations(used, {r[0] for r in query(dst, "SHOW COLLATION")})
+    check(
+        "collations",
+        f"not available on the target: {', '.join(missing)}" if missing else "",
+        f"{len(used - {None})} collation(s) in use, all available on the target",
+    )
+    problems = []
+    if a["lower_case_table_names"] != b["lower_case_table_names"]:
+        problems.append(
+            "lower_case_table_names differs (table names would change case)"
+        )
+    if b["max_allowed_packet"] < a["max_allowed_packet"]:
+        problems.append(
+            f"target max_allowed_packet {b['max_allowed_packet']} is below the "
+            f"source's {a['max_allowed_packet']} (long rows may not load)",
+        )
+    check(
+        "settings",
+        "; ".join(problems),
+        "lower_case_table_names and max_allowed_packet compatible",
+    )
+    problem = ""
+    if a["sql_mode"] != b["sql_mode"]:
+        problem = f"differs: source={a['sql_mode']} target={b['sql_mode']}"
+    check("sql_mode", problem, "same on both", fatal=False)
+
+    _, base = table_activity(src)
+    a["tables"] = {r["table_name"]: r["rows"] for r in base}
+    a["size_bytes"] = sum(int(r["bytes"] or 0) for r in base)
+    other = sorted(r["table_name"] for r in base if r["engine"] != "InnoDB")
+    problem = ""
+    if other:
+        problem = (
+            "not InnoDB, so a single-transaction dump is only consistent if "
+            f"the source is quiesced: {', '.join(other)}"
+        )
+    # A quiesced source needs no snapshot isolation.
+    check(
+        "source_engines",
+        problem,
+        "all tables are InnoDB",
+        fatal=not args.require_quiesced,
+    )
+    problem = ""
+    if not has_select_on_database(src):
+        problem = (
+            "the source account does not hold the SELECT privilege on the "
+            "whole database; tables it cannot see would silently be left out"
+        )
+    check(
+        "source_privileges",
+        problem,
+        f"SELECT on the whole database; {len(base)} tables readable",
+    )
+
+    target_listed, target_base = table_activity(dst)
+    b["tables"] = {r["table_name"]: r["rows"] for r in target_base}
+    present = [r["table_name"] for r in target_listed]
+    problem = ""
+    if present:
+        problem = (
+            f"target already has {len(present)} table(s): {', '.join(present[:10])}"
+        )
+        if not args.allow_non_empty_target:
+            problem += "; pass --allow-non-empty-target to accept"
+    check("target_empty", problem, "no tables", fatal=not args.allow_non_empty_target)
+    check(
+        "target_privileges",
+        target_can_load(dst) or "",
+        "create, index, insert, alter and drop all work",
+    )
+
+    if args.require_quiesced:
+        check(
+            "source_quiesced",
+            quiesced_problem(src, args.quiesce_seconds) or "",
+            f"no other sessions; no writes during a {args.quiesce_seconds}s watch",
+        )
+    else:
+        checks.append(
+            {
+                "name": "source_quiesced",
+                "status": "skipped",
+                "detail": "--require-quiesced not given",
+            }
+        )
+
+    failed = [c["name"] for c in checks if c["status"] == "fail"]
+    report = {
+        "ok": not failed,
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "checks": checks,
+        "source": a,
+        "target": b,
+    }
+    args.run_dir.mkdir(parents=True, exist_ok=True)
+    path = args.run_dir / "preflight-report.json"
+    path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    args.record.update(
+        source_tables=len(base),
+        source_rows=sum(a["tables"].values()),
+        source_bytes=a["size_bytes"],
+        failed_checks=failed,
+        report=str(path),
+    )
+
+    for side in (a, b):
+        say(
+            f"{side['flavour']} {side['version']} on {side['host']}, database "
+            f"{side['database']}: server {side['server_character_set']}/"
+            f"{side['server_collation']}, database {side['database_character_set']}/"
+            f"{side['database_collation']}"
+        )
+    for name, rows in a["tables"].items():
+        say(f"  {name:<45} {rows:>10} rows")
+    say(
+        f"  source: {len(base)} tables, {sum(a['tables'].values())} rows, about "
+        f"{a['size_bytes'] / 1e6:.1f} MB (data + indexes, the engine's estimate)"
+    )
+    for c in checks:
+        say(f"  {c['status']:<7} {c['name']}: {c['detail']}")
+    verdict = f"PREFLIGHT FAILED: {', '.join(failed)}" if failed else "PREFLIGHT OK"
+    say(f"{verdict}. Report: {path}")
+    return 1 if failed else 0
+
+
 # ── verify ───────────────────────────────────────────────────────────────────
 
 
@@ -540,8 +897,7 @@ def check_same_flavour(src, dst):
 
 
 def step_verify(args):
-    src, dst = connect("source"), connect("target")
-    check_same_flavour(src, dst)
+    src, dst = connect_both(args)
     if args.dry_run:
         say(
             "dry-run: would compare schema and every row of "
@@ -590,7 +946,15 @@ def step_verify(args):
     }
     args.run_dir.mkdir(parents=True, exist_ok=True)
     path = args.run_dir / "verify-report.json"
-    path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    text = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    path.write_text(text)
+    args.record.update(
+        tables_compared=report["tables_compared"],
+        rows_compared=report["rows_compared"],
+        differences=len(diffs),
+        report=str(path),
+        report_sha256=hashlib.sha256(text.encode()).hexdigest(),
+    )
 
     for name, entry in tables.items():
         mark = "DIFF" if name in bad else "ok  "
@@ -622,18 +986,51 @@ def main(argv=None):
         "--run-dir",
         type=Path,
         default=Path("migration-run"),
-        help="directory for this run's report files (default: ./migration-run)",
+        help="directory for this run's log and reports (default: ./migration-run)",
     )
     steps = parser.add_subparsers(dest="step", required=True)
-    verify = steps.add_parser("verify", help="prove source and target are identical")
-    verify.add_argument("--dry-run", action="store_true", help="say what would run")
-    verify.set_defaults(func=step_verify)
+
+    def step(name, func, text):
+        sub = steps.add_parser(name, help=text)
+        sub.add_argument("--dry-run", action="store_true", help="say what would run")
+        sub.set_defaults(func=func)
+        return sub
+
+    preflight = step("preflight", step_preflight, "check both servers before copying")
+    preflight.add_argument("--allow-non-empty-target", action="store_true")
+    preflight.add_argument("--allow-version-downgrade", action="store_true")
+    preflight.add_argument(
+        "--require-quiesced",
+        action="store_true",
+        help="fail unless the source has no other sessions and no writes",
+    )
+    preflight.add_argument("--quiesce-seconds", type=int, default=5)
+    step("verify", step_verify, "prove source and target are identical")
+
     args = parser.parse_args(argv)
+    args.record = {}
+    started = time.monotonic()
+    status, code = "refused", 2
     try:
-        return args.func(args)
+        code = args.func(args)
+        status = "ok" if code == 0 else "failed"
     except Refuse as error:
-        sys.stderr.write(f"REFUSED: {error}\n")
-        return 2
+        args.record["message"] = str(error)
+        sys.stderr.write(scrub(f"REFUSED: {error}\n"))
+    finally:
+        entry = {
+            "time": datetime.now(UTC).isoformat(timespec="seconds"),
+            "step": args.step,
+            "dry_run": args.dry_run,
+            "status": status,
+            "exit_code": code,
+            "duration_seconds": round(time.monotonic() - started, 2),
+            **args.record,
+        }
+        args.run_dir.mkdir(parents=True, exist_ok=True)
+        with (args.run_dir / "run.log").open("a") as log:
+            log.write(scrub(json.dumps(entry, sort_keys=True)) + "\n")
+    return code
 
 
 if __name__ == "__main__":

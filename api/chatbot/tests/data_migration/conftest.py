@@ -179,10 +179,13 @@ def db_collation(server, db):
     )[0][0]
 
 
-def reset_target(collation=None):
-    _create_db_and_user(
-        DST, DST_DB, DST_PASSWORD, collation or db_collation(SRC, SRC_DB)
-    )
+def reset_target():
+    """Drop and recreate the target database, empty, with the source's default
+    collation where the target server has it (it may not, across flavours)."""
+    try:
+        _create_db_and_user(DST, DST_DB, DST_PASSWORD, db_collation(SRC, SRC_DB))
+    except RuntimeError:
+        _create_db_and_user(DST, DST_DB, DST_PASSWORD)
 
 
 def plain_copy():
