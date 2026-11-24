@@ -34,7 +34,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -46,7 +46,11 @@ def _sandbox():
     """--sandbox (no \\! shell, no file access from SQL text) where the client
     has it: MariaDB clients since 10.5.25 / 10.6.18 / 10.11.8 / 11.0.6."""
     out = subprocess.run(
-        [CLIENT, "--no-defaults", "--help"], capture_output=True, text=True, check=False
+        [CLIENT, "--no-defaults", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_child_env(),
     ).stdout
     return ["--sandbox"] if "--sandbox" in out else []
 
@@ -77,7 +81,7 @@ class Conn:
     host: str
     port: str
     user: str
-    password: str
+    password: str = field(repr=False)
     database: str
     defaults_file: str
     version: str = ""
@@ -130,6 +134,16 @@ def _defaults(conn):
     return ["--no-defaults"]
 
 
+def _child_env():
+    """The environment for a child process: no password from either side.
+    The caller adds MYSQL_PWD for the one side that child talks to."""
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if k != "MYSQL_PWD" and not (k.startswith("MIG_") and k.endswith("_PASSWORD"))
+    }
+
+
 def _spawn(conn, sql, writable=False):
     """The only place a database client is started.
 
@@ -171,7 +185,7 @@ def _spawn(conn, sql, writable=False):
     # In --init-command, which the client runs on connecting: nothing on
     # stdin can come before it, and it overrides any init-command in a file.
     args += [f"--init-command={preamble.rstrip(';')}", f"--database={conn.database}"]
-    env = dict(os.environ)
+    env = _child_env()
     if conn.password:
         env["MYSQL_PWD"] = conn.password  # environment, not argv
     proc = subprocess.Popen(
@@ -860,7 +874,11 @@ def step_preflight(args):
         checks.append({"name": name, "status": status, "detail": problem or detail})
 
     client = subprocess.run(
-        [CLIENT, "--version"], capture_output=True, text=True, check=False
+        [CLIENT, "--no-defaults", "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_child_env(),
     ).stdout.strip()
     check(
         "client",
