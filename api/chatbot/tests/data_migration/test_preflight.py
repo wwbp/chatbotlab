@@ -205,25 +205,42 @@ def test_quiesced_source_passes(same_or_newer_target, tmp_path):
     assert check(report, "source_quiesced")["status"] == "ok"
 
 
-def test_source_still_being_written_is_refused(same_or_newer_target, tmp_path):
+WRITERS = {
+    "insert_delete": (
+        "INSERT INTO {db}.mig_empty VALUES (1, 'x'); DO SLEEP(0.3);"
+        "DELETE FROM {db}.mig_empty; DO SLEEP(0.3);"
+    ),
+    # Changes neither row count nor AUTO_INCREMENT: only UPDATE_TIME moves.
+    "update_only": "UPDATE {db}.mig_busy SET n = n + 1; DO SLEEP(0.3);",
+}
+
+
+@pytest.mark.parametrize("writer_kind", WRITERS)
+def test_source_still_being_written_is_refused(
+    writer_kind, same_or_newer_target, tmp_path
+):
     # No default database, so the writer does not show up as a session on
-    # the source database: only the change itself can give it away.
-    writes = (
-        f"INSERT INTO {SRC_DB}.mig_empty VALUES (1, 'x'); DO SLEEP(0.3);"
-        f"DELETE FROM {SRC_DB}.mig_empty; DO SLEEP(0.3);"
-    ) * 15
-    writer = _background_sql(writes)
+    # the source database: only the change itself can give it away. It keeps
+    # writing until the test stops it, however long preflight takes.
+    admin(
+        SRC,
+        "CREATE TABLE mig_busy (id INT PRIMARY KEY, n INT); INSERT INTO mig_busy VALUES (1, 0)",
+        SRC_DB,
+    )
+    writer = _background_sql(WRITERS[writer_kind].format(db=SRC_DB) * 1000)
     try:
         result, report = preflight(
             tmp_path, "--require-quiesced", "--quiesce-seconds", "2"
         )
     finally:
+        writer.kill()
         writer.wait()
-        admin(SRC, f"DELETE FROM {SRC_DB}.mig_empty")
+        admin(SRC, f"DELETE FROM {SRC_DB}.mig_empty; DROP TABLE {SRC_DB}.mig_busy")
     assert result.returncode == 1
     failed = check(report, "source_quiesced")
     assert failed["status"] == "fail"
-    assert "mig_empty" in failed["detail"]
+    table = "mig_empty" if writer_kind == "insert_delete" else "mig_busy"
+    assert table in failed["detail"]
 
 
 def test_source_with_an_open_app_session_is_refused(same_or_newer_target, tmp_path):
@@ -263,3 +280,132 @@ def test_dry_run_connects_but_writes_nothing(same_or_newer_target, tmp_path):
     entries = read_log(tmp_path)
     assert entries[-1]["step"] == "preflight"
     assert entries[-1]["dry_run"] is True
+
+
+# ── P1: database text never becomes SQL ─────────────────────────────────────
+
+AWKWARD_NAMES = ["it's", "back\\slash"]
+# Sorts first; ends the string literal it is pasted into, re-enables writes
+# and inserts.
+INJECTING_NAME = "0';SET TRANSACTION READ WRITE;INSERT mig_empty VALUES(7,'');#"
+
+
+def _make_table(name, rows):
+    ident = "`" + name.replace("`", "``") + "`"
+    admin(
+        SRC,
+        f"CREATE TABLE {ident} (id INT PRIMARY KEY);"
+        + "".join(f"INSERT INTO {ident} VALUES ({i});" for i in range(rows)),
+        SRC_DB,
+    )
+    return f"DROP TABLE IF EXISTS {ident}"
+
+
+def test_awkward_table_names_are_counted_exactly(same_or_newer_target, tmp_path):
+    drops = [_make_table(n, i + 2) for i, n in enumerate(AWKWARD_NAMES)]
+    try:
+        result, report = preflight(tmp_path)
+    finally:
+        admin(SRC, ";".join(drops), SRC_DB)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert report["source"]["tables"]["it's"] == 2
+    assert report["source"]["tables"]["back\\slash"] == 3
+
+
+def test_a_table_name_cannot_write_to_the_source(same_or_newer_target, tmp_path):
+    drop = _make_table(INJECTING_NAME, 1)
+    try:
+        preflight(tmp_path)
+        written = admin(SRC, "SELECT COUNT(*) FROM mig_empty", SRC_DB)[0][0]
+    finally:
+        admin(SRC, drop + "; DELETE FROM mig_empty", SRC_DB)
+    assert written == "0"
+
+
+def test_quiesced_check_needs_process_privilege(same_or_newer_target, tmp_path):
+    # P2: without PROCESS the processlist shows only the account's own session.
+    admin(
+        SRC,
+        "DROP USER IF EXISTS 'mig_noproc'@'%';"
+        f"CREATE USER 'mig_noproc'@'%' IDENTIFIED BY '{SRC_PASSWORD}';"
+        f"GRANT ALL PRIVILEGES ON {SRC_DB}.* TO 'mig_noproc'@'%'",
+    )
+    idle = _background_sql("DO SLEEP(6);", SRC_DB)
+    try:
+        result, report = preflight(
+            tmp_path,
+            "--require-quiesced",
+            "--quiesce-seconds",
+            "1",
+            env=tool_env(MIG_SOURCE_USER="mig_noproc"),
+        )
+    finally:
+        idle.wait()
+        admin(SRC, "DROP USER IF EXISTS 'mig_noproc'@'%'")
+    assert result.returncode == 1, result.stdout + result.stderr
+    failed = check(report, "source_quiesced")
+    assert failed["status"] == "fail"
+    assert "grant PROCESS" in failed["detail"]
+
+
+def test_utf8_and_utf8mb3_collation_names_are_the_same():
+    # P7: MariaDB 10.6+ and MySQL 8.0.30+ report utf8mb3_*, older servers utf8_*.
+    dbcopy = load_tool()
+    assert dbcopy.missing_collations({"utf8_general_ci"}, {"utf8mb3_general_ci"}) == []
+    assert dbcopy.missing_collations({"utf8mb3_bin"}, {"utf8_bin"}) == []
+    assert dbcopy.missing_collations({"utf8mb4_bin"}, {"utf8_bin"}) == ["utf8mb4_bin"]
+    assert dbcopy.norm_collation("utf8_unicode_ci") == "utf8mb3_unicode_ci"
+    assert dbcopy.norm_collation("utf8mb4_unicode_ci") == "utf8mb4_unicode_ci"
+
+
+@pytest.mark.parametrize(
+    "leftover",
+    [
+        "CREATE PROCEDURE mig_left() DETERMINISTIC NO SQL DO 1",
+        "CREATE EVENT mig_left ON SCHEDULE EVERY 1 DAY DISABLE DO DO 1",
+    ],
+    ids=["routine", "event"],
+)
+def test_target_with_only_a_routine_or_event_is_not_empty(
+    leftover, same_or_newer_target, tmp_path
+):
+    # P8: no tables, but not empty either.
+    admin(DST, leftover, DST_DB)
+    result, report = preflight(tmp_path)
+    assert result.returncode == 1, result.stdout + result.stderr
+    failed = check(report, "target_empty")
+    assert failed["status"] == "fail"
+    assert "mig_left" in failed["detail"]
+
+
+def test_source_account_must_be_able_to_dump_everything(same_or_newer_target, tmp_path):
+    # P9: SELECT alone dumps no triggers, events, routine bodies or views.
+    admin(
+        SRC,
+        "DROP USER IF EXISTS 'mig_sel'@'%';"
+        f"CREATE USER 'mig_sel'@'%' IDENTIFIED BY '{SRC_PASSWORD}';"
+        f"GRANT SELECT ON {SRC_DB}.* TO 'mig_sel'@'%'",
+    )
+    try:
+        result, report = preflight(tmp_path, env=tool_env(MIG_SOURCE_USER="mig_sel"))
+    finally:
+        admin(SRC, "DROP USER IF EXISTS 'mig_sel'@'%'")
+    assert result.returncode == 1, result.stdout + result.stderr
+    failed = check(report, "source_privileges")
+    assert failed["status"] == "fail"
+    for privilege in ("SHOW VIEW", "TRIGGER", "EVENT"):
+        assert privilege in failed["detail"]
+
+
+def test_unreadable_routine_body_fails_preflight(same_or_newer_target, tmp_path):
+    # Defined by root: mig_user may run it but its body reads as NULL.
+    admin(
+        SRC, "CREATE FUNCTION mig_f() RETURNS INT DETERMINISTIC NO SQL RETURN 1", SRC_DB
+    )
+    try:
+        result, report = preflight(tmp_path)
+    finally:
+        admin(SRC, "DROP FUNCTION IF EXISTS mig_f", SRC_DB)
+    assert result.returncode == 1, result.stdout + result.stderr
+    failed = check(report, "source_privileges")
+    assert "mig_f" in failed["detail"]
