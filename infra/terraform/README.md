@@ -270,6 +270,42 @@ AWS_PROFILE=test-account terraform destroy -var-file=terraform.tfvars
 
 ---
 
+## Email (staff invites and password resets)
+
+The application sends invites and password resets through Amazon SES, using
+the instance role. Three variables control it:
+
+| Variable | Sets | Value |
+|---|---|---|
+| `site_url` | `SITE_URL` | The public URL, e.g. `https://chatbot.mylab.org`. Empty: `https://<domain_name>` if a custom domain is set, otherwise unset (invites then fail with a warning in the admin) |
+| `email_backend` | `EMAIL_BACKEND` | `chatbot.email_backend.SESBackend` to send. Empty by default: Terraform then leaves the setting alone (a value set by hand on the environment is kept) and the application prints emails to its log |
+| `default_from_email` | `DEFAULT_FROM_EMAIL` | The sender, e.g. `"ChatbotLab <no-reply@mylab.org>"` |
+
+When `default_from_email` is set, Terraform also gives the instance role one
+permission: `ses:SendEmail` / `ses:SendRawEmail` on SES identities in this
+account and region, only when the From address equals the address in
+`default_from_email`. With it empty the role gets no SES permission.
+
+**Terraform does not verify the sender or leave the SES sandbox. Do both by
+hand, once per AWS account and region, before you set `email_backend` to SES:**
+
+1. In the SES console (same region as `aws_region`), open **Identities →
+   Create identity**. Choose the domain of the sender (e.g. `mylab.org`), or
+   the single address.
+2. For a domain, add the DKIM CNAME records SES shows to the domain's DNS and
+   wait for the status **Verified**. For an address, click the link in the
+   confirmation email.
+3. A new account is in the SES sandbox and can send only to verified
+   addresses. In **Account dashboard → Request production access**, ask AWS to
+   lift it. Until then, invites to other people are rejected.
+4. Send a test: in the admin, invite a user, or use **Send set-password
+   email** on an existing one.
+
+These steps are manual because each needs a person: a DNS change or a click in
+a mailbox, and a support request that AWS reviews.
+
+---
+
 ## Ongoing development
 
 ### Deploying application changes
