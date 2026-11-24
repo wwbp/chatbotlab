@@ -1180,6 +1180,26 @@ def _objects(conn):
     return found
 
 
+def _names(objects):
+    return sorted(f"{kind} {name}" for kind, names in objects.items() for name in names)
+
+
+def _other_sessions(conn):
+    """Other sessions using this database. Without PROCESS they are invisible,
+    so that refuses rather than reporting none."""
+    if missing_privileges(conn, ["PROCESS"]) and missing_privileges(conn, ["SUPER"]):
+        raise Refuse(
+            f"the {conn.role} account cannot see other sessions; grant PROCESS on *.*"
+        )
+    return int(
+        query(
+            conn,
+            "SELECT COUNT(*) FROM information_schema.PROCESSLIST "
+            "WHERE DB = DATABASE() AND ID <> CONNECTION_ID()",
+        )[0][0]
+    )
+
+
 def step_dump(args):
     src = connect("source")
     args.record["source"] = src.describe()
@@ -1254,6 +1274,9 @@ def step_dump(args):
         bytes=size,
         sha256=digest.hexdigest(),
         tables=len(objects["TABLE"]),
+        # What reset-target may drop, and the server it must never touch.
+        object_names=_names(objects),
+        source_identity=identity(src),
         database_character_set=info["database_character_set"],
         database_collation=info["database_collation"],
         options=options,
@@ -1277,10 +1300,6 @@ def _recorded_dump(args):
             "loads a dump made by `dump` in the same run directory",
         )
     return dumps[-1]
-
-
-def _target_identity(dst):
-    return {k: dst.describe()[k] for k in ("host", "port", "database")}
 
 
 def load_dump(dst, path):
@@ -1308,6 +1327,8 @@ def step_restore(args):
             f"(recorded {dump['sha256']}, file is {actual}); it was changed, "
             "truncated or swapped. Dump again.",
         )
+    if identity(dst) == dump.get("source_identity"):
+        raise Refuse("MIG_TARGET_* reaches the server and database this run dumped")
     if dump["source"]["flavour"] != dst.flavour:
         raise Refuse(
             f"the dump is from {dump['source']['flavour']} {dump['source']['version']} "
@@ -1345,6 +1366,7 @@ def step_restore(args):
         status="started",
         dry_run=False,
         target=dst.describe(),
+        target_identity=identity(dst),
         target_was_empty=not existing,
         sha256=actual,
     )
@@ -1369,35 +1391,65 @@ def step_restore(args):
 
 
 def step_reset_target(args):
+    """Empty the target after a failed restore, and nothing else, ever.
+
+    Every guard is checked against the server by query, never against
+    environment strings (a tunnel or a renamed endpoint can lead anywhere).
+    """
     dst = connect("target")
     args.record["target"] = dst.describe()
-    me = _target_identity(dst)
-    if args.confirm_database != dst.database:
+    expected = f"{dst.host}/{dst.database}"
+    if args.confirm != expected:
         raise Refuse(
-            "reset-target drops every table in the target database. Confirm "
-            f"with --confirm-database {dst.database}",
+            "reset-target drops everything in the target database. Confirm with "
+            f"--confirm {expected} (host/database, exactly as configured)",
         )
-    source = {k: os.environ.get(f"MIG_SOURCE_{k.upper()}", "") for k in me}
-    if me == {**source, "port": source["port"] or "default"}:
-        raise Refuse("MIG_TARGET_* points at the source database")
-    started = [
-        e
-        for e in run_log(args)
-        if e["step"] == "restore"
-        and e["status"] == "started"
-        and {k: e["target"][k] for k in me} == me
+    me = identity(dst)
+    entries = run_log(args)
+    restores = [
+        i
+        for i, e in enumerate(entries)
+        if e["step"] == "restore" and e["status"] == "started"
     ]
-    # The guard against emptying the wrong database: only one that this run
-    # found empty and then started loading can be reset.
-    if not started:
+    # Only a database this run found empty and then started loading.
+    if not [i for i in restores if entries[i].get("target_identity") == me]:
         raise Refuse(
-            f"{args.run_dir / 'run.log'} records no restore into {dst.database} "
-            f"on {dst.host}; reset-target only empties a database this run loaded",
+            f"{args.run_dir / 'run.log'} records no restore into this server and "
+            f"database (identity by query: {me}); reset-target only empties a "
+            "database this run loaded",
         )
-    if not all(e["target_was_empty"] for e in started):
+    if entries[restores[-1]].get("target_identity") != me:
+        raise Refuse("the last restore this run started went to another server")
+    if not all(entries[i]["target_was_empty"] for i in restores):
         raise Refuse(
             "the target was not empty before this run restored into it, so "
             "reset-target cannot tell the copy from what was there. Clean up by hand.",
+        )
+    if any(
+        e["step"] == "verify" and e["status"] == "ok" and not e.get("dry_run")
+        for e in entries[restores[-1] :]
+    ):
+        raise Refuse(
+            "verify passed after the last restore: the target is a proven copy, "
+            "possibly already in use. reset-target will not empty it.",
+        )
+    dump = _recorded_dump(args)
+    if me == dump.get("source_identity"):
+        raise Refuse("MIG_TARGET_* reaches the server and database this run dumped")
+    if os.environ.get("MIG_SOURCE_DATABASE"):
+        check_different(connect("source"), dst)
+    unknown = sorted(set(_names(_objects(dst))) - set(dump.get("object_names", [])))
+    if unknown:
+        raise Refuse(
+            "the target holds object(s) the dump did not create: "
+            f"{', '.join(unknown[:10])}. reset-target only removes a partial "
+            "restore; clean up by hand.",
+        )
+    sessions = _other_sessions(dst)
+    if sessions:
+        raise Refuse(
+            f"{sessions} other session(s) are connected to the target database; "
+            "it may be in use. Disconnect them first.",
         )
     objects = _objects(dst)
     count = sum(len(names) for names in objects.values())
@@ -1560,7 +1612,7 @@ def main(argv=None):
     restore.add_argument("--allow-non-empty-target", action="store_true")
     step("verify", step_verify, "prove source and target are identical")
     reset = step("reset-target", step_reset_target, "empty a target this run loaded")
-    reset.add_argument("--confirm-database", default="", metavar="NAME")
+    reset.add_argument("--confirm", default="", metavar="HOST/DATABASE")
 
     args = parser.parse_args(argv)
     args.record = {}
