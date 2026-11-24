@@ -1492,6 +1492,9 @@ def step_restore(args):
             f"{', '.join(existing[:10])}). If this is a failed restore from this "
             "run, clean up with `reset-target`; otherwise check MIG_TARGET_*.",
         )
+    for key in ("database_character_set", "database_collation"):
+        if not re.fullmatch(r"[A-Za-z0-9_]+", dump.get(key) or ""):
+            raise Refuse(f"run.log records an invalid {key}: {dump.get(key)!r}")
     info = server_info(dst)
     align = ""
     if info["database_collation"] != dump["database_collation"]:
