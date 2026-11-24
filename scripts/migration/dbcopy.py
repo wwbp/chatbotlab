@@ -1404,7 +1404,9 @@ def step_dump(args):
             os.fdopen(
                 os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb"
             ) as out,
-            errors.open("wb") as err,
+            os.fdopen(
+                os.open(errors, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb"
+            ) as err,
         ):
             proc = _popen(command, stdout=subprocess.PIPE, stderr=err, env=env)
             while chunk := proc.stdout.read(1 << 20):
@@ -1436,7 +1438,7 @@ def step_dump(args):
             f"{proc.returncode}): {stderr or 'no completion marker'}"
         )
     partial.rename(path)
-    (args.run_dir / "dump.sql.sha256").write_text(f"{digest.hexdigest()}  dump.sql\n")
+    write_private(args.run_dir / "dump.sql.sha256", f"{digest.hexdigest()}  dump.sql\n")
     args.record.update(
         file=str(path),
         bytes=size,
