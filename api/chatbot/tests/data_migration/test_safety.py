@@ -259,3 +259,39 @@ def test_read_only_survives_a_reconnect(same_flavour, tmp_path):
         assert "--init-command=" in command, command
         init = command.split("--init-command=", 1)[1]
         assert "SET SESSION TRANSACTION READ ONLY" in init, command
+
+
+def test_each_client_gets_only_its_own_password(same_flavour, tmp_path):
+    # P5: one environment file per client run: its argv, then its environment.
+    plain_copy()
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    env = shim(
+        tmp_path,
+        "mariadb",
+        f'f=$(mktemp -p {runs}); echo "$*" > "$f"; env >> "$f"; exec "$REAL" "$@"',
+    )
+    result = tool("--run-dir", str(tmp_path / "run"), "verify", env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    seen = {"source": 0, "target": 0}
+    # Booleans only: a failing assert must not print the environment.
+    for path in runs.iterdir():
+        argv, _, environment = path.read_text().partition("\n")
+        leaked = (
+            "MIG_SOURCE_PASSWORD" in environment or "MIG_TARGET_PASSWORD" in environment
+        )
+        assert not leaked, f"MIG_*_PASSWORD passed to: {argv}"
+        if f"--host={SRC.host} " in argv:
+            seen["source"] += 1
+            leaked = DST_PASSWORD in environment
+        elif f"--host={DST.host} " in argv:
+            seen["target"] += 1
+            leaked = SRC_PASSWORD in environment
+        assert not leaked, f"the other side's password passed to: {argv}"
+    assert seen["source"] > 5 and seen["target"] > 5
+
+
+def test_password_not_in_repr():
+    dbcopy = load_tool()
+    conn = dbcopy.Conn("source", "h", "1", "u", SRC_PASSWORD, "d", "")
+    assert SRC_PASSWORD not in repr(conn)
