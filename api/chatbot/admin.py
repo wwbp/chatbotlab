@@ -34,6 +34,7 @@ from simple_history.admin import SimpleHistoryAdmin
 
 from .access_log import client_ip
 from .admin_studies import in_date_range
+from .email_backend import describe_error
 from .models import (
     MODERATION_CATEGORIES,
     AccessLog,
@@ -2086,7 +2087,11 @@ class UserAdmin(BaseUserAdmin):
             send_set_password_email(user, request.user, invite=invite)
         except Exception as error:
             # The message carries the error only, never the token or link.
-            logger.error("set-password email to user %s failed: %s", user.pk, error)
+            logger.error(
+                "set-password email to user %s failed: %s",
+                user.pk,
+                describe_error(error),
+            )
             self.message_user(
                 request,
                 "User saved, but the invite email could not be sent: "

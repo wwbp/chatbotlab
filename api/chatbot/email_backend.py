@@ -6,11 +6,24 @@ delivers it. FromEmailAddress is passed explicitly because the IAM policy
 conditions on ses:FromAddress. boto3 is already a dependency, so no django-ses.
 """
 
+import logging
 import os
+import re
 from email.utils import parseaddr
 
 import boto3
 from django.core.mail.backends.base import BaseEmailBackend
+
+logger = logging.getLogger(__name__)
+
+
+def describe_error(error):
+    """The error class and message with any address cut to its domain.
+
+    SES names the rejected address in its message, e.g. "... failed the check
+    in region US-EAST-1: a@upenn.edu"; logs keep only "***@upenn.edu".
+    """
+    return f"{type(error).__name__}: {re.sub(r'[^\s@:;,<>]+@', '***@', str(error))}"
 
 
 class SESBackend(BaseEmailBackend):
@@ -24,7 +37,16 @@ class SESBackend(BaseEmailBackend):
                     Destination={"ToAddresses": message.recipients()},
                     Content={"Raw": {"Data": message.message().as_bytes()}},
                 )
-            except Exception:
+            except Exception as error:
+                # Subject = purpose; domains only, never the address or body.
+                logger.error(
+                    "email send failed (%s) to %s: %s",
+                    message.subject,
+                    ", ".join(
+                        sorted({r.rpartition("@")[2] for r in message.recipients()})
+                    ),
+                    describe_error(error),
+                )
                 if not self.fail_silently:
                     raise
             else:

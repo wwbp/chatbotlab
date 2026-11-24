@@ -26,6 +26,7 @@ from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 
 from .access_log import Action, _write, client_ip
+from .email_backend import describe_error
 from .utils.rate_limit import within_rate_limit
 
 logger = logging.getLogger(__name__)
@@ -91,9 +92,10 @@ class StaffPasswordResetForm(PasswordResetForm):
                 email_template_name=RESET_TEMPLATES[1],
             )
             super().save(**kwargs)
-        except Exception:
-            # Never reveal to the requester whether the address exists.
-            logger.exception("password reset email failed")
+        except Exception as error:
+            # Never reveal to the requester whether the address exists. No
+            # traceback: SES's message names the address.
+            logger.error("password reset email failed: %s", describe_error(error))
 
 
 def send_set_password_email(user, inviter, invite=True):
