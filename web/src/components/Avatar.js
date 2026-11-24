@@ -4,6 +4,7 @@ function Avatar() {
   const [file, setFile] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadSuccess, setUploadSuccess] = useState(false);
+  const [uploadFailed, setUploadFailed] = useState(false);
 
   const BASE_URL = import.meta.env.VITE_API_URL || '/api';
   const allowedTypes = {
@@ -21,6 +22,7 @@ function Avatar() {
 
     setIsUploading(true);
     setUploadSuccess(false);
+    setUploadFailed(false);
 
     const searchParams = new URLSearchParams(window.location.search);
     const botName = searchParams.get('bot_name');
@@ -34,8 +36,9 @@ function Avatar() {
       const newFileName = `${participantId}_${conversationId}.${allowedTypes[file.type]}`;
 
       const res = await fetch(
-        `${BASE_URL}/avatar-upload/?filename=${encodeURIComponent(newFileName)}&content_type=${encodeURIComponent(file.type)}`
+        `${BASE_URL}/avatar-upload/?filename=${encodeURIComponent(newFileName)}&content_type=${encodeURIComponent(file.type)}&bot_name=${encodeURIComponent(botName)}`
       );
+      if (!res.ok) throw new Error('Could not get an upload URL.');
       const { s3_url } = await res.json();
 
       // 2. Upload to S3
@@ -70,6 +73,7 @@ function Avatar() {
       setUploadSuccess(true);
     } catch (err) {
       // console.error('Error during upload:', err);
+      setUploadFailed(true);
     } finally {
       setIsUploading(false);
     }
@@ -91,6 +95,12 @@ function Avatar() {
       )}
 
       {isUploading && <div>Uploading, Please wait a few seconds.</div>}
+
+      {uploadFailed && (
+        <div style={{ marginTop: '1rem', color: 'red' }}>
+          Upload failed. Please try again.
+        </div>
+      )}
 
       {uploadSuccess && (
         <div style={{ marginTop: '1rem', color: 'green' }}>

@@ -19,9 +19,14 @@ incomplete, fixing it is a genuinely useful first contribution.
 
 2. Make the change, with tests.
 3. Run `make lint` and `make test` locally.
-4. Open a pull request against `main`.
+4. Open a pull request against `staging`. Merging deploys it to
+   dev.bot.wwbp.org — check it there.
+5. Release with a pull request from `staging` into `main`. Merging deploys it
+   to production (bot.wwbp.org).
 
-`main` and `staging` deploy on push, so nothing lands on either directly.
+`main` and `staging` deploy on push, so nothing lands on either directly, and
+`main` is always what production runs — branch from it. Production hosts live
+studies, which is why every change goes through staging first.
 
 ## Tests
 

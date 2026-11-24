@@ -102,7 +102,8 @@ if not DEBUG:
 # Application definition
 
 INSTALLED_APPS = [
-    "django.contrib.admin",
+    # django.contrib.admin, with the front page grouped by job (admin_site.py)
+    "chatbot.apps.ChatbotLabAdminConfig",
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
@@ -114,7 +115,13 @@ INSTALLED_APPS = [
     "rest_framework",
     "import_export",
     "storages",
+    "simple_history",
 ]
+
+# Without this, import_export lets any staff user export any model with an
+# Export button. "view" ties export to the model's view permission, so a role
+# can export exactly what it can read.
+IMPORT_EXPORT_EXPORT_PERMISSION_CODE = "view"
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
@@ -125,8 +132,12 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "chatbot.access_log.AccessLogMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # Records request.user as history_user on edits. Must follow
+    # AuthenticationMiddleware.
+    "simple_history.middleware.HistoryRequestMiddleware",
 ]
 
 CORS_ALLOWED_ORIGINS = [
@@ -188,7 +199,7 @@ MODERATION_VALUES_FOR_BLOCKED = json.loads(
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [BASE_DIR, "templates"],
+        "DIRS": [BASE_DIR, BASE_DIR / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -242,6 +253,7 @@ AUTH_PASSWORD_VALIDATORS = [
     },
     {
         "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
+        "OPTIONS": {"min_length": 12},
     },
     {
         "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",
@@ -319,6 +331,7 @@ STORAGES = {
 }
 
 X_FRAME_OPTIONS = "SAMEORIGIN"
+SESSION_COOKIE_AGE = 12 * 60 * 60  # shared lab machines: sign out by end of day
 SESSION_COOKIE_SAMESITE = "None"
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SAMESITE = "None"
@@ -330,6 +343,22 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024  # 50MB
 FILE_UPLOAD_TEMP_DIR = None
 FILE_UPLOAD_PERMISSIONS = 0o644
 FILE_UPLOAD_DIRECTORY_PERMISSIONS = 0o755
+
+# Email: staff invites and password resets (chatbot/staff_auth.py).
+# Links are built from SITE_URL, never the request (behind CloudFront the
+# request looks like http to the EB hostname). Unset in production means
+# invites fail with an admin warning; startup is not blocked.
+SITE_URL = os.getenv("SITE_URL", "")
+# Production: chatbot.email_backend.SESBackend.
+EMAIL_BACKEND = os.getenv(
+    "EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend"
+)
+DEFAULT_FROM_EMAIL = os.getenv(
+    "DEFAULT_FROM_EMAIL", "ChatbotLab <no-reply@bot.wwbp.org>"
+)
+# Where the "Log in" link after a password reset goes; Django's default
+# /accounts/login/ would land on the SPA.
+LOGIN_URL = "admin:login"
 
 # Environment settings
 BACKEND_ENVIRONMENT = os.getenv("BACKEND_ENVIRONMENT", "production")

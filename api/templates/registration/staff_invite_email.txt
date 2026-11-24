@@ -1,0 +1,25 @@
+{% autoescape off %}Hello {{ user.first_name|default:user.get_username }},
+
+{{ inviter_name }} has created an account for you on ChatbotLab, the
+World Well-Being Project's research platform at the University of
+Pennsylvania, where the lab configures study chatbots and reviews
+participant data.
+
+Your username: {{ user.get_username }}
+Your access: {{ roles }}
+
+Set your password here (this link works once and expires in 3 days):
+
+{{ protocol }}://{{ domain }}{% url 'password_reset_confirm' uidb64=uid token=token %}
+
+Then sign in at {{ site_url }}/api/admin/
+
+Participant data in ChatbotLab is confidential research data covered by
+the study's IRB protocol. Do not share your login or download data to
+personal devices.
+
+If you did not expect this email, ignore it; no account is usable until
+a password is set. Questions: reply to this email.
+
+ChatbotLab, WWBP, University of Pennsylvania
+{% endautoescape %}

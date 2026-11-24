@@ -1,7 +1,17 @@
 import secrets
 
+from django.conf import settings
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
+from simple_history.models import HistoricalRecords
+
+# Edit history (who changed what, field by field) is kept only on the
+# configuration researchers edit: Bot, Persona, ModerationSettings and
+# SurveyIngestToken. Participant-written models (Conversation, Utterance,
+# Keystroke, SurveyResponse) deliberately have none: a history row per write
+# would double the largest tables. Avatar is left out for the same reason —
+# AvatarDetailAPIView saves per-conversation Avatar rows on participant
+# requests. Timestamps are excluded because history_date already records when.
 
 # Every category omni-moderation-latest scores, in OpenAI's own spelling. Adding
 # a category here is not enough on its own — it also needs the matching
@@ -37,6 +47,7 @@ class Persona(models.Model):
     instructions = models.TextField(help_text="Instructions for this persona")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    history = HistoricalRecords(excluded_fields=["created_at", "updated_at"])
 
     def __str__(self):
         return self.name
@@ -88,7 +99,7 @@ class Utterance(models.Model):
         null=True,
         blank=True,
     )
-    speaker_id = models.CharField(max_length=255)  # 'participant' or 'bot'
+    speaker_id = models.CharField(max_length=255)  # 'user' or 'assistant'
     bot_name = models.CharField(max_length=255, null=True, blank=True)
     participant_id = models.CharField(max_length=255, null=True, blank=True)
     created_time = models.DateTimeField(auto_now_add=True)  # Timestamp
@@ -413,10 +424,11 @@ class ModerationSettings(models.Model):
         help_text="When disabled, all content moderation is bypassed globally",
     )
     updated_at = models.DateTimeField(auto_now=True)
+    history = HistoricalRecords(excluded_fields=["updated_at"])
 
     class Meta:
-        verbose_name = "Global Moderation Setting"
-        verbose_name_plural = "Global Moderation Settings"
+        # A singleton on/off switch, so singular in the admin list too.
+        verbose_name = verbose_name_plural = "Moderation switch"
 
     def save(self, *args, **kwargs):
         # Enforce singleton pattern
@@ -676,6 +688,8 @@ class Bot(models.Model):
         related_name="bots",
         help_text="Select personas that this bot should embody",
     )
+    # See the edit-history note at the top of this module.
+    history = HistoricalRecords(m2m_fields=["personas"])
 
     def __str__(self):
         return self.name
@@ -776,6 +790,9 @@ class SurveyIngestToken(models.Model):
         help_text="Untick to revoke this token without deleting the record. A revoked token is rejected immediately.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    # The token is never edited (editable=False), so its history adds nothing
+    # but another copy of a live secret for anyone who can read history.
+    history = HistoricalRecords(excluded_fields=["token", "created_at"])
 
     class Meta:
         verbose_name = "Survey ingest token"
@@ -841,3 +858,43 @@ class Avatar(models.Model):
 
     def __str__(self):
         return f"Avatar for Conversation {self.bot.name} {self.bot.avatar_type} {self.condition} {self.participant_avatar} {self.chatbot_avatar}"
+
+
+class AccessLog(models.Model):
+    """
+    Who viewed, changed, or exported what in the admin and staff-only API.
+
+    Django's admin LogEntry only records add/change/delete, so it cannot say who
+    looked at or downloaded participant data. Rows are written by
+    chatbot.access_log and never edited. `username` is a snapshot: it survives
+    the user being deleted (`user` goes NULL) and is the only identity a failed
+    login has.
+    """
+
+    class Action(models.TextChoices):
+        VIEW = "view"
+        CHANGE = "change"
+        EXPORT = "export"
+        LOGIN = "login"
+        LOGOUT = "logout"
+        LOGIN_FAILED = "login_failed"
+        PASSWORD_RESET_REQUESTED = "password_reset_requested"
+        PASSWORD_SET = "password_set"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
+    )
+    username = models.CharField(max_length=150)
+    timestamp = models.DateTimeField(auto_now_add=True, db_index=True)
+    action = models.CharField(max_length=32, choices=Action.choices)
+    method = models.CharField(max_length=10)
+    path = models.CharField(max_length=1024)
+    query = models.CharField(max_length=1024, blank=True)
+    status_code = models.PositiveSmallIntegerField(null=True, blank=True)
+    ip = models.GenericIPAddressField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-timestamp"]
+
+    def __str__(self):
+        return f"{self.username} {self.action} {self.path} at {self.timestamp}"

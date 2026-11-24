@@ -129,3 +129,23 @@ jobs:
 
       - name: Run tests
         run: cd web && npm test -- --run
+
+  terraform-test:
+    name: Terraform test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: '~1.9'
+          terraform_wrapper: false
+
+      # Offline: the AWS provider is mocked in infra/terraform/tests/.
+      - name: Format, validate and test
+        run: |
+          cd infra/terraform
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+          terraform test

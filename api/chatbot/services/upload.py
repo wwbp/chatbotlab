@@ -8,23 +8,34 @@ from django.conf import settings
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
+from ..models import Bot
+from ..utils.auth import require_perm
+
 logger = logging.getLogger(__name__)
 
 _ALLOWED_IMAGE_CONTENT_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 _SAFE_FILENAME_RE = re.compile(r"^[\w\-. ]+$")
 
 
-def _require_staff(request):
-    if not request.user.is_authenticated or not request.user.is_staff:
-        return JsonResponse({"error": "Forbidden."}, status=403)
-    return None
+def safe_upload_name(name):
+    """`name` if it is a bare, safe file name under uploads/, else None."""
+    return (
+        name
+        if name and Path(name).name == name and _SAFE_FILENAME_RE.match(name)
+        else None
+    )
 
 
 @csrf_exempt
 def get_presigned_url(request):
-    forbidden = _require_staff(request)
-    if forbidden:
-        return forbidden
+    # Participants are not logged in: they may upload a photo only for a bot that
+    # makes each participant their own avatar (avatar_type "user"). Anything else
+    # (e.g. a bot's default avatar) is staff work.
+    bot_name = request.GET.get("bot_name", "")
+    if not Bot.objects.filter(name=bot_name, avatar_type="user").exists():
+        forbidden = require_perm(request, "chatbot.add_avatar")
+        if forbidden:
+            return forbidden
 
     file_name = request.GET.get("filename", "")
     content_type = request.GET.get("content_type", "")
@@ -38,8 +49,8 @@ def get_presigned_url(request):
         return JsonResponse({"error": "Unsupported content type."}, status=415)
 
     # Sanitize filename: strip directory traversal and allow only safe characters
-    safe_name = Path(file_name).name
-    if not _SAFE_FILENAME_RE.match(safe_name):
+    safe_name = safe_upload_name(Path(file_name).name)
+    if not safe_name:
         return JsonResponse({"error": "Invalid filename."}, status=400)
 
     try:

@@ -49,7 +49,7 @@ nothing to configure in the AWS console after apply completes.
 | VPC | 10.0.0.0/16 across 2 AZs | Private network — nothing reaches the DB or cache except the app |
 | Public subnets | 10.0.1/24, 10.0.2/24 | Load balancer and application instances |
 | Private subnets | 10.0.10/24, 10.0.11/24 | RDS and ElastiCache — no internet route |
-| Security groups | 4 (ALB → EB → RDS/Cache) | Least-privilege firewall chain |
+| Security groups | 4 (CloudFront → ALB → EB → RDS/Cache) | Least-privilege firewall chain; the ALB accepts CloudFront only |
 | RDS MariaDB 10.11 | db.t3.micro (staging) | Primary database, encrypted, automated backups |
 | ElastiCache Serverless Redis | TLS-only | Django session cache |
 | S3 frontend bucket | Private + CloudFront OAC | Compiled React app |
@@ -192,6 +192,15 @@ curl $(terraform output -raw backend_api_url)/health/
 ```
 
 ---
+
+## Offline checks
+
+`terraform test` checks the plan against a mocked AWS provider, so it needs no
+account or credentials. CI runs it on every pull request:
+
+```bash
+terraform init -backend=false && terraform validate && terraform test
+```
 
 ## Testing on a separate AWS account
 

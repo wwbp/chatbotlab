@@ -7,17 +7,11 @@ from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 
 from ..models import Avatar, Bot, Model
+from ..utils.auth import require_perm
 from .s3_helper import delete
 
 # Get logger for this module
 logger = logging.getLogger(__name__)
-
-
-def _require_staff(request):
-    """Return a 403 JsonResponse if the user is not a logged-in staff member, else None."""
-    if not request.user.is_authenticated or not request.user.is_staff:
-        return JsonResponse({"error": "Forbidden."}, status=403)
-    return None
 
 
 @method_decorator(csrf_exempt, name="dispatch")
@@ -28,7 +22,7 @@ class ListBotsAPIView(View):
     """
 
     def get(self, request, *args, **kwargs):
-        forbidden = _require_staff(request)
+        forbidden = require_perm(request, "chatbot.view_bot")
         if forbidden:
             return forbidden
         try:
@@ -73,7 +67,7 @@ class ListBotsAPIView(View):
             return JsonResponse({"error": "An unexpected error occurred."}, status=500)
 
     def post(self, request, *args, **kwargs):
-        forbidden = _require_staff(request)
+        forbidden = require_perm(request, "chatbot.add_bot")
         if forbidden:
             return forbidden
         try:
@@ -137,7 +131,7 @@ class BotDetailAPIView(View):
     """
 
     def get(self, request, pk, *args, **kwargs):
-        forbidden = _require_staff(request)
+        forbidden = require_perm(request, "chatbot.view_bot")
         if forbidden:
             return forbidden
         try:
@@ -177,7 +171,7 @@ class BotDetailAPIView(View):
             return JsonResponse({"error": "An unexpected error occurred."}, status=500)
 
     def put(self, request, pk, *args, **kwargs):
-        forbidden = _require_staff(request)
+        forbidden = require_perm(request, "chatbot.change_bot")
         if forbidden:
             return forbidden
         try:
@@ -249,7 +243,7 @@ class BotDetailAPIView(View):
             return JsonResponse({"error": "An unexpected error occurred."}, status=500)
 
     def delete(self, request, pk, *args, **kwargs):
-        forbidden = _require_staff(request)
+        forbidden = require_perm(request, "chatbot.delete_bot")
         if forbidden:
             return forbidden
         try:
