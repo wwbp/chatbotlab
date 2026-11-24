@@ -30,6 +30,8 @@ Coverage:
   - a send failure or missing SITE_URL keeps the user and shows a warning
   - an SES rejection is logged at ERROR with its code and the purpose, but
     never the full address or the token; the reset page stays the same
+  - a reset for an address with no active staff account is logged at INFO
+    with the domain only, and the response matches the matched case
 """
 
 import logging
@@ -568,3 +570,23 @@ def test_invite_send_failure_is_logged_without_address_and_warns(
     assert REJECTED_ADDRESS not in text.lower()
     assert "MessageRejected" in text
     assert "Your ChatbotLab account" in text  # the purpose
+
+
+@pytest.mark.django_db
+def test_reset_for_no_staff_account_is_logged_with_domain_only():
+    staff_user(email="known@upenn.edu", username="known@upenn.edu")
+    matched = Client().post(RESET_URL, {"email": "known@upenn.edu"}, follow=True)
+    with unittest.TestCase().assertLogs("chatbot", level="INFO") as logs:
+        unmatched = Client().post(
+            RESET_URL, {"email": "Other.Address@upenn.edu"}, follow=True
+        )
+
+    # Same response either way: nothing reveals which addresses exist.
+    assert unmatched.redirect_chain == matched.redirect_chain
+    assert unmatched.status_code == matched.status_code
+    assert unmatched.content == matched.content
+
+    text = logged_text(logs)
+    assert "other.address@upenn.edu" not in text.lower()
+    assert "no active staff account" in text
+    assert "upenn.edu" in text
