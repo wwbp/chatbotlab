@@ -4,7 +4,10 @@
 Steps (each runs on its own):
 
     preflight   check both servers; fail on anything that would spoil the copy
+    dump        consistent logical dump of the source to <run-dir>/dump.sql
+    restore     load that dump into the (empty) target
     verify      prove source and target hold the same schema and the same data
+    reset-target  empty a target this run loaded, after a failed restore
 
 Every step takes --dry-run, and appends one line to <run-dir>/run.log saying
 what ran, against which host and database, how long it took and what it found.
@@ -16,7 +19,8 @@ are visible in the process list):
     MIG_SOURCE_DATABASE  [MIG_SOURCE_DEFAULTS_FILE = path to a client option file]
     MIG_TARGET_...   the same six for the target
 
-Only the standard library and the ``mariadb`` client binary are used.
+Only the standard library and the ``mariadb`` and ``mariadb-dump`` client
+binaries are used.
 
 Exit status: 0 success, 1 the check found a problem, 2 could not run.
 """
@@ -37,6 +41,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 CLIENT = shutil.which("mariadb") or shutil.which("mysql")
+DUMP = shutil.which("mariadb-dump") or shutil.which("mysqldump")
 
 
 class Refuse(Exception):
@@ -106,41 +111,44 @@ class Conn:
         }
 
 
-def _spawn(conn, sql, writable=False):
-    """The only place a database client is started.
-
-    Every session is READ ONLY unless ``writable`` is passed, and a writable
-    session on the source is refused outright: no step of this tool may change
-    the source, which is what makes "point the app back at the old database" a
-    complete rollback. The server enforces it (error 1792), not this script.
-    """
-    if not CLIENT:
-        raise Refuse("no `mariadb` or `mysql` client binary on PATH")
-    if writable and conn.role != "target":
-        raise Refuse("refusing to open a writable session on the source")
-    args = [CLIENT]
+def _command(binary, conn, *options):
+    """(argv, environment) for a client binary. Credentials are never in argv."""
+    if not binary:
+        raise Refuse("the mariadb / mariadb-dump client binaries are not on PATH")
+    args = [binary]
     if conn.defaults_file:
         args.append(f"--defaults-extra-file={conn.defaults_file}")  # must be first
     for flag, value in (("host", conn.host), ("port", conn.port), ("user", conn.user)):
         if value:
             args.append(f"--{flag}={value}")
-    args += [
-        "--protocol=tcp",
-        "--default-character-set=utf8mb4",
-        "--batch",
-        "--skip-column-names",
-        "--quick",  # stream rows; never buffer a whole table in the client
-        conn.database,
-    ]
+    args += ["--protocol=tcp", "--default-character-set=utf8mb4", *options]
+    env = dict(os.environ)
+    if conn.password:
+        env["MYSQL_PWD"] = conn.password  # environment, not argv
+    return [*args, conn.database], env
+
+
+def _spawn(conn, sql, writable=False):
+    """Run SQL in a client session. Every query of every step goes through here.
+
+    The session is READ ONLY unless ``writable`` is passed, and a writable
+    session on the source is refused outright: no step of this tool may change
+    the source, which is what makes "point the app back at the old database" a
+    complete rollback. The server enforces it (error 1792), not this script.
+
+    The two other places a client is started are ``step_dump`` (mariadb-dump,
+    which only reads) and ``load_dump`` (which refuses anything but the target).
+    """
+    if writable and conn.role != "target":
+        raise Refuse("refusing to open a writable session on the source")
+    # --quick: stream rows; never buffer a whole table in the client.
+    args, env = _command(CLIENT, conn, "--batch", "--skip-column-names", "--quick")
     preamble = "SET time_zone = '+00:00';"
     if not writable:
         preamble += "SET SESSION TRANSACTION READ ONLY;"
     if conn.version and conn.flavour == "mysql":
         # MySQL 8 caches information_schema statistics (AUTO_INCREMENT) for a day.
         preamble += "SET SESSION information_schema_stats_expiry = 0;"
-    env = dict(os.environ)
-    if conn.password:
-        env["MYSQL_PWD"] = conn.password  # environment, not argv
     proc = subprocess.Popen(
         args,
         stdin=subprocess.PIPE,
@@ -881,6 +889,305 @@ def step_preflight(args):
     return 1 if failed else 0
 
 
+# ── dump, restore, reset-target ──────────────────────────────────────────────
+
+# Read-only by construction: none of these makes mariadb-dump lock, flush or
+# write anything on the source (a test reads the server's general log to
+# confirm). Deterministic: the same data gives the same file, byte for byte.
+DUMP_OPTIONS = [
+    "--single-transaction",  # one consistent InnoDB snapshot, no locks
+    "--skip-lock-tables",
+    "--quick",
+    "--order-by-primary",
+    "--hex-blob",
+    "--skip-dump-date",
+    "--triggers",
+    "--no-tablespaces",
+    # Restore must only ever add. With the default DROP TABLE IF EXISTS lines a
+    # dump loaded into the wrong database would destroy what is there.
+    "--skip-add-drop-table",
+    "--max-allowed-packet=1G",
+]
+TRAILER = b"-- Dump completed"
+
+
+def run_log(args):
+    path = args.run_dir / "run.log"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def append_log(args, **entry):
+    args.run_dir.mkdir(parents=True, exist_ok=True)
+    entry = {"time": datetime.now(UTC).isoformat(timespec="seconds"), **entry}
+    with (args.run_dir / "run.log").open("a") as log:
+        log.write(scrub(json.dumps(entry, sort_keys=True)) + "\n")
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _objects(conn):
+    """Everything in the database that a dump creates: {kind: [names]}."""
+    found = {"TABLE": [], "VIEW": [], "PROCEDURE": [], "FUNCTION": [], "EVENT": []}
+    for row in _rows(conn, ["TABLE_NAME", "TABLE_TYPE"], "TABLES", order="TABLE_NAME"):
+        kind = "TABLE" if row["table_type"] == "BASE TABLE" else "VIEW"
+        found[kind].append(row["table_name"])
+    for row in _rows(
+        conn,
+        ["ROUTINE_NAME", "ROUTINE_TYPE"],
+        "ROUTINES",
+        "ROUTINE_SCHEMA = DATABASE()",
+    ):
+        found[row["routine_type"]].append(row["routine_name"])
+    for row in _rows(conn, ["EVENT_NAME"], "EVENTS", "EVENT_SCHEMA = DATABASE()"):
+        found["EVENT"].append(row["event_name"])
+    return found
+
+
+def step_dump(args):
+    src = connect("source")
+    args.record["source"] = src.describe()
+    path = args.run_dir / "dump.sql"
+    if path.exists():
+        raise Refuse(f"{path} already exists; use a new --run-dir for a new dump")
+    version = subprocess.run(
+        [DUMP or "mariadb-dump", "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout
+    if "MariaDB" not in version:
+        raise Refuse(
+            f"only tested with MariaDB's mariadb-dump, found: {version.strip()}"
+        )
+    info = server_info(src)
+    objects = _objects(src)
+    other = [
+        r["table_name"]
+        for r in _rows(src, ["TABLE_NAME", "ENGINE", "TABLE_TYPE"], "TABLES")
+        if r["table_type"] == "BASE TABLE" and r["engine"] != "InnoDB"
+    ]
+    if other and not args.source_is_quiesced:
+        raise Refuse(
+            f"not InnoDB: {', '.join(other)}. A single-transaction dump is only "
+            "consistent for these if nothing is writing; stop the app and pass "
+            "--source-is-quiesced.",
+        )
+    options = list(DUMP_OPTIONS)
+    if objects["PROCEDURE"] or objects["FUNCTION"]:
+        options.append("--routines")
+    if objects["EVENT"]:
+        options.append("--events")
+    command, env = _command(DUMP, src, *options)
+    if args.dry_run:
+        say(f"dry-run: would run: {' '.join(command)} > {path}")
+        say(f"dry-run: {len(objects['TABLE'])} tables; nothing written.")
+        return 0
+
+    args.run_dir.mkdir(parents=True, exist_ok=True)
+    partial = args.run_dir / "dump.sql.partial"
+    digest = hashlib.sha256()
+    size = 0
+    tail = b""
+    # 0600 from creation: this file is the whole database in plain text.
+    with os.fdopen(
+        os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb"
+    ) as out:
+        proc = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env
+        )
+        while chunk := proc.stdout.read(1 << 20):
+            out.write(chunk)
+            digest.update(chunk)
+            size += len(chunk)
+            tail = (tail + chunk)[-200:]
+        out.flush()
+        os.fsync(out.fileno())
+    stderr = proc.stderr.read().decode(errors="replace").strip()
+    # mariadb-dump can die mid-table and still leave a plausible-looking file;
+    # its last line is the only proof it reached the end.
+    if proc.wait() != 0 or TRAILER not in tail:
+        partial.unlink()
+        raise Refuse(
+            f"dump failed or is incomplete: {stderr or 'no completion marker'}"
+        )
+    partial.rename(path)
+    (args.run_dir / "dump.sql.sha256").write_text(f"{digest.hexdigest()}  dump.sql\n")
+    args.record.update(
+        file=str(path),
+        bytes=size,
+        sha256=digest.hexdigest(),
+        tables=len(objects["TABLE"]),
+        database_character_set=info["database_character_set"],
+        database_collation=info["database_collation"],
+        options=options,
+    )
+    say(
+        f"dump: {len(objects['TABLE'])} tables, {size / 1e6:.1f} MB written to {path}\n"
+        f"dump: sha256 {digest.hexdigest()}"
+    )
+    return 0
+
+
+def _recorded_dump(args):
+    dumps = [
+        e
+        for e in run_log(args)
+        if e["step"] == "dump" and e["status"] == "ok" and not e["dry_run"]
+    ]
+    if not dumps:
+        raise Refuse(
+            f"no dump is recorded in {args.run_dir / 'run.log'}; restore only "
+            "loads a dump made by `dump` in the same run directory",
+        )
+    return dumps[-1]
+
+
+def _target_identity(dst):
+    return {k: dst.describe()[k] for k in ("host", "port", "database")}
+
+
+def load_dump(dst, path):
+    """Feed the dump file to the client. Target only, ever."""
+    if dst.role != "target":
+        raise Refuse("refusing to load a dump into the source")
+    command, env = _command(CLIENT, dst, "--max-allowed-packet=1G")
+    with path.open("rb") as handle:
+        return subprocess.run(
+            command, stdin=handle, capture_output=True, env=env, check=False
+        )
+
+
+def step_restore(args):
+    dst = connect("target")
+    args.record["target"] = dst.describe()
+    dump = _recorded_dump(args)
+    path = args.run_dir / "dump.sql"
+    if not path.exists():
+        raise Refuse(f"{path} not found")
+    actual = _sha256(path)
+    if actual != dump["sha256"]:
+        raise Refuse(
+            f"{path} does not match the checksum recorded when it was dumped "
+            f"(recorded {dump['sha256']}, file is {actual}); it was changed, "
+            "truncated or swapped. Dump again.",
+        )
+    if dump["source"]["flavour"] != dst.flavour:
+        raise Refuse(
+            f"the dump is from {dump['source']['flavour']} {dump['source']['version']} "
+            f"but the target is {dst.flavour} {dst.version}; not supported",
+        )
+    existing = [name for names in _objects(dst).values() for name in names]
+    if existing and not args.allow_non_empty_target:
+        raise Refuse(
+            f"target is not empty ({len(existing)} object(s): "
+            f"{', '.join(existing[:10])}). If this is a failed restore from this "
+            "run, clean up with `reset-target`; otherwise check MIG_TARGET_*.",
+        )
+    info = server_info(dst)
+    align = ""
+    if info["database_collation"] != dump["database_collation"]:
+        # Tables in the dump carry their own collation; this is for tables the
+        # app's future migrations create, which take the database default.
+        align = (
+            f"ALTER DATABASE {q(dst.database)} CHARACTER SET "
+            f"{dump['database_character_set']} COLLATE {dump['database_collation']}"
+        )
+    if args.dry_run:
+        say(
+            f"dry-run: dump checksum matches; would load {dump['bytes'] / 1e6:.1f} MB "
+            f"({dump['tables']} tables) into {dst.database} on {dst.host}"
+            + (f" after: {align}" if align else "")
+            + "; nothing written."
+        )
+        return 0
+    # Written before the first change, so an interrupted restore leaves a
+    # record that this run is what touched the target (reset-target needs it).
+    append_log(
+        args,
+        step="restore",
+        status="started",
+        dry_run=False,
+        target=dst.describe(),
+        target_was_empty=not existing,
+        sha256=actual,
+    )
+    if align:
+        query(dst, align, writable=True)
+    result = load_dump(dst, path)
+    loaded = len(_objects(dst)["TABLE"])
+    args.record.update(sha256=actual, bytes=dump["bytes"], tables=loaded)
+    if result.returncode != 0 or loaded < dump["tables"]:
+        say(
+            "restore FAILED: "
+            + (result.stderr.decode(errors="replace").strip() or "tables are missing")
+            + f"\nThe target now holds a partial copy ({loaded} of {dump['tables']} "
+            "tables). Nothing on the source was changed. Run `reset-target`, "
+            "then `restore` again."
+        )
+        return 1
+    say(
+        f"restore: loaded {loaded} tables into {dst.database} on {dst.host}. Now run verify."
+    )
+    return 0
+
+
+def step_reset_target(args):
+    dst = connect("target")
+    args.record["target"] = dst.describe()
+    me = _target_identity(dst)
+    if args.confirm_database != dst.database:
+        raise Refuse(
+            "reset-target drops every table in the target database. Confirm "
+            f"with --confirm-database {dst.database}",
+        )
+    source = {k: os.environ.get(f"MIG_SOURCE_{k.upper()}", "") for k in me}
+    if me == {**source, "port": source["port"] or "default"}:
+        raise Refuse("MIG_TARGET_* points at the source database")
+    started = [
+        e
+        for e in run_log(args)
+        if e["step"] == "restore"
+        and e["status"] == "started"
+        and {k: e["target"][k] for k in me} == me
+    ]
+    # The guard against emptying the wrong database: only one that this run
+    # found empty and then started loading can be reset.
+    if not started:
+        raise Refuse(
+            f"{args.run_dir / 'run.log'} records no restore into {dst.database} "
+            f"on {dst.host}; reset-target only empties a database this run loaded",
+        )
+    if not all(e["target_was_empty"] for e in started):
+        raise Refuse(
+            "the target was not empty before this run restored into it, so "
+            "reset-target cannot tell the copy from what was there. Clean up by hand.",
+        )
+    objects = _objects(dst)
+    count = sum(len(names) for names in objects.values())
+    if args.dry_run:
+        say(
+            f"dry-run: would drop {count} object(s) from {dst.database} on "
+            f"{dst.host} ({len(objects['TABLE'])} tables); nothing changed."
+        )
+        return 0
+    drops = ["SET FOREIGN_KEY_CHECKS = 0"]
+    for kind in ("VIEW", "TABLE", "PROCEDURE", "FUNCTION", "EVENT"):
+        drops += [f"DROP {kind} {q(name)}" for name in objects[kind]]
+    query(dst, ";".join(drops), writable=True)
+    left = sum(len(names) for names in _objects(dst).values())
+    args.record.update(dropped=count, remaining=left)
+    say(f"reset-target: dropped {count} object(s) from {dst.database}; {left} remain.")
+    return 1 if left else 0
+
+
 # ── verify ───────────────────────────────────────────────────────────────────
 
 
@@ -1005,7 +1312,17 @@ def main(argv=None):
         help="fail unless the source has no other sessions and no writes",
     )
     preflight.add_argument("--quiesce-seconds", type=int, default=5)
+    dump = step("dump", step_dump, "dump the source to <run-dir>/dump.sql")
+    dump.add_argument(
+        "--source-is-quiesced",
+        action="store_true",
+        help="accept non-InnoDB tables: the operator asserts nothing is writing",
+    )
+    restore = step("restore", step_restore, "load the dump into the empty target")
+    restore.add_argument("--allow-non-empty-target", action="store_true")
     step("verify", step_verify, "prove source and target are identical")
+    reset = step("reset-target", step_reset_target, "empty a target this run loaded")
+    reset.add_argument("--confirm-database", default="", metavar="NAME")
 
     args = parser.parse_args(argv)
     args.record = {}
@@ -1018,18 +1335,15 @@ def main(argv=None):
         args.record["message"] = str(error)
         sys.stderr.write(scrub(f"REFUSED: {error}\n"))
     finally:
-        entry = {
-            "time": datetime.now(UTC).isoformat(timespec="seconds"),
-            "step": args.step,
-            "dry_run": args.dry_run,
-            "status": status,
-            "exit_code": code,
-            "duration_seconds": round(time.monotonic() - started, 2),
+        append_log(
+            args,
+            step=args.step,
+            dry_run=args.dry_run,
+            status=status,
+            exit_code=code,
+            duration_seconds=round(time.monotonic() - started, 2),
             **args.record,
-        }
-        args.run_dir.mkdir(parents=True, exist_ok=True)
-        with (args.run_dir / "run.log").open("a") as log:
-            log.write(scrub(json.dumps(entry, sort_keys=True)) + "\n")
+        )
     return code
 
 
