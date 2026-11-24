@@ -73,30 +73,11 @@ sent. The ``answers`` column of ``survey_responses.csv`` is a JSON list.
    surveys["answers"] = surveys["answers"].map(json.loads)
    messages = utterances.merge(conversations, on="conversation_id", suffixes=("", "_c"))
 
-Formula escaping
-~~~~~~~~~~~~~~~~
-
-Spreadsheet programs run a cell that starts with ``=`` as a formula, and the
-cells here are typed by participants. So every export (each table's Export
-button in any format, and the study zip) removes one ``=`` from the start of
-any cell that begins with one:
-
-- a message typed as ``=)`` is exported as ``)``, and ``=SUM(A1)`` as
-  ``SUM(A1)``
-- only the first character is removed, so ``==1+1`` is exported as ``=1+1``
-- a ``=`` anywhere else in the cell is left alone
-- the same happens to IDs, study names and conditions that start with ``=``;
-  it happens in every file alike, so the files still join on them
-
-In Python or R you will therefore see these cells **without** their leading
-``=``. Nothing is added in its place, and the export cannot tell you which
-cells were changed. If the exact first character matters to your analysis,
-read the text from the database (or the row's page in the admin), where it is
-stored as typed.
-
-Cells that start with ``+``, ``-`` or ``@`` are **not** changed, and some
-spreadsheet programs treat those as formulas too. Prefer R or pandas for
-analysis, and be careful when opening participant text in Excel.
+Cells are exported exactly as participants typed them. A spreadsheet program
+that opens one of these CSV files can run a cell starting with ``=``, ``+``,
+``-`` or ``@`` as a formula, and participants type the cells. Until the
+exports escape such cells (planned as a separate change), analyse in R or
+pandas and do not open participant text in Excel.
 
 A very large study is built in memory before it downloads. If a download
 times out, narrow it with the date range and download it in parts, or use the
