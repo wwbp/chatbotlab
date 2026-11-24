@@ -202,6 +202,70 @@ curl $(terraform output -raw backend_api_url)/health/
 
 ---
 
+## Running Terraform from GitHub Actions
+
+`.github/workflows/deploy-infrastructure.yml` is the way to change a shared
+environment. It has two jobs.
+
+| Job | Starts when | What it does |
+|---|---|---|
+| `plan` | A pull request touches `infra/terraform/**` | Prints `terraform plan` for staging and for production. Read-only. Skips with a notice if its role is not configured |
+| `apply` | A person runs the workflow by hand and picks an environment | Runs in the GitHub Environment of that name. `action = plan` (the default) prints the real plan and stops. `action = apply` prints the plan, then applies exactly that plan |
+
+A failed apply leaves everything in place. The workflow never destroys.
+
+### Settings
+
+- **Non-secret settings** are in `environments/staging.tfvars` and
+  `environments/production.tfvars` (instance sizes, `domain_name`). Change them
+  in a pull request: the `plan` job shows the effect.
+- **Secrets** are GitHub secrets. Their names are listed at the top of the
+  workflow file.
+
+### One-time setup
+
+Do these steps in order. Steps 1 to 3 are in AWS, steps 4 to 6 in GitHub.
+
+1. **GitHub OIDC provider.** The AWS account needs the identity provider
+   `token.actions.githubusercontent.com` (audience `sts.amazonaws.com`). Check
+   with `aws iam list-open-id-connect-providers`. If it exists, set the
+   repository secret `CREATE_GITHUB_OIDC_PROVIDER` to `false`.
+2. **Plan role** (read-only). Trust: the OIDC provider, audience
+   `sts.amazonaws.com`, subject `repo:<org>/<repo>:pull_request`. Permissions:
+   the AWS managed policy `ReadOnlyAccess`. This role runs code from pull
+   requests and can read the Terraform state, which holds the database
+   password. Give it no write permission.
+3. **Apply role**, one per environment if you can. Trust: the OIDC provider,
+   audience `sts.amazonaws.com`, subject
+   `repo:<org>/<repo>:environment:staging` (or `:environment:production`), so
+   only a run approved for that GitHub Environment can assume it. Permissions:
+   create, change and delete the resource types in this directory (VPC, EC2
+   security groups, RDS, ElastiCache, Elastic Beanstalk and what it drives,
+   S3, CloudFront, ACM, IAM roles and policies), plus read and write on the
+   state bucket, including `s3:DeleteObject` for the lock file
+   `<prefix>/<environment>/terraform.tfstate.tflock`. In practice this is
+   close to administrator access for one account.
+4. **GitHub Environments** `staging` and `production` (Settings →
+   Environments). On `production`, add **Required reviewers** and limit
+   **Deployment branches** to `main` and `staging`. Without required
+   reviewers, anyone who can run workflows can apply to production.
+5. **Environment secrets**, in each Environment: `TF_APPLY_ROLE_ARN`,
+   `DB_PASSWORD`, `ADMIN_PANEL_PASSWORD`, and `OPENAI_API_KEY` and/or
+   `ANTHROPIC_API_KEY`. Optional: `SURVEY_INGEST_TOKEN`.
+6. **Repository secrets**: `TF_PROJECT_PREFIX`, `TF_PLAN_ROLE_ARN`,
+   `CREATE_GITHUB_OIDC_PROVIDER`. `GH_PAT` only if you use
+   `write_deploy_secrets`.
+
+Then run the workflow: environment `staging`, action `apply`. The first apply
+creates the state bucket.
+
+### What a pull-request plan cannot show
+
+The `plan` job is given placeholders in place of the real passwords and keys,
+because it runs code from the pull request. Its plan always shows the database
+password and the secret application settings as changed. For the exact plan,
+run the workflow by hand with `action = plan`.
+
 ## Offline checks
 
 `terraform test` checks the plan against a mocked AWS provider, so it needs no

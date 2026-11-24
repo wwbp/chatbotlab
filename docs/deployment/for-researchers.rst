@@ -1,6 +1,13 @@
 Deplopyment Guide for Researchers
 =================================
 
+.. warning::
+   This guide is out of date. It describes the Deploy Infrastructure workflow
+   before it changed. The workflow no longer uses an IAM user with access keys
+   or the ``DOMAIN_NAME`` secret, and it does not start the first application
+   deploy. Until this guide is rewritten, use the section "Running Terraform
+   from GitHub Actions" in ``infra/terraform/README.md``.
+
 This guide walks you through deploying ChatbotLab to AWS so your participants can access the chatbot from any browser. No programming experience is required. The entire process takes about 30 minutes of your time (plus ~20 minutes of automated setup), and you only have to do it once.
 
 **What you get:** a private, fully functional chatbot system at a URL you can share with study participants, with an admin panel where you configure the chatbot's personality, system prompt, and behavior.

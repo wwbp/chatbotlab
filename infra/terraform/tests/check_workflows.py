@@ -201,12 +201,22 @@ for prod, old in ALLOWED_FALLBACKS:
 shared = {name for name in aws_secrets(without_fallbacks) if "PROD" not in name}
 check(not shared, f"production.yml reads secrets that staging.yml owns: {sorted(shared)}")
 
-# The run must belong to the chosen GitHub Environment, so that
-# environment's protection rules (reviewers, branches) apply to it.
-deploy_job = block(deploy, r"deploy:")
+# The job that writes the secrets must belong to the chosen GitHub Environment,
+# so that environment's protection rules (reviewers, branches) apply to it,
+# and must take ENVIRONMENT from the input and nowhere else.
+secrets_job = next(
+    (j for j in re.split(r"\n(?=  [\w-]+:\n)", "\n" + deploy.split("\njobs:\n", 1)[-1])
+     if "name: Write deployment secrets" in j),
+    "",
+)
 check(
-    re.search(r"\n    environment: \$\{\{ inputs\.environment \}\}\n", deploy_job),
-    "deploy-infrastructure.yml: the deploy job needs 'environment: ${{ inputs.environment }}'",
+    re.search(r"\n    environment: \$\{\{ inputs\.environment \}\}\n", secrets_job),
+    "deploy-infrastructure.yml: the job that writes deploy secrets needs 'environment: ${{ inputs.environment }}'",
+)
+env_values = re.findall(r"\n\s+ENVIRONMENT:\s*(.+)", secrets_job)
+check(
+    env_values and all(v.strip() == "${{ inputs.environment }}" for v in env_values),
+    f"deploy-infrastructure.yml: ENVIRONMENT must come from inputs.environment, got {env_values}",
 )
 
 # A missing secret must stop the run before it touches AWS.
@@ -246,12 +256,12 @@ step = re.search(r"- name: Write deployment secrets\n(?:        .*\n|\n)+", depl
 check(step, "deploy-infrastructure.yml: 'Write deployment secrets' step not found")
 step = step.group(0) if step else ""
 check(
-    re.search(r"\n        if: (inputs\.write_deploy_secrets|\$\{\{ *inputs\.write_deploy_secrets *\}\}) *\n", step),
-    "deploy-infrastructure.yml: the secrets step's if: must be exactly inputs.write_deploy_secrets",
-)
-check(
-    "\n          ENVIRONMENT: ${{ inputs.environment }}\n" in step,
-    "deploy-infrastructure.yml: the secrets step must take ENVIRONMENT from inputs.environment",
+    re.search(
+        r"\n        if: (\$\{\{ *)?(inputs\.action == 'apply' && )?inputs\.write_deploy_secrets( *\}\})? *\n",
+        step,
+    ),
+    "deploy-infrastructure.yml: the secrets step's if: must be exactly "
+    "[inputs.action == 'apply' && ]inputs.write_deploy_secrets",
 )
 check(
     len(re.findall(r"\bset_secret\s+AWS_", deploy)) == len(re.findall(r"\bset_secret\s+AWS_", step)),
@@ -412,7 +422,7 @@ check(
     "deploy-infrastructure.yml: needs an 'action' input that defaults to plan",
 )
 for step in steps_of(apply_job):
-    if re.search(r"terraform\s+apply|gh secret set|set_secret ", step):
+    if re.search(r"terraform\s+apply|gh secret set (?!__PREFLIGHT_TEST__)|set_secret ", step):
         title = step.splitlines()[0]
         check(
             re.search(r"\n        if: [^\n]*inputs\.action == 'apply'", step),

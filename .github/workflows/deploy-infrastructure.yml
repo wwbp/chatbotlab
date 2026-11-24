@@ -16,38 +16,59 @@ name: Deploy Infrastructure
 # │  which does not overlap with any of the above. Running this workflow    │
 # │  therefore does not manage or migrate the live deployment — it builds   │
 # │  a SECOND one, and you pay for both.                                    │
-# │                                                                          │
-# │  To test the IaC safely, set TF_PROJECT_PREFIX to something distinct    │
-# │  (e.g. "chatbotlab-iac-test"), ideally in a separate AWS account, then  │
-# │  tear it down with the Destroy Infrastructure workflow. Do NOT reuse    │
-# │  the prefix of the live deployment.                                     │
 # └─────────────────────────────────────────────────────────────────────────┘
 #
-# Run this workflow once to provision all AWS infrastructure.
-# Re-run it whenever you want to change instance sizes or add a custom domain.
+# Two jobs:
 #
-# Required secrets (set in Settings → Secrets and variables → Actions):
-#   AWS_ACCESS_KEY_ID        — IAM user access key (can be deleted after first run)
-#   AWS_SECRET_ACCESS_KEY    — IAM user secret key
-#   OPENAI_API_KEY           — OpenAI key (or ANTHROPIC_API_KEY, or both)
-#   ANTHROPIC_API_KEY        — Anthropic key (optional if OPENAI_API_KEY is set)
-#   DB_PASSWORD              — Password you choose for the database (letters + numbers only)
-#   ADMIN_PANEL_PASSWORD     — Password you will use to log into the admin panel
-#   GH_PAT                   — GitHub personal access token with secrets:write on this repo.
-#                              Needed only when write_deploy_secrets is ticked.
-#   TF_PROJECT_PREFIX        — Name prefix for every AWS resource (must match
-#                              var.project_name in infra/terraform). Kept in a
-#                              secret so this public repo does not publish the
-#                              names of live AWS resources. No default: a wrong
-#                              value would point Terraform at the wrong state.
-#   DOMAIN_NAME              — Optional: your custom domain (e.g. chatbot.mylab.org)
+#   plan   Runs on every pull request that touches infra/terraform/**, once
+#          for staging and once for production. Read-only: it assumes a role
+#          that cannot change AWS, takes no state lock, and is given no real
+#          application secrets. It skips with a notice when the role is not
+#          configured (and on pull requests from forks, which get no secrets).
 #
-# Optional workflow inputs (shown as a form when you click "Run workflow"):
-#   eb_instance_type         — EC2 instance type (default: t3.small)
-#   eb_max_instances         — Max number of app servers under load (default: 1)
-#   db_instance_class        — Database instance class (default: db.t3.micro)
+#   apply  Runs only when a person starts the workflow by hand. It runs in the
+#          GitHub Environment named by the `environment` input, so required
+#          reviewers on that Environment must approve before anything starts.
+#          `action` defaults to "plan": the run prints the real plan and stops.
+#          Choose "apply" to print the plan and then apply exactly that plan.
+#
+# A failed apply leaves everything in place. Nothing here destroys or deletes.
+#
+# AWS access is by GitHub OIDC only (short-lived credentials, no stored keys).
+#
+# Settings
+#   infra/terraform/environments/<environment>.tfvars
+#       Non-secret settings: instance sizes, custom domain. In git, so a
+#       change to them is reviewed and planned like any other change.
+#
+#   Repository secrets (Settings → Secrets and variables → Actions)
+#     TF_PROJECT_PREFIX     Name prefix for every AWS resource (var.project_name).
+#                           No default: a wrong value points Terraform at the
+#                           wrong state.
+#     TF_PLAN_ROLE_ARN      Read-only IAM role the plan job assumes.
+#     CREATE_GITHUB_OIDC_PROVIDER
+#                           "false" when the account already has the GitHub
+#                           OIDC provider — it must have one for this workflow
+#                           to sign in, so set "false" unless this stack's
+#                           state already owns the provider.
+#     GH_PAT                Token that can write repository secrets. Needed
+#                           only when write_deploy_secrets is ticked.
+#
+#   Environment secrets (Settings → Environments → staging / production)
+#     TF_APPLY_ROLE_ARN     IAM role the apply job assumes.
+#     DB_PASSWORD           Database password (letters + numbers only).
+#     ADMIN_PANEL_PASSWORD  Password of the `admin` user in the admin panel.
+#     OPENAI_API_KEY        OpenAI key (or ANTHROPIC_API_KEY, or both).
+#     ANTHROPIC_API_KEY
+#     SURVEY_INGEST_TOKEN   Optional.
+#   These may also be repository secrets, but then staging and production
+#   share them and are not protected by the Environment's reviewers.
 
 on:
+  pull_request:
+    paths:
+      - 'infra/terraform/**'
+      - '.github/workflows/deploy-infrastructure.yml'
   workflow_dispatch:
     inputs:
       # No default on purpose: the person starting the run chooses. Each
@@ -60,43 +81,177 @@ on:
         options:
           - staging
           - production
+      # Plan unless told otherwise, so a run started without thought changes
+      # nothing.
+      action:
+        description: 'plan = print what would change and stop; apply = print it, then do it'
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - apply
       # Off unless asked. The deploy secrets decide where staging.yml and
       # production.yml send the application, so writing them is a cutover step,
       # not part of building infrastructure.
       write_deploy_secrets:
-        description: "Also point this environment's app deploy workflow at this stack (writes GitHub secrets)"
+        description: "With apply: also point this environment's app deploy workflow at this stack (writes GitHub secrets)"
         required: false
         default: false
         type: boolean
-      eb_instance_type:
-        description: 'App server EC2 instance type (e.g. t3.small, t3.medium)'
-        required: false
-        default: 't3.small'
-        type: string
-      eb_max_instances:
-        description: 'Maximum number of app server instances'
-        required: false
-        default: '1'
-        type: string
-      db_instance_class:
-        description: 'Database instance class (e.g. db.t3.micro, db.t3.small)'
-        required: false
-        default: 'db.t3.micro'
-        type: string
 
-permissions:
-  id-token: write
-  contents: read
+# Nothing by default. Each job asks for what it needs: an OIDC token to sign
+# in to AWS and read access to check out the code.
+permissions: {}
 
 jobs:
-  deploy:
-    name: Deploy AWS infrastructure
+  # ════════════════════════════════════════════════════════════════════════════
+  # plan — pull requests only, read-only
+  # ════════════════════════════════════════════════════════════════════════════
+  plan:
+    name: Plan (${{ matrix.environment }})
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # The GitHub Environment of the same name: its protection rules
-    # (reviewers, deployment branches) apply to this run.
-    environment: ${{ inputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [staging, production]
     env:
-      DOMAIN_NAME: ${{ secrets.DOMAIN_NAME }}
+      ENVIRONMENT:                        ${{ matrix.environment }}
+      TF_VAR_project_name:                ${{ secrets.TF_PROJECT_PREFIX }}
+      TF_VAR_environment:                 ${{ matrix.environment }}
+      TF_VAR_github_org:                  ${{ github.repository_owner }}
+      TF_VAR_github_repo:                 ${{ github.event.repository.name }}
+      TF_VAR_github_org_id:               ${{ github.repository_owner_id }}
+      TF_VAR_github_repo_id:              ${{ github.repository_id }}
+      TF_VAR_create_github_oidc_provider: ${{ secrets.CREATE_GITHUB_OIDC_PROVIDER || 'true' }}
+      # This job runs the pull request's own code, so it is given no real
+      # application secrets. The plan therefore always shows the database
+      # password and the secret application settings as changed. Ignore those
+      # lines; the plan printed by a manual run (action = plan) has the real
+      # values.
+      TF_VAR_db_password:                 placeholder-not-the-real-password
+      TF_VAR_admin_panel_password:        placeholder-not-the-real-password
+
+    steps:
+      # Skip, do not fail, when the plan role is not set up yet. Pull requests
+      # from forks land here too: GitHub gives them no secrets.
+      - name: Check that the plan role is configured
+        id: config
+        env:
+          TF_PLAN_ROLE_ARN:  ${{ secrets.TF_PLAN_ROLE_ARN }}
+          TF_PROJECT_PREFIX: ${{ secrets.TF_PROJECT_PREFIX }}
+        run: |
+          if [[ -z "$TF_PLAN_ROLE_ARN" || -z "$TF_PROJECT_PREFIX" ]]; then
+            echo "::notice::Terraform plan skipped: the TF_PLAN_ROLE_ARN and TF_PROJECT_PREFIX repository secrets are not both set (or this pull request comes from a fork). See infra/terraform/README.md, 'Running Terraform from GitHub Actions'."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.config.outputs.configured == 'true'
+        uses: actions/checkout@v7
+
+      - name: Setup Terraform
+        if: steps.config.outputs.configured == 'true'
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: '~1.11'
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials (read-only role, OIDC)
+        if: steps.config.outputs.configured == 'true'
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.TF_PLAN_ROLE_ARN }}
+          aws-region: us-east-1
+
+      # An environment that was never built has no state to compare with.
+      - name: Locate Terraform state
+        id: state
+        if: steps.config.outputs.configured == 'true'
+        env:
+          TF_PROJECT_PREFIX: ${{ secrets.TF_PROJECT_PREFIX }}
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET="${TF_PROJECT_PREFIX}-tfstate-${ACCOUNT_ID}"
+          if aws s3api head-object --bucket "$BUCKET" --key "${TF_PROJECT_PREFIX}/${ENVIRONMENT}/terraform.tfstate" >/dev/null 2>&1; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Terraform plan skipped for ${ENVIRONMENT}: no state file yet (the environment has not been built, or the plan role cannot read the state bucket)."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Initialise Terraform
+        if: steps.state.outputs.found == 'true'
+        working-directory: infra/terraform
+        env:
+          TF_PROJECT_PREFIX: ${{ secrets.TF_PROJECT_PREFIX }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ steps.state.outputs.bucket }}" \
+            -backend-config="key=${TF_PROJECT_PREFIX}/${ENVIRONMENT}/terraform.tfstate" \
+            -backend-config="region=us-east-1" \
+            -backend-config="encrypt=true" \
+            -reconfigure \
+            -input=false
+
+      # -lock=false: this plan is never applied, and taking the lock would
+      # mean giving a role that runs pull-request code write access to the
+      # state bucket. The apply job plans again, under the lock.
+      - name: Plan
+        if: steps.state.outputs.found == 'true'
+        working-directory: infra/terraform
+        run: |
+          set -o pipefail
+          terraform plan -lock=false -input=false -no-color -var-file="environments/${ENVIRONMENT}.tfvars" | tee plan.txt
+          {
+            echo "## Terraform plan: ${ENVIRONMENT}"
+            echo ""
+            echo "\`$(grep -E '^(Plan:|No changes\.)' plan.txt | head -1)\`"
+            echo ""
+            echo "The full plan is in this job's log, step **Plan**."
+            echo ""
+            echo "The database password and the secret application settings always show as changed here: this job is given placeholders, not the real secrets."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # apply — started by hand, approved through the GitHub Environment
+  # ════════════════════════════════════════════════════════════════════════════
+  apply:
+    name: ${{ inputs.action }} (${{ inputs.environment }})
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # Required reviewers set on this Environment must approve the run before
+    # it starts, and its secrets are available only to an approved run.
+    environment: ${{ inputs.environment }}
+    # One run per environment at a time; a second waits. The state lock would
+    # stop it anyway, but as a failed run rather than a queued one.
+    concurrency:
+      group: terraform-${{ inputs.environment }}
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      ENVIRONMENT:                        ${{ inputs.environment }}
+      TF_VAR_project_name:                ${{ secrets.TF_PROJECT_PREFIX }}
+      TF_VAR_environment:                 ${{ inputs.environment }}
+      TF_VAR_github_org:                  ${{ github.repository_owner }}
+      TF_VAR_github_repo:                 ${{ github.event.repository.name }}
+      TF_VAR_github_org_id:               ${{ github.repository_owner_id }}
+      TF_VAR_github_repo_id:              ${{ github.repository_id }}
+      TF_VAR_openai_api_key:              ${{ secrets.OPENAI_API_KEY }}
+      TF_VAR_anthropic_api_key:           ${{ secrets.ANTHROPIC_API_KEY }}
+      TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}
+      TF_VAR_admin_panel_password:        ${{ secrets.ADMIN_PANEL_PASSWORD }}
+      TF_VAR_survey_ingest_token:         ${{ secrets.SURVEY_INGEST_TOKEN }}
+      TF_VAR_create_github_oidc_provider: ${{ secrets.CREATE_GITHUB_OIDC_PROVIDER || 'true' }}
 
     steps:
       # ── 1. Fail fast before touching AWS if anything is missing ───────────────
@@ -106,29 +261,42 @@ jobs:
           ANTHROPIC_KEY:        ${{ secrets.ANTHROPIC_API_KEY }}
           DB_PASSWORD:          ${{ secrets.DB_PASSWORD }}
           ADMIN_PANEL_PASSWORD: ${{ secrets.ADMIN_PANEL_PASSWORD }}
-          AWS_KEY:              ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET:           ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          TF_APPLY_ROLE_ARN:    ${{ secrets.TF_APPLY_ROLE_ARN }}
           GH_PAT:               ${{ secrets.GH_PAT }}
           TF_PROJECT_PREFIX:    ${{ secrets.TF_PROJECT_PREFIX }}
-          ENVIRONMENT:          ${{ inputs.environment }}
+          OLD_DOMAIN_NAME:      ${{ secrets.DOMAIN_NAME }}
+          ACTION:               ${{ inputs.action }}
           WRITE_DEPLOY_SECRETS: ${{ inputs.write_deploy_secrets }}
         run: |
           fail=0
           missing() { echo "::error::$1 secret is not set"; fail=1; }
 
-          [[ -z "$AWS_KEY" ]]             && missing "AWS_ACCESS_KEY_ID"
-          [[ -z "$AWS_SECRET" ]]          && missing "AWS_SECRET_ACCESS_KEY"
-          [[ -z "$DB_PASSWORD" ]]         && missing "DB_PASSWORD"
+          [[ -z "$TF_APPLY_ROLE_ARN" ]]    && missing "TF_APPLY_ROLE_ARN"
+          [[ -z "$DB_PASSWORD" ]]          && missing "DB_PASSWORD"
           [[ -z "$ADMIN_PANEL_PASSWORD" ]] && missing "ADMIN_PANEL_PASSWORD"
-          [[ "$WRITE_DEPLOY_SECRETS" == "true" && -z "$GH_PAT" ]] && missing "GH_PAT"
-          [[ -z "$TF_PROJECT_PREFIX" ]]   && missing "TF_PROJECT_PREFIX"
+          [[ -z "$TF_PROJECT_PREFIX" ]]    && missing "TF_PROJECT_PREFIX"
 
           if [[ -z "$OPENAI_KEY" && -z "$ANTHROPIC_KEY" ]]; then
             echo "::error::At least one of OPENAI_API_KEY or ANTHROPIC_API_KEY must be set"
             fail=1
           fi
 
-          [[ $fail -eq 1 ]] && exit 1
+          # The custom domain used to come from the DOMAIN_NAME secret. It is
+          # now domain_name in environments/<environment>.tfvars. Carrying on
+          # with the secret still set would plan to remove the domain from a
+          # stack that has one.
+          if [[ -n "$OLD_DOMAIN_NAME" ]]; then
+            echo "::error::The DOMAIN_NAME secret is no longer read. Put the domain in infra/terraform/environments/${ENVIRONMENT}.tfvars (domain_name = \"…\"), merge that, then delete the DOMAIN_NAME secret."
+            fail=1
+          fi
+
+          if [[ "$WRITE_DEPLOY_SECRETS" == "true" && "$ACTION" != "apply" ]]; then
+            echo "::error::write_deploy_secrets needs action = apply."
+            fail=1
+          fi
+          [[ "$WRITE_DEPLOY_SECRETS" == "true" && -z "$GH_PAT" ]] && missing "GH_PAT"
+
+          if [[ $fail -eq 1 ]]; then exit 1; fi
 
           if [[ "$WRITE_DEPLOY_SECRETS" == "true" ]]; then
             # Validate GH_PAT has write access before touching AWS.
@@ -171,38 +339,31 @@ jobs:
           terraform_version: '~1.11'
           terraform_wrapper: false
 
-      # ── 4. AWS credentials (long-lived IAM user key for this bootstrap step) ──
+      # ── 4. AWS credentials (short-lived, GitHub OIDC) ─────────────────────────
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.TF_APPLY_ROLE_ARN }}
           aws-region: us-east-1
 
-      # ── 5. Create the S3 state bucket (idempotent) ───────────────────────────
+      # ── 5. Find the S3 state bucket; create it on a first apply ──────────────
       # Deterministic name: "<TF_PROJECT_PREFIX>-tfstate-<ACCOUNT_ID>" — no random
-      # suffix. Safe to run on every deploy. The prefix comes from a secret so the
-      # repository does not publish the names of live AWS resources.
+      # suffix. The prefix comes from a secret so the repository does not
+      # publish the names of live AWS resources.
       - name: Bootstrap Terraform state backend
         id: bootstrap
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
           TF_PROJECT_PREFIX: ${{ secrets.TF_PROJECT_PREFIX }}
+          ACTION: ${{ inputs.action }}
         run: |
-          # Required, with no fallback on purpose. Guessing this value (e.g.
-          # from the repo name) would point Terraform at a state bucket that
-          # does not exist, and reconciling against empty state can duplicate
-          # or destroy live infrastructure. Fail closed instead.
-          if [ -z "$TF_PROJECT_PREFIX" ]; then
-            echo "::error::TF_PROJECT_PREFIX is not set. Add it under Settings → Secrets and variables → Actions. It must match var.project_name in infra/terraform (the prefix on your existing AWS resources)."
-            exit 1
-          fi
-
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           BUCKET="${TF_PROJECT_PREFIX}-tfstate-${ACCOUNT_ID}"
 
           if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
             echo "State bucket already exists: $BUCKET"
+          elif [[ "$ACTION" != "apply" ]]; then
+            echo "::error::The state bucket does not exist yet. A plan creates nothing; run with action = apply to build the first environment."
+            exit 1
           else
             aws s3api create-bucket --bucket "$BUCKET" --region us-east-1
             aws s3api put-bucket-versioning --bucket "$BUCKET" \
@@ -233,8 +394,6 @@ jobs:
       # backend block in main.tf, so it cannot be left off here.
       - name: Initialise Terraform
         working-directory: infra/terraform
-        env:
-          ENVIRONMENT: ${{ inputs.environment }}
         run: |
           terraform init \
             -backend-config="bucket=${{ steps.bootstrap.outputs.bucket }}" \
@@ -244,38 +403,25 @@ jobs:
             -reconfigure \
             -input=false
 
-      # ── 8. Custom domain: create the ACM cert first so we can print the     ───
+      # ── 7. Custom domain: create the ACM cert first so we can print the     ───
       #       DNS validation record before the full apply waits for it          ───
-      - name: Create ACM certificate
-        if: env.DOMAIN_NAME != ''
+      - name: Read the custom domain from the environment's settings
+        id: domain
         working-directory: infra/terraform
-        env:
-          TF_VAR_project_name:                ${{ secrets.TF_PROJECT_PREFIX }}
-          TF_VAR_environment:                 ${{ inputs.environment }}
-          TF_VAR_github_org:                  ${{ github.repository_owner }}
-          TF_VAR_github_repo:                 ${{ github.event.repository.name }}
-          TF_VAR_github_org_id:               ${{ github.repository_owner_id }}
-          TF_VAR_github_repo_id:              ${{ github.repository_id }}
-          TF_VAR_openai_api_key:              ${{ secrets.OPENAI_API_KEY }}
-          TF_VAR_anthropic_api_key:           ${{ secrets.ANTHROPIC_API_KEY }}
-          TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}
-          TF_VAR_admin_panel_password:        ${{ secrets.ADMIN_PANEL_PASSWORD }}
-          TF_VAR_survey_ingest_token:         ${{ secrets.SURVEY_INGEST_TOKEN }}
-          TF_VAR_eb_instance_type:            ${{ inputs.eb_instance_type }}
-          TF_VAR_eb_max_instances:            ${{ inputs.eb_max_instances }}
-          TF_VAR_db_instance_class:           ${{ inputs.db_instance_class }}
-          TF_VAR_domain_name:                 ${{ secrets.DOMAIN_NAME }}
-          TF_VAR_create_github_oidc_provider: ${{ secrets.CREATE_GITHUB_OIDC_PROVIDER || 'true' }}
         run: |
-          terraform apply \
-            -target='aws_acm_certificate.custom_domain[0]' \
-            -auto-approve \
-            -input=false
+          DOMAIN=$(sed -n 's/^[[:space:]]*domain_name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "environments/${ENVIRONMENT}.tfvars")
+          echo "name=$DOMAIN" >> "$GITHUB_OUTPUT"
 
-      # ── 9. Print the DNS validation record to the summary so the researcher ───
-      #       can add it while the rest of the infrastructure is building       ───
+      - name: Create ACM certificate
+        if: inputs.action == 'apply' && steps.domain.outputs.name != ''
+        working-directory: infra/terraform
+        run: |
+          terraform apply -target='aws_acm_certificate.custom_domain[0]' -auto-approve -input=false -var-file="environments/${ENVIRONMENT}.tfvars"
+
+      # ── 8. Print the DNS validation record to the summary so it can be     ───
+      #       added while the rest of the infrastructure is building            ───
       - name: Print DNS validation record
-        if: env.DOMAIN_NAME != ''
+        if: inputs.action == 'apply' && steps.domain.outputs.name != ''
         working-directory: infra/terraform
         run: |
           CNAME_NAME=$(terraform output -raw acm_validation_cname_name)
@@ -294,40 +440,37 @@ jobs:
             echo "> If it times out before you add the record, just re-run this workflow."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # ── 9. Apply all infrastructure ───────────────────────────────────────────
-      - name: Apply infrastructure
+      # ── 9. Plan — always, under the state lock ────────────────────────────────
+      - name: Plan
         working-directory: infra/terraform
-        env:
-          TF_VAR_project_name:                ${{ secrets.TF_PROJECT_PREFIX }}
-          TF_VAR_environment:                 ${{ inputs.environment }}
-          TF_VAR_github_org:                  ${{ github.repository_owner }}
-          TF_VAR_github_repo:                 ${{ github.event.repository.name }}
-          TF_VAR_github_org_id:               ${{ github.repository_owner_id }}
-          TF_VAR_github_repo_id:              ${{ github.repository_id }}
-          TF_VAR_openai_api_key:              ${{ secrets.OPENAI_API_KEY }}
-          TF_VAR_anthropic_api_key:           ${{ secrets.ANTHROPIC_API_KEY }}
-          TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}
-          TF_VAR_admin_panel_password:        ${{ secrets.ADMIN_PANEL_PASSWORD }}
-          TF_VAR_survey_ingest_token:         ${{ secrets.SURVEY_INGEST_TOKEN }}
-          TF_VAR_eb_instance_type:            ${{ inputs.eb_instance_type }}
-          TF_VAR_eb_max_instances:            ${{ inputs.eb_max_instances }}
-          TF_VAR_db_instance_class:           ${{ inputs.db_instance_class }}
-          TF_VAR_domain_name:                 ${{ secrets.DOMAIN_NAME }}
-          TF_VAR_create_github_oidc_provider: ${{ secrets.CREATE_GITHUB_OIDC_PROVIDER || 'true' }}
         run: |
-          terraform apply -auto-approve -input=false
+          set -o pipefail
+          terraform plan -input=false -no-color -out=tfplan -var-file="environments/${ENVIRONMENT}.tfvars" | tee plan.txt
+          {
+            echo "## Terraform plan: ${ENVIRONMENT}"
+            echo ""
+            echo "\`$(grep -E '^(Plan:|No changes\.)' plan.txt | head -1)\`"
+            echo ""
+            echo "The full plan is in this job's log, step **Plan**."
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      # ── 10. Point one environment's app deploy workflow at this stack ─────────
+      # ── 10. Apply exactly the plan printed above ──────────────────────────────
+      - name: Apply infrastructure
+        if: inputs.action == 'apply'
+        working-directory: infra/terraform
+        run: |
+          terraform apply -input=false tfplan
+
+      # ── 11. Point one environment's app deploy workflow at this stack ─────────
       # Only when asked, and only the secrets of the environment that was
       # built: staging.yml reads the plain names, production.yml reads the
       # *PROD* names. The two lists share nothing, so building one environment
       # can never repoint the other's deploys.
       - name: Write deployment secrets
-        if: inputs.write_deploy_secrets
+        if: inputs.action == 'apply' && inputs.write_deploy_secrets
         working-directory: infra/terraform
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
-          ENVIRONMENT: ${{ inputs.environment }}
         run: |
           REPO="${{ github.repository }}"
           set_secret() { gh secret set "$1" --body "$2" --repo "$REPO"; }
@@ -369,20 +512,32 @@ jobs:
         if: failure()
         run: |
           {
-            echo "## Deployment failed — nothing was destroyed"
+            echo "## Run failed — nothing was destroyed"
             echo ""
             echo "Every resource created so far is still in AWS and is recorded in the Terraform state."
             echo "Read the failed step's log, fix the cause, and run this workflow again: Terraform continues from where it stopped."
+            echo ""
+            echo "If the next run stops with a state lock error and no other run is in progress, a cancelled run left its lock behind: remove it with \`terraform force-unlock <lock id>\` (the error prints the id)."
             echo ""
             echo "To remove the stack on purpose, use the **Destroy Infrastructure** workflow."
           } >> "$GITHUB_STEP_SUMMARY"
 
       # ── 13. Summary ───────────────────────────────────────────────────────────
+      - name: Write summary (plan only)
+        if: inputs.action != 'apply'
+        run: |
+          {
+            echo ""
+            echo "**Plan only. Nothing was changed.** To make these changes, run this workflow again with action = apply."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Write summary
+        if: inputs.action == 'apply'
         working-directory: infra/terraform
+        env:
+          DOMAIN: ${{ steps.domain.outputs.name }}
         run: |
           FRONTEND_URL=$(terraform output -raw frontend_url)
-          DOMAIN="$DOMAIN_NAME"
 
           {
             echo "## Deployment complete"

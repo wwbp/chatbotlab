@@ -77,7 +77,7 @@ resources is ``{PROJECT_PREFIX}-production``, where ``{PROJECT_PREFIX}`` is the 
      - PriceClass_100 (US/Canada/Europe), OAC for S3 origin
    * - ACM certificate
      - ``aws_acm_certificate``
-     - Only when ``DOMAIN_NAME`` is set; must be in ``us-east-1``
+     - Only when ``domain_name`` is set in ``environments/{environment}.tfvars``; must be in ``us-east-1``
    * - IAM role (EB instance)
      - ``aws_iam_role``
      - Allows EC2 to read S3, write CloudWatch logs
@@ -98,22 +98,27 @@ resources is ``{PROJECT_PREFIX}-production``, where ``{PROJECT_PREFIX}`` is the 
 Deployment workflows
 ---------------------
 
-``deploy-infrastructure.yml`` (manual trigger only)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``deploy-infrastructure.yml`` (plan on pull requests, apply by hand)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Runs ``terraform apply`` against the remote S3 state backend. Steps:
+The workflow has two jobs. Setup is in ``infra/terraform/README.md``, section "Running Terraform from GitHub Actions".
 
-1. **Check required secrets**. Validates presence and GH_PAT write access before touching AWS.
-2. **Bootstrap state bucket**. Creates ``{PROJECT_PREFIX}-tfstate-{ACCOUNT_ID}`` if absent (idempotent).
-3. **Terraform init**. Points to the state file of the environment selected in the ``environment`` input. A second run on the same environment stops with a lock error.
-4. **ACM certificate** (custom domain only). Targeted apply, so the validation CNAME can be printed before the full apply blocks waiting for DNS.
-5. **Print DNS validation record** (custom domain only). Written to the workflow Summary.
-6. **``terraform apply``**. Full infrastructure apply.
-7. **Write deployment secrets** (only when the ``write_deploy_secrets`` input is ticked). Uses ``GH_PAT`` to write the deploy secrets of the selected environment with ``gh secret set``. Staging gets the names ``staging.yml`` reads (``AWS_ROLE_NAME``, ``AWS_S3_BUCKET_NAME_FRONTEND``, etc.). Production gets the names ``production.yml`` reads (``AWS_PROD_ROLE_NAME``, ``AWS_S3_PROD_BUCKET_NAME_FRONTEND``, etc.). The two lists share no name. The workflow does not start an application deploy. Writing staging's names first requires the three ``AWS_PROD_*`` secrets production falls back from to exist; otherwise the run stops.
+**plan** runs on each pull request that changes ``infra/terraform/``. It runs ``terraform plan`` for staging and for production with a read-only IAM role. It takes no state lock and gets no application secrets. If the role is not configured, the job skips with a notice.
+
+**apply** runs only when a person starts the workflow. The person selects ``environment`` (``staging`` or ``production``) and ``action`` (``plan`` or ``apply``; the default is ``plan``). The job runs in the GitHub Environment with the same name as ``environment``. Required reviewers on that Environment must approve the run before it starts. Steps:
+
+1. **Check required secrets**. Runs before the job touches AWS.
+2. **AWS credentials**. Assumes the role in ``TF_APPLY_ROLE_ARN`` through GitHub OIDC. The workflow uses no long-lived keys.
+3. **State bucket**. Finds ``{PROJECT_PREFIX}-tfstate-{ACCOUNT_ID}``. Creates it on a first apply.
+4. **Terraform init**. Points to the state file of the selected environment. A second run on the same environment stops with a lock error.
+5. **ACM certificate** (apply with a custom domain only). Targeted apply, so the validation CNAME can be printed before the full apply blocks waiting for DNS.
+6. **Plan**. Reads ``environments/{environment}.tfvars`` and prints the plan. With ``action = plan`` the job stops here.
+7. **Apply**. Applies the plan from step 6 and nothing else.
+8. **Write deployment secrets** (only when the ``write_deploy_secrets`` input is ticked). Uses ``GH_PAT`` to write the deploy secrets of the selected environment with ``gh secret set``. Staging gets the names ``staging.yml`` reads (``AWS_ROLE_NAME``, ``AWS_S3_BUCKET_NAME_FRONTEND``, etc.). Production gets the names ``production.yml`` reads (``AWS_PROD_ROLE_NAME``, ``AWS_S3_PROD_BUCKET_NAME_FRONTEND``, etc.). The two lists share no name. The workflow does not start an application deploy. Writing staging's names first requires the three ``AWS_PROD_*`` secrets production falls back from to exist; otherwise the run stops.
 
    **Before ticking it for production**, write down the values production deploys use today (account ID, role, frontend bucket, CloudFront distribution, EB application and environment; read them from the AWS console, since GitHub never shows a secret's value once set). Overwriting the ``AWS_PROD_*`` secrets is the cutover, and those notes are the only way back.
-8. **Report failure**. If any step fails, the workflow writes a notice to the Summary and changes nothing. It does not destroy, delete or import resources.
-9. **Summary**. Writes the chatbot URL and admin panel URL to the workflow Summary.
+9. **Report failure**. If any step fails, the workflow writes a notice to the Summary and changes nothing. It does not destroy, delete or import resources.
+10. **Summary**. Writes the chatbot URL and admin panel URL to the workflow Summary.
 
 ``production.yml`` (triggers on push to ``main`` or ``workflow_dispatch``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -157,7 +162,7 @@ The trust policy on the GitHub Actions IAM role restricts assumption to:
 - OIDC issuer: ``token.actions.githubusercontent.com``
 - Subject: ``repo:{github_org}/{github_repo}:*`` (scoped to the exact fork)
 
-The long-lived ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY`` are only used by ``deploy-infrastructure.yml`` during the bootstrapping step. Once the IAM role and OIDC provider exist, the production deploy workflow uses ``role-to-assume`` with no stored keys.
+``deploy-infrastructure.yml`` also signs in through OIDC, with two roles that a person creates one time: a read-only role for the plan job and a role for the apply job. ``destroy-infrastructure.yml`` still uses the long-lived ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY``.
 
 
 Application stack
