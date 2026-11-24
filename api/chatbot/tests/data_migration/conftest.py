@@ -301,19 +301,37 @@ def tool_recording_commands(tmp_path, *args, env=None):
     Wrappers named like the clients go first on PATH; each appends its full
     argument list (exactly what `ps` would show) to a file, then becomes the
     real client. Complete and deterministic, unlike sampling the process list.
-    Returns (result, list of command lines).
+    Returns (result, list of command lines); recorded_stdin() reads what
+    each client run was sent.
     """
     bin_dir = tmp_path / "recording-bin"
     bin_dir.mkdir(exist_ok=True)
     record = tmp_path / "recorded-commands.txt"
     record.write_text("")
+    stdin_dir = tmp_path / "recorded-stdin"
+    stdin_dir.mkdir(exist_ok=True)
     for name, real in (("mariadb", CLIENT), ("mariadb-dump", DUMP)):
         wrapper = bin_dir / name
-        wrapper.write_text(
-            f"#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >> '{record}'\nexec '{real}' \"$@\"\n"
+        # The client also gets its stdin copied to one file per run: first
+        # line its arguments, then everything it was sent.
+        run = (
+            f"f=$(mktemp -p '{stdin_dir}'); printf '%s\\n' \"$*\" > \"$f\"\n"
+            f'tee -a "$f" | \'{real}\' "$@"\n'
+            if name == "mariadb"
+            else f"exec '{real}' \"$@\"\n"
         )
+        wrapper.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >> '{record}'\n{run}")
         wrapper.chmod(0o755)
     env = dict(env or tool_env())
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     result = tool(*args, env=env)
     return result, record.read_text().splitlines()
+
+
+def recorded_stdin(tmp_path):
+    """[(arguments, stdin text)] for each client run under tool_recording_commands."""
+    runs = []
+    for path in sorted((tmp_path / "recorded-stdin").iterdir()):
+        argv, _, sent = path.read_text(errors="replace").partition("\n")
+        runs.append((argv, sent))
+    return runs

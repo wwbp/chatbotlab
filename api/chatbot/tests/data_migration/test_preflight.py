@@ -205,25 +205,42 @@ def test_quiesced_source_passes(same_or_newer_target, tmp_path):
     assert check(report, "source_quiesced")["status"] == "ok"
 
 
-def test_source_still_being_written_is_refused(same_or_newer_target, tmp_path):
+WRITERS = {
+    "insert_delete": (
+        "INSERT INTO {db}.mig_empty VALUES (1, 'x'); DO SLEEP(0.3);"
+        "DELETE FROM {db}.mig_empty; DO SLEEP(0.3);"
+    ),
+    # Changes neither row count nor AUTO_INCREMENT: only UPDATE_TIME moves.
+    "update_only": "UPDATE {db}.mig_busy SET n = n + 1; DO SLEEP(0.3);",
+}
+
+
+@pytest.mark.parametrize("writer_kind", WRITERS)
+def test_source_still_being_written_is_refused(
+    writer_kind, same_or_newer_target, tmp_path
+):
     # No default database, so the writer does not show up as a session on
-    # the source database: only the change itself can give it away.
-    writes = (
-        f"INSERT INTO {SRC_DB}.mig_empty VALUES (1, 'x'); DO SLEEP(0.3);"
-        f"DELETE FROM {SRC_DB}.mig_empty; DO SLEEP(0.3);"
-    ) * 15
-    writer = _background_sql(writes)
+    # the source database: only the change itself can give it away. It keeps
+    # writing until the test stops it, however long preflight takes.
+    admin(
+        SRC,
+        "CREATE TABLE mig_busy (id INT PRIMARY KEY, n INT); INSERT INTO mig_busy VALUES (1, 0)",
+        SRC_DB,
+    )
+    writer = _background_sql(WRITERS[writer_kind].format(db=SRC_DB) * 1000)
     try:
         result, report = preflight(
             tmp_path, "--require-quiesced", "--quiesce-seconds", "2"
         )
     finally:
+        writer.kill()
         writer.wait()
-        admin(SRC, f"DELETE FROM {SRC_DB}.mig_empty")
+        admin(SRC, f"DELETE FROM {SRC_DB}.mig_empty; DROP TABLE {SRC_DB}.mig_busy")
     assert result.returncode == 1
     failed = check(report, "source_quiesced")
     assert failed["status"] == "fail"
-    assert "mig_empty" in failed["detail"]
+    table = "mig_empty" if writer_kind == "insert_delete" else "mig_busy"
+    assert table in failed["detail"]
 
 
 def test_source_with_an_open_app_session_is_refused(same_or_newer_target, tmp_path):

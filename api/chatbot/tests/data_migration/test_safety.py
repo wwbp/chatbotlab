@@ -1,6 +1,7 @@
 """Guarantees that hold for every step: the source cannot be written, and
 credentials never reach the command line, the output or the run log."""
 
+import re
 import signal
 import subprocess
 import sys
@@ -21,6 +22,7 @@ from .conftest import (
     load_tool,
     plain_copy,
     read_log,
+    recorded_stdin,
     reset_target,
     shim,
     tool,
@@ -324,3 +326,25 @@ def test_awkward_password_is_scrubbed_from_the_run_log(source_db, tmp_path):
     values = [v for e in entries for v in e.values() if isinstance(v, str)]
     leaked = password in text or any(password in v for v in values)
     assert not leaked, "password in run.log"
+
+
+READ_WRITE = re.compile(r"(?i)read\s+write|(transaction|tx)_read_only")
+
+
+def test_every_source_session_is_read_only_by_argv_and_stdin(same_flavour, tmp_path):
+    # P11: every source client run gets the read-only setup in its arguments,
+    # and nothing it is sent on stdin undoes it.
+    plain_copy()
+    run_dir = tmp_path / "run"
+    for step in (["preflight", *PREFLIGHT_FLAGS], ["verify"]):
+        result, _ = tool_recording_commands(tmp_path, "--run-dir", str(run_dir), *step)
+        assert result.returncode == 0, result.stdout + result.stderr
+    source = [
+        (argv, sent)
+        for argv, sent in recorded_stdin(tmp_path)
+        if f"--host={SRC.host} " in argv
+    ]
+    assert len(source) > 10
+    for argv, sent in source:
+        assert "SET SESSION TRANSACTION READ ONLY" in argv, argv
+        assert not READ_WRITE.search(sent), sent[:500]
