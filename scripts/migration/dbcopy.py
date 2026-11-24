@@ -188,6 +188,25 @@ def connect(role):
     return conn
 
 
+def identity(conn):
+    """Which server and database this session really reached, by asking it.
+
+    Host names in the environment prove nothing: a tunnel, an alias or a
+    renamed endpoint can lead anywhere.
+    """
+    names = ["hostname", "port", "datadir", "database"]
+    sql = "SELECT @@hostname, @@port, @@datadir, DATABASE()"
+    if conn.flavour == "mysql":
+        names.append("server_uuid")
+        sql += ", @@server_uuid"
+    return dict(zip(names, query(conn, sql)[0], strict=True))
+
+
+def check_different(src, dst):
+    if identity(src) == identity(dst):
+        raise Refuse("source and target are the same database on the same server")
+
+
 # Without these, information_schema silently hides triggers (TRIGGER), events
 # (EVENT), routines (EXECUTE) and view bodies (SHOW VIEW): both sides would
 # show nothing and agree.
@@ -627,6 +646,7 @@ def check_same_flavour(src, dst):
 def step_verify(args):
     src, dst = connect("source"), connect("target")
     check_same_flavour(src, dst)
+    check_different(src, dst)
     for conn in (src, dst):
         require_definition_privileges(conn)
     if args.dry_run:
@@ -638,6 +658,10 @@ def step_verify(args):
         return 0
     started = time.monotonic()
     schema_src, schema_dst = read_schema(src), read_schema(dst)
+    if not schema_src["tables"]:
+        raise Refuse(
+            f"source database {src.database} has no tables: nothing to compare"
+        )
     diffs = diff_schema(schema_src, schema_dst)
     tables = {}
     for name, table in sorted(schema_src["tables"].items()):
