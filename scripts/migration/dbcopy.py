@@ -168,8 +168,10 @@ _UNESCAPE = {"0": "\0", "n": "\n", "t": "\t", "\\": "\\"}
 
 
 def _field(raw):
-    # The client prints SQL NULL as the bare word NULL in batch mode. Queries
-    # in this file never select a string that could itself be "NULL".
+    # The client prints SQL NULL as the bare word NULL in batch mode, so a
+    # string that is exactly "NULL" also reads as None. Row hashes, digests and
+    # counts can never be that; in schema text it can (e.g. on MySQL a column
+    # whose string default is 'NULL' reads like DEFAULT NULL).
     if raw == "NULL":
         return None
     return re.sub(r"\\([0nt\\])", lambda m: _UNESCAPE[m.group(1)], raw)
