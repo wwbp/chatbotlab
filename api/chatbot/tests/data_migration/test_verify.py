@@ -230,6 +230,16 @@ def double_changed_in_last_digit(_):
     return undo, ("mig_types", "row_differs", "3")
 
 
+def float_changed_in_seventh_digit(_):
+    # FLOAT renders with 6 significant digits: 1.500001 shows as 1.5.
+    t("UPDATE mig_types SET flt_col = 1.500001 WHERE id = 3")
+    return "UPDATE mig_types SET flt_col = 1.5 WHERE id = 3", (
+        "mig_types",
+        "row_differs",
+        "3",
+    )
+
+
 def json_array_reordered(_):
     row_id, undo = _cell(
         "chatbot_conversation",
@@ -364,6 +374,7 @@ MUTATIONS = [
     null_became_empty_string,
     datetime_shifted_one_microsecond,
     double_changed_in_last_digit,
+    float_changed_in_seventh_digit,
     json_array_reordered,
     json_keys_reordered,
     duplicate_row_lost_in_table_without_key,
