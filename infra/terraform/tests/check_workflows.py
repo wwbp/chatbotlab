@@ -75,8 +75,9 @@ for name, text in infra_workflows.items():
     check(values, f"{name}: TF_VAR_environment is not set")
     for value in values:
         check(
-            "inputs.environment" in value,
-            f"{name}: TF_VAR_environment must come from inputs.environment, got '{value.strip()}'",
+            "inputs.environment" in value or "matrix.environment" in value,
+            f"{name}: TF_VAR_environment must come from inputs.environment (or the "
+            f"plan job's matrix), got '{value.strip()}'",
         )
     check(
         re.search(r"\n      environment:\n(?:        .*\n)*?        required: true", text),
@@ -123,7 +124,9 @@ check(
 )
 for name, text in {**all_workflows, "setup.sh": setup_sh}.items():
     check("use_lockfile=false" not in text, f"{name}: must not switch the state lock off")
-    check("-lock=false" not in text, f"{name}: must not run terraform without the state lock")
+    # The one exception is the pull-request plan, checked further down.
+    if name != "deploy-infrastructure.yml":
+        check("-lock=false" not in text, f"{name}: must not run terraform without the state lock")
 
 # use_lockfile needs Terraform 1.11. Every place that pins a version must agree.
 pins = {
@@ -318,6 +321,132 @@ check(
     "gh workflow run" not in deploy,
     "deploy-infrastructure.yml: must not trigger another workflow",
 )
+
+# --- Plan on pull requests; apply only by hand, behind a GitHub Environment --
+
+
+def jobs_of(text):
+    """Job name -> job text, from a workflow's `jobs:` section."""
+    body = text.split("\njobs:\n", 1)[1]
+    parts = re.split(r"\n  ([\w-]+):\n", "\n" + body)
+    return dict(zip(parts[1::2], parts[2::2]))
+
+
+def steps_of(job):
+    return re.split(r"\n      - ", job)[1:]
+
+
+triggers = deploy.split("\njobs:\n", 1)[0]
+check(
+    not re.search(r"\n  (push|schedule|pull_request_target|workflow_run):", triggers),
+    "deploy-infrastructure.yml: may be started only by workflow_dispatch and pull_request",
+)
+check(
+    re.search(r"\n  pull_request:\n    paths:\n(?:      .*\n)*?      - 'infra/terraform/\*\*'", triggers),
+    "deploy-infrastructure.yml: must plan on pull requests that touch infra/terraform/**",
+)
+check(
+    "\npermissions: {}\n" in triggers,
+    "deploy-infrastructure.yml: top-level permissions must be empty; each job asks for its own",
+)
+for name, text in infra_workflows.items():
+    grants = set(re.findall(r"\n\s+([\w-]+): write\b", text))
+    check(
+        grants <= {"id-token"},
+        f"{name}: the only write permission allowed is id-token (OIDC), found {sorted(grants)}",
+    )
+# Short-lived credentials from GitHub OIDC only; no stored AWS keys.
+check(
+    not re.search(r"aws-access-key-id|aws-secret-access-key|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY", deploy),
+    "deploy-infrastructure.yml: must not use long-lived AWS access keys",
+)
+
+deploy_jobs = jobs_of(deploy)
+check(set(deploy_jobs) == {"plan", "apply"}, f"deploy-infrastructure.yml: expected jobs plan and apply, found {sorted(deploy_jobs)}")
+plan_job = deploy_jobs.get("plan", "")
+apply_job = deploy_jobs.get("apply", "")
+
+# The pull-request plan runs code from the pull request, so it gets a
+# read-only role, no GitHub Environment and no real application secrets.
+check(
+    re.search(r"\n    if: github\.event_name == 'pull_request'\n", "\n" + plan_job),
+    "plan job: must run only on pull_request",
+)
+check("\n    environment:" not in "\n" + plan_job, "plan job: must not use a GitHub Environment")
+check(not re.search(r"terraform\s+apply", plan_job), "plan job: must never apply")
+plan_secrets = set(re.findall(r"secrets\.(\w+)", plan_job))
+allowed = {"TF_PLAN_ROLE_ARN", "TF_PROJECT_PREFIX", "CREATE_GITHUB_OIDC_PROVIDER"}
+check(
+    plan_secrets <= allowed,
+    f"plan job: may read only {sorted(allowed)}, also reads {sorted(plan_secrets - allowed)}",
+)
+check("configured == 'true'" in plan_job, "plan job: must skip cleanly when its role is not configured")
+for line in deploy.splitlines():
+    if "-lock=false" in line:
+        check(
+            "terraform plan" in line and line in plan_job,
+            f"deploy-infrastructure.yml: -lock=false is allowed only on the pull-request plan: '{line.strip()}'",
+        )
+
+# Applying is a deliberate act by a person, approved through the GitHub
+# Environment of the same name as the stack.
+for name, text in {"deploy-infrastructure.yml": deploy}.items():
+    for job_name, job in jobs_of(text).items():
+        if not re.search(r"terraform\s+(apply|destroy)", job):
+            continue
+        check(
+            "\n    environment: ${{ inputs.environment }}\n" in "\n" + job,
+            f"{name}: job '{job_name}' changes infrastructure and must declare "
+            f"'environment: ${{{{ inputs.environment }}}}'",
+        )
+check(
+    re.search(r"\n    if: github\.event_name == 'workflow_dispatch'\n", "\n" + apply_job),
+    "apply job: must run only on workflow_dispatch",
+)
+check(
+    re.search(r"\n    concurrency:", "\n" + apply_job),
+    "apply job: needs a concurrency group so two runs cannot overlap",
+)
+check(
+    re.search(r"\n      action:\n(?:        .*\n)*?        default: plan\n", triggers),
+    "deploy-infrastructure.yml: needs an 'action' input that defaults to plan",
+)
+for step in steps_of(apply_job):
+    if re.search(r"terraform\s+apply|gh secret set|set_secret ", step):
+        title = step.splitlines()[0]
+        check(
+            re.search(r"\n        if: [^\n]*inputs\.action == 'apply'", step),
+            f"apply job, step '{title}': changes something, so it must be conditional on inputs.action == 'apply'",
+        )
+# The full apply runs the plan that was just printed, nothing else.
+full_applies = [
+    line.strip() for line in apply_job.splitlines()
+    if re.search(r"terraform\s+apply", line) and "-target" not in line
+]
+check(
+    full_applies == ["terraform apply -input=false tfplan"],
+    f"apply job: the full apply must be exactly 'terraform apply -input=false tfplan', found {full_applies}",
+)
+
+# Per-environment settings live in git, where the pull-request plan sees them.
+for env_name in ("staging", "production"):
+    path = TERRAFORM / "environments" / f"{env_name}.tfvars"
+    check(path.exists(), f"environments/{env_name}.tfvars is missing")
+    text = uncommented(path) if path.exists() else ""
+    names = set(re.findall(r"^\s*(\w+)\s*=", text, re.M))
+    check(
+        not names & {"environment", "project_name"},
+        f"environments/{env_name}.tfvars: must not set environment or project_name; "
+        f"the workflow sets them, together with the state key",
+    )
+    secret_like = {n for n in names if re.search(r"password|secret|key|token", n)}
+    check(not secret_like, f"environments/{env_name}.tfvars: secrets do not belong in git: {sorted(secret_like)}")
+for line in deploy.splitlines():
+    if re.search(r"terraform\s+plan", line):
+        check(
+            '-var-file="environments/${ENVIRONMENT}.tfvars"' in line,
+            f"deploy-infrastructure.yml: every plan must read the environment's settings file: '{line.strip()}'",
+        )
 
 if failures:
     print("\n".join(f"FAIL: {f}" for f in failures))
