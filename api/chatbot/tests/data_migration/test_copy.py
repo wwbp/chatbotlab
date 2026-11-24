@@ -753,6 +753,30 @@ def test_reset_target_confirmation_names_host_and_database(half_restored):
     assert target_tables() == before
 
 
+def test_reset_target_refuses_once_a_later_restore_went_elsewhere(dumped, tmp_path):
+    # Review 2: restore into T1 and verify it; start a restore into T2 from the
+    # same run directory; reset-target on T1 must not empty the proven copy.
+    run_dir = fresh_run_with_dump(dumped, tmp_path)
+    reset_target()
+    assert tool("--run-dir", str(run_dir), "restore").returncode == 0
+    assert tool("--run-dir", str(run_dir), "verify").returncode == 0
+    admin(
+        DST,
+        "DROP DATABASE IF EXISTS mig_dst2; CREATE DATABASE mig_dst2;"
+        "GRANT ALL PRIVILEGES ON mig_dst2.* TO 'mig_user'@'%'",
+    )
+    try:
+        t2 = tool_env(MIG_TARGET_DATABASE="mig_dst2")
+        assert tool("--run-dir", str(run_dir), "restore", env=t2).returncode == 0
+        before = target_tables()
+        result = reset(run_dir)
+    finally:
+        admin(DST, "DROP DATABASE IF EXISTS mig_dst2")
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "another server" in result.stderr
+    assert target_tables() == before
+
+
 # ── and the app, last (it writes on login) ───────────────────────────────────
 
 
