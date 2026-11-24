@@ -308,6 +308,25 @@ def test_a_failed_dump_leaves_nothing_restore_could_use(kind, same_flavour, tmp_
     assert target_tables() == []
 
 
+def test_dump_with_a_lot_on_stderr_does_not_deadlock(same_flavour, tmp_path):
+    # D5: 200 KB of stderr before any output fills the pipe if nobody reads it.
+    noisy = f'head -c 200000 /dev/zero | tr "\\0" x >&2; exec "{DUMP}" "$@"'
+    env = shim(tmp_path, "mariadb-dump", noisy)
+    run_dir = tmp_path / "run"
+    try:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--run-dir", str(run_dir), "dump"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("dump deadlocked on a full stderr pipe")
+    assert result.returncode == 0, result.stdout + result.stderr[-2000:]
+    assert (run_dir / "dump.sql").exists()
+
+
 # ── restore must not swallow warnings (D4) ─────────────────────────────────
 
 # Like a real dump, it turns strict mode off: 'abc' into an INT is then a
