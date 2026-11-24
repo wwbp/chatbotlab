@@ -70,3 +70,61 @@ def test_rows_streamed_must_match_count(copied, tmp_path):
     result = verify(tmp_path / "run", env)
     assert result.returncode == 2, result.stdout + result.stderr
     assert "COUNT(*)" in result.stderr
+
+
+# ── V3: only base tables and views; views by definition ──────────────────────
+
+UNCOMPARABLE = {
+    # A sequence's state is not rows verify can hash.
+    "sequence": (
+        "CREATE SEQUENCE mig_odd",
+        "SELECT NEXTVAL(mig_odd)",
+        "DROP SEQUENCE IF EXISTS mig_odd",
+    ),
+    # A system-versioned table was listed as a view and compared by name only.
+    "system_versioned": (
+        "CREATE TABLE mig_odd (id INT) WITH SYSTEM VERSIONING",
+        "INSERT INTO mig_odd VALUES (1)",
+        "DROP TABLE IF EXISTS mig_odd",
+    ),
+}
+
+
+@pytest.mark.parametrize("kind", UNCOMPARABLE)
+def test_refuses_table_types_it_cannot_compare(kind, copied, tmp_path):
+    if copied != "mariadb":
+        pytest.skip("MariaDB-only table types")
+    create, change_source, drop = UNCOMPARABLE[kind]
+    try:
+        s(create + ";" + change_source)
+        t(create)
+        result = verify(tmp_path)
+    finally:
+        s(drop)
+        t(drop)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "mig_odd" in result.stderr
+
+
+def test_view_definitions_are_compared(copied, tmp_path):
+    try:
+        s("CREATE VIEW mig_v AS SELECT id FROM mig_empty")
+        t("CREATE VIEW mig_v AS SELECT id FROM mig_empty WHERE id > 0")
+        result = verify(tmp_path)
+    finally:
+        s("DROP VIEW IF EXISTS mig_v")
+        t("DROP VIEW IF EXISTS mig_v")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "view mig_v" in result.stdout
+
+
+def test_identical_views_pass(copied, tmp_path):
+    # Each side's definition names its own database; that must not differ.
+    try:
+        s("CREATE VIEW mig_v AS SELECT id FROM mig_empty")
+        t("CREATE VIEW mig_v AS SELECT id FROM mig_empty")
+        result = verify(tmp_path)
+    finally:
+        s("DROP VIEW IF EXISTS mig_v")
+        t("DROP VIEW IF EXISTS mig_v")
+    assert result.returncode == 0, result.stdout + result.stderr
