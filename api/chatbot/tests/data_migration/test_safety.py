@@ -295,3 +295,15 @@ def test_password_not_in_repr():
     dbcopy = load_tool()
     conn = dbcopy.Conn("source", "h", "1", "u", SRC_PASSWORD, "d", "")
     assert SRC_PASSWORD not in repr(conn)
+
+
+def test_source_sessions_do_not_wait_a_year_for_a_lock(same_flavour, tmp_path):
+    # P6: lock_wait_timeout defaults to a year; a held metadata lock on the
+    # source must make a step fail in seconds, not hang (or queue the app).
+    plain_copy()
+    result, commands = tool_recording_commands(
+        tmp_path, "--run-dir", str(tmp_path / "run"), "verify"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    for command in _source_commands(commands):
+        assert "SET SESSION lock_wait_timeout = 10" in command, command
