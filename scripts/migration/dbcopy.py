@@ -219,7 +219,7 @@ def read_schema(conn):
             "default collation": default[1],
         },
         "tables": {},
-        "views": [],
+        "views": {},
         "routines": {},
         "triggers": {},
         "events": {},
@@ -236,12 +236,13 @@ def read_schema(conn):
         ],
         "TABLES",
     ):
+        if row["table_type"] == "VIEW":
+            continue  # read below, from information_schema.VIEWS
         if row["table_type"] != "BASE TABLE":
-            # ponytail: views are compared by name only (their definitions embed
-            # the database name). The app has none; compare definitions if it
-            # ever does.
-            schema["views"].append(row["table_name"])
-            continue
+            raise Refuse(
+                f"{conn.role}: {row['table_name']} is a {row['table_type']}; "
+                "verify can only compare base tables and views",
+            )
         schema["tables"][row.pop("table_name")] = {
             "options": {
                 "engine": row["engine"],
@@ -341,7 +342,20 @@ def read_schema(conn):
         where = f"{table[:-1]}_SCHEMA = DATABASE()"
         for row in _rows(conn, [name, *columns], table, where=where):
             schema[kind][row.pop(name.lower())] = row
-    schema["views"].sort()
+    # Each side's definition names its own database: drop that qualifier.
+    for row in _rows(
+        conn,
+        ["TABLE_NAME",
+         "REPLACE(VIEW_DEFINITION, CONCAT('`', DATABASE(), '`.'), '') AS definition",
+         "CHECK_OPTION", "SECURITY_TYPE"],
+        "VIEWS",
+    ):  # fmt: skip
+        if not row["definition"]:
+            raise Refuse(
+                f"{conn.role}: cannot read the definition of view "
+                f"{row['table_name']}; grant SHOW VIEW on the database",
+            )
+        schema["views"][row.pop("table_name")] = row
     return schema
 
 
@@ -376,9 +390,7 @@ def diff_schema(src, dst):
                 key,
                 _explain(src["database"][key], dst["database"][key]),
             )
-    if src["views"] != dst["views"]:
-        add(None, "database", "views", _explain(src["views"], dst["views"]))
-    for kind in ("routines", "triggers", "events"):
+    for kind in ("views", "routines", "triggers", "events"):
         for name in sorted(src[kind].keys() | dst[kind].keys()):
             a, b = src[kind].get(name), dst[kind].get(name)
             if a != b:
