@@ -326,3 +326,42 @@ def test_routine_and_event_signatures_compared(case, copied, tmp_path):
         t(drop)
     assert result.returncode == 1, result.stdout + result.stderr
     assert "DIFFERENT" in result.stdout
+
+
+# ── key values are data: never printed or recorded unless they are integers ──
+
+TOKEN = "livesessiontokenabc123xyz"  # like django_session.session_key
+
+
+@pytest.mark.parametrize("difference", ["row_differs", "row_missing_on_target"])
+def test_non_integer_keys_never_reach_output_or_files(difference, copied, tmp_path):
+    create = "CREATE TABLE mig_sess (session_key VARCHAR(40) PRIMARY KEY, data TEXT)"
+    s(create + f"; INSERT INTO mig_sess VALUES ('{TOKEN}', 'a')")
+    t(
+        create
+        + (
+            f"; INSERT INTO mig_sess VALUES ('{TOKEN}', 'b')"
+            if difference == "row_differs"
+            else ""
+        )
+    )
+    run_dir = tmp_path / "run"
+    try:
+        result = verify(run_dir)
+    finally:
+        s("DROP TABLE mig_sess")
+        t("DROP TABLE mig_sess")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "mig_sess" in result.stdout
+    leaked = TOKEN in result.stdout + result.stderr or any(
+        TOKEN in p.read_text() for p in run_dir.iterdir()
+    )
+    assert not leaked, "a non-integer key value was printed or recorded"
+
+
+def test_run_files_are_private(copied, tmp_path):
+    run_dir = tmp_path / "run"
+    assert verify(run_dir).returncode == 0
+    modes = {p.name: oct(p.stat().st_mode & 0o777) for p in run_dir.iterdir()}
+    assert modes
+    assert set(modes.values()) == {"0o600"}, modes
