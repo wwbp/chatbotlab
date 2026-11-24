@@ -6,7 +6,7 @@ How to move the live database from the hand-built Elastic Beanstalk environment 
 The copy is done and proven by ``scripts/migration/dbcopy.py``. What it guarantees, each backed by a test against real database servers (``api/chatbot/tests/data_migration/``):
 
 - It cannot write to the source. Every session it opens there is ``READ ONLY`` and the server enforces it. **Rollback is therefore always "send traffic back to the old environment".**
-- ``verify`` compares schema and every row (SHA-256 per cell, in primary-key order) and exits non-zero on any difference, naming the table and the first differing key.
+- ``verify`` compares schema and every row (SHA-256 per cell, in primary-key order) and exits non-zero on any difference, naming the table and the first differing key. It refuses (rather than passing) when it cannot see everything: missing privileges, unreadable routine bodies, object types it cannot compare, fewer rows hashed than ``COUNT(*)``, a source with no tables, or source and target being the same database. See `What verify does not compare`_.
 - Every step has ``--dry-run`` and appends to ``<run-dir>/run.log``. Keep the run directory: it is the record of the migration.
 
 .. warning::
@@ -51,11 +51,21 @@ Credentials come from the environment or from a client option file, never from t
 
 Instead of ``HOST``/``PORT``/``USER``/``PASSWORD`` you may set ``MIG_SOURCE_DEFAULTS_FILE`` (and ``MIG_TARGET_DEFAULTS_FILE``) to a ``chmod 600`` client option file with a ``[client]`` section.
 
+**No other option file is read.** Every client and dump the tool starts gets ``--no-defaults``, or ``--defaults-file=<your file>`` when you set one: ``~/.my.cnf``, ``/etc/my.cnf`` and the like are ignored, because a ``safe-updates``, ``select_limit``, ``init-command`` or ``force`` there could silently cap or excuse what the tool reads. Put everything the client needs (host, user, password, TLS settings) in the one file you name. Each client is given only its own side's password.
+
 .. note::
 
-   **TLS.** MariaDB client 11.4 and later verifies the server certificate by default. With the password in an option file, add ``ssl-ca=/path/to/global-bundle.pem`` (the RDS CA bundle); through a port-forward to ``localhost`` the host name will not match, so add ``ssl-verify-server-cert=0`` there instead and rely on the tunnel. With the password in ``MIG_*_PASSWORD`` the client turns verification off by itself and prints a warning.
+   **TLS.** MariaDB client 11.4 and later verifies the server certificate by default. Supply the RDS CA bundle in the option file: ``ssl-ca=/path/to/global-bundle.pem`` (from ``https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem``). Through a port-forward to ``localhost`` the host name will not match the certificate, so there add ``ssl-verify-server-cert=0`` and rely on the tunnel. **With the password in** ``MIG_*_PASSWORD`` **(not in the option file) the client turns verification off by itself** and prints ``WARNING: option --ssl-verify-server-cert is disabled``: for real runs put the password in the option file.
 
-Exit status of every step: ``0`` success, ``1`` a check failed, ``2`` refused to run. **Any non-zero status is a stop.**
+Exit status of every step: ``0`` succeeded; ``1`` a check or comparison found a problem; ``2`` refused, crashed or interrupted (including Ctrl-C, ``kill`` and a closed terminal). **Any non-zero status means stop.** ``run.log`` records each outcome as ``ok``, ``failed``, ``refused``, ``crashed`` or ``interrupted``.
+
+Accounts and grants
+~~~~~~~~~~~~~~~~~~~
+
+Without these, information_schema silently hides objects and the tool would see less than there is, so it refuses instead.
+
+- **Source** (read-only use): ``SELECT, SHOW VIEW, TRIGGER, EVENT, EXECUTE`` on the database, and ``PROCESS`` on ``*.*`` for ``preflight --require-quiesced``. Routine bodies must be readable: the account is their definer, or holds ``SHOW_ROUTINE`` (MySQL) / ``SHOW CREATE ROUTINE`` or ``SELECT`` on ``mysql.proc`` (MariaDB). ``preflight`` checks all of this (``source_privileges``).
+- **Target**: ``ALL PRIVILEGES`` on the database (restore creates tables, triggers, routines and events), and ``PROCESS`` on ``*.*`` for ``reset-target``, which refuses while other sessions are connected and cannot see them without it.
 
 
 Procedure
@@ -138,11 +148,11 @@ Steps 1 to 3 are preparation and can be done ahead of time. The window (app offl
       python3 scripts/migration/dbcopy.py $RUN restore
       python3 scripts/migration/dbcopy.py $RUN verify
 
-   ``dump`` writes ``dump.sql`` (mode 600; it is the whole database in plain text) and its SHA-256. ``restore`` re-checks that checksum, refuses a target that is not empty, never replaces an existing table, and sets the target database's default collation to the source's.
+   ``dump`` writes ``dump.sql`` (mode 600; it is the whole database in plain text) and its SHA-256, and prints each object's ``DEFINER``. It refuses ``ENABLE``\ d events (disable them on the source; re-enable after cutover), sequences and system-versioned tables, and ``FLOAT`` values its 6-digit text rendering would change (convert those columns to ``DOUBLE`` on the source first). ``restore`` re-checks that checksum on the bytes it feeds the client, refuses a target that is not empty, never replaces an existing table, fails on any server warning, and sets the target database's default collation to the source's.
 
    *Gate:* do not continue unless ``verify`` printed ``IDENTICAL`` and exited 0. A difference is named by table and key in the output and in ``verify-report.json``.
 
-   *If restore fails or is interrupted:* the source is untouched. Run ``reset-target --confirm-database chatbot_db``, then ``restore`` and ``verify`` again.
+   *If restore fails or is interrupted:* the source is untouched. Run ``reset-target --confirm <MIG_TARGET_HOST>/chatbot_db`` (host and database exactly as configured), then ``restore`` and ``verify`` again. ``reset-target`` checks by query that the server it reached is the one this run restored into and not the source, and refuses if ``verify`` has passed since the last restore, if the target holds anything the dump did not create, or if other sessions are connected.
 
    *Rollback:* as step 4. The new database can simply be left.
 
@@ -222,11 +232,18 @@ Measured on a laptop, both servers in containers with 64 MB buffer pools:
 That is about 150 MB/s dumping, 30 MB/s restoring and 550,000 rows/s verifying, on local disks. Expect a small RDS instance reached through a port-forward to be several times slower, restore most of all. All three scale roughly with data size. The real database's size is not known here: step 3 reports it, and the staging rehearsal gives real timings on real hardware and network. RDS operations in step 5 (snapshot, restore to a proof instance) typically take 10 to 25 minutes together regardless of how small the database is, and are the largest part of a 30 to 60 minute window. If the rehearsal shows the window is too tight, the snapshot proof can run in parallel with step 8 (and must still pass before step 11); that is the owner's decision.
 
 
+What verify does not compare
+----------------------------
+
+``verify`` compares: the database's default character set and collation; per table the engine, collation, row format, every column (type, nullability, default, character set, collation, extra, generation expression), every index, foreign key and ``CHECK`` constraint, and ``AUTO_INCREMENT`` (it must be **equal**: the dump carries the counter exactly, so a target that is ahead was written to or copied from a later source); every row, byte for byte (``FLOAT`` widened to ``DOUBLE`` so all its digits count); views by definition, check option and security type; routines by type, name, parameters, return type, body and attributes; triggers; events by body, status and schedule.
+
+It does **not** compare: table, column and index comments; partitioning; ``DEFINER`` accounts (``dump`` reports them); users, grants and server settings; anything outside the database (S3 objects, Redis, environment variables, DNS). It refuses table types other than base tables and views.
+
 Limits
 ------
 
 - MySQL to MariaDB (or the reverse) is refused.
-- Triggers, procedures, events and views are copied, but they carry a ``DEFINER``: they load only if the same account name exists on the target. The app defines none.
+- Triggers, procedures, events and views are copied, but they carry a ``DEFINER``: they load only if the same account name exists on the target (or the restoring account holds ``SET_USER_ID`` / ``SUPER``). ``dump`` lists each definer. The app defines none.
 - ``--require-quiesced`` samples the source for a few seconds; it is a check, not a lock. ``verify`` is the proof: it fails if the source changed after the dump.
 - The dump is uncompressed and needs free disk of roughly the database's data size.
 - S3 objects, Redis, environment variables and DNS are outside the tool.
