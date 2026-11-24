@@ -373,10 +373,11 @@ for name, text in infra_workflows.items():
         f"{name}: the only write permission allowed is id-token (OIDC), found {sorted(grants)}",
     )
 # Short-lived credentials from GitHub OIDC only; no stored AWS keys.
-check(
-    not re.search(r"aws-access-key-id|aws-secret-access-key|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY", deploy),
-    "deploy-infrastructure.yml: must not use long-lived AWS access keys",
-)
+for name, text in all_workflows.items():
+    check(
+        not re.search(r"aws-access-key-id|aws-secret-access-key|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY", text),
+        f"{name}: must not use long-lived AWS access keys",
+    )
 
 deploy_jobs = jobs_of(deploy)
 check(set(deploy_jobs) == {"plan", "apply"}, f"deploy-infrastructure.yml: expected jobs plan and apply, found {sorted(deploy_jobs)}")
@@ -406,7 +407,7 @@ for line in deploy.splitlines():
 
 # Applying is a deliberate act by a person, approved through the GitHub
 # Environment of the same name as the stack.
-for name, text in {"deploy-infrastructure.yml": deploy}.items():
+for name, text in infra_workflows.items():
     for job_name, job in jobs_of(text).items():
         if not re.search(TF + r"(apply|destroy)\b", job):
             continue
@@ -1091,6 +1092,68 @@ check(
     "README.md: production may deploy only from main",
 )
 check("bootstrap/iam/" in readme, "README.md: setup must point at the committed policies in bootstrap/iam/")
+
+# --- Destroy: manual, one named environment, production needs a second yes ---
+
+destroy_triggers = destroy.split("\njobs:\n", 1)[0]
+check(
+    re.findall(r"\n  (\w+):", "\n" + destroy_triggers.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]) == ["workflow_dispatch"],
+    "destroy-infrastructure.yml: may be started only by workflow_dispatch",
+)
+check(
+    re.search(r"\n      environment:\n(?:        .*\n)*?        type: string", destroy_triggers),
+    "destroy-infrastructure.yml: the environment must be typed, not picked from a list (a list preselects its first entry)",
+)
+check(
+    re.search(r"\n      allow_production:\n(?:        .*\n)*?        default: false", destroy_triggers)
+    and re.search(r"\n      allow_production:\n(?:        .*\n)*?        type: boolean", destroy_triggers),
+    "destroy-infrastructure.yml: needs an 'allow_production' boolean input that defaults to false",
+)
+destroy_jobs = jobs_of(destroy)
+check(set(destroy_jobs) == {"validate", "destroy"}, f"destroy-infrastructure.yml: expected jobs validate and destroy, found {sorted(destroy_jobs)}")
+validate_job = destroy_jobs.get("validate", "")
+destroy_job = destroy_jobs.get("destroy", "")
+# The inputs are checked in a job of their own, before the job that names a
+# GitHub Environment: GitHub creates an Environment for any name it is given,
+# and a new one has no reviewers.
+check("\n    environment:" not in "\n" + validate_job, "destroy validate job: must not use a GitHub Environment")
+check("role-to-assume" not in validate_job, "destroy validate job: must not sign in to AWS")
+for needle, why in (
+    ('"$ENVIRONMENT" != "staging" && "$ENVIRONMENT" != "production"', "reject any environment other than staging or production"),
+    ('"$CONFIRM_DESTROY" != "destroy $ENVIRONMENT"', "require the typed confirmation 'destroy <environment>'"),
+    ('"$ENVIRONMENT" == "production" && "$ALLOW_PRODUCTION" != "true"', "refuse production unless allow_production is set"),
+):
+    check(needle in validate_job, f"destroy validate job: must {why}")
+check(
+    re.search(r"\n    needs: \[?validate\]?\n", "\n" + destroy_job),
+    "destroy job: must depend on the validate job",
+)
+check("role-to-assume" in destroy_job, "destroy job: must sign in through an OIDC role")
+
+# --- Stale files and statements ----------------------------------------------
+
+check(
+    not (WORKFLOWS / "test-iac.yml").exists(),
+    "test-iac.yml deployed directories that no longer exist, from a branch that does not exist",
+)
+for name, text in all_workflows.items():
+    check(
+        # (generic_chatbot.settings, the Django module, is still real.)
+        not re.search(r"generic_chatbot_frontend|generic_chatbot\b(?!\.)|REACT_APP_", text),
+        f"{name}: refers to directories or variables the repository no longer has",
+    )
+readme = (TERRAFORM / "README.md").read_text()
+check(
+    "test-iac" not in readme and "tf-iac" not in readme,
+    "README.md: refers to the removed test-iac workflow or the tf-iac branch",
+)
+reference = (ROOT / "docs" / "deployment" / "technical-reference.rst").read_text()
+rds_tf = (TERRAFORM / "rds.tf").read_text()
+if re.search(r'backup_retention_period\s*=\s*var\.environment == "production" \? 7 : 1', rds_tf):
+    check(
+        "backup_retention_period = 0" not in reference and "backups are disabled" not in reference,
+        "technical-reference.rst: says backups are disabled, but rds.tf keeps 7 days (production) / 1 day (staging)",
+    )
 
 if failures:
     print("\n".join(f"FAIL: {f}" for f in failures))
