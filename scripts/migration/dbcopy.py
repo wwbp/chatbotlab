@@ -1217,6 +1217,28 @@ def _other_sessions(conn):
     )
 
 
+def lossy_floats(conn):
+    """FLOAT columns holding a value that does not survive the server's text
+    rendering (what mariadb-dump writes), as "table.column (n rows)"."""
+    found = []
+    for row in _rows(
+        conn,
+        ["TABLE_NAME", "COLUMN_NAME"],
+        "COLUMNS",
+        "TABLE_SCHEMA = DATABASE() AND DATA_TYPE = 'float'",
+        order="TABLE_NAME, ORDINAL_POSITION",
+    ):
+        t, c = q(row["table_name"]), q(row["column_name"])
+        sql = (
+            f"SELECT COUNT(*) FROM {t} WHERE {c} IS NOT NULL "
+            f"AND NOT CAST(CONCAT({c}, '') AS FLOAT) + 0E0 = {c} + 0E0"
+        )
+        n = int(query(conn, sql)[0][0])
+        if n:
+            found.append(f"{row['table_name']}.{row['column_name']} ({n} rows)")
+    return found
+
+
 def step_dump(args):
     src = connect("source")
     args.record["source"] = src.describe()
@@ -1245,6 +1267,13 @@ def step_dump(args):
             f"not InnoDB: {', '.join(other)}. A single-transaction dump is only "
             "consistent for these if nothing is writing; stop the app and pass "
             "--source-is-quiesced.",
+        )
+    lossy = lossy_floats(src)
+    if lossy:
+        raise Refuse(
+            "mariadb-dump writes FLOAT with 6 significant digits, so these "
+            f"values would change in the copy: {', '.join(lossy)}. Convert the "
+            "column(s) to DOUBLE on the source first, or copy them another way.",
         )
     options = list(DUMP_OPTIONS)
     if objects["PROCEDURE"] or objects["FUNCTION"]:
