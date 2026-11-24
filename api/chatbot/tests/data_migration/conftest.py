@@ -206,7 +206,10 @@ def _create_db_and_user(server, db, password, collation=None):
         # ALL, on purpose: the tool must be unable to write to the source
         # even when the account it is given could.
         f"GRANT ALL PRIVILEGES ON {db}.* TO '{USER}'@'%';"
-        f"GRANT PROCESS ON *.* TO '{USER}'@'%';",
+        f"GRANT PROCESS ON *.* TO '{USER}'@'%';"
+        # Lets a non-SUPER account create the fixture's trigger and procedure
+        # on MySQL, where binary logging is on by default.
+        "SET GLOBAL log_bin_trust_function_creators = 1;",
     )
 
 
@@ -218,11 +221,13 @@ def db_collation(server, db):
     )[0][0]
 
 
-def reset_target():
+def reset_target(collation=None):
     """Drop and recreate the target database, empty, with the source's default
     collation where the target server has it (it may not, across flavours)."""
     try:
-        _create_db_and_user(DST, DST_DB, DST_PASSWORD, db_collation(SRC, SRC_DB))
+        _create_db_and_user(
+            DST, DST_DB, DST_PASSWORD, collation or db_collation(SRC, SRC_DB)
+        )
     except RuntimeError:
         _create_db_and_user(DST, DST_DB, DST_PASSWORD)
 
@@ -241,6 +246,8 @@ def plain_copy():
             "--default-character-set=utf8mb4",
             "--single-transaction",
             "--hex-blob",
+            "--routines",
+            "--events",
             SRC_DB,
         ],
         env={**os.environ, "MYSQL_PWD": ROOT_PASSWORD},
