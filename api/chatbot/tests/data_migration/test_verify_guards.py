@@ -218,3 +218,15 @@ def test_empty_source_is_refused(copied, tmp_path):
             admin(server, "DROP DATABASE IF EXISTS mig_void")
     assert result.returncode == 2, result.stdout + result.stderr
     assert "no tables" in result.stderr
+
+
+# ── V6: the hash function itself works ───────────────────────────────────────
+
+ABC_SHA256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+
+def test_broken_sha2_is_refused(copied, tmp_path):
+    env = shim(tmp_path, "mariadb", f'"$REAL" "$@" | sed s/{ABC_SHA256}/{"0" * 64}/')
+    result = verify(tmp_path / "run", env)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "SHA2" in result.stderr
