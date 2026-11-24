@@ -28,6 +28,7 @@ from .conftest import (
     SRC,
     SRC_DB,
     SRC_PASSWORD,
+    USER,
     _root_args,
     admin,
     db_collation,
@@ -136,6 +137,16 @@ def test_dump_file_checksum_is_recorded_and_true(copy):
     assert not list(run_dir.glob("*.partial"))
     # The file is private to the operator: it is the whole database.
     assert (run_dir / "dump.sql").stat().st_mode & 0o077 == 0
+
+
+def test_every_file_in_the_run_directory_is_private(copy):
+    # Review 1: reports, run.log and the checksum file as well as the dump.
+    run_dir, _ = copy
+    modes = {p.name: oct(p.stat().st_mode & 0o777) for p in run_dir.iterdir()}
+    assert {"dump.sql", "dump.sql.sha256", "run.log", "verify-report.json"} <= set(
+        modes
+    )
+    assert set(modes.values()) == {"0o600"}, modes
 
 
 def test_dump_is_deterministic(copy, dumped):
@@ -770,6 +781,67 @@ def test_reset_target_confirmation_names_host_and_database(half_restored):
     assert result.returncode == 2, result.stdout + result.stderr
     assert "host/database" in result.stderr
     assert target_tables() == before
+
+
+def test_reset_target_refuses_once_a_later_restore_went_elsewhere(dumped, tmp_path):
+    # Review 2: restore into T1 and verify it; start a restore into T2 from the
+    # same run directory; reset-target on T1 must not empty the proven copy.
+    run_dir = fresh_run_with_dump(dumped, tmp_path)
+    reset_target()
+    assert tool("--run-dir", str(run_dir), "restore").returncode == 0
+    assert tool("--run-dir", str(run_dir), "verify").returncode == 0
+    admin(
+        DST,
+        "DROP DATABASE IF EXISTS mig_dst2; CREATE DATABASE mig_dst2;"
+        "GRANT ALL PRIVILEGES ON mig_dst2.* TO 'mig_user'@'%'",
+    )
+    try:
+        t2 = tool_env(MIG_TARGET_DATABASE="mig_dst2")
+        assert tool("--run-dir", str(run_dir), "restore", env=t2).returncode == 0
+        before = target_tables()
+        result = reset(run_dir)
+    finally:
+        admin(DST, "DROP DATABASE IF EXISTS mig_dst2")
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "another server" in result.stderr
+    assert target_tables() == before
+
+
+def test_restore_client_runs_sandboxed(dumped, tmp_path):
+    # Review 3: like every other client run, where the client supports it.
+    run_dir = fresh_run_with_dump(dumped, tmp_path)
+    reset_target()
+    result, commands = tool_recording_commands(
+        tmp_path, "--run-dir", str(run_dir), "restore"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    (load,) = [c for c in commands if "--show-warnings" in c]
+    supported = (
+        "--sandbox"
+        in subprocess.run(
+            [CLIENT, "--no-defaults", "--help"], capture_output=True, text=True
+        ).stdout
+    )
+    assert ("--sandbox" in load) == supported, load
+
+
+def test_option_file_cannot_make_the_dump_flush_or_lock(same_flavour, tmp_path):
+    # Review 3: a [mysqldump] group in the operator's option file must not add
+    # FLUSH, global locks or binlog changes. mig_user lacks RELOAD and SUPER,
+    # so any of these would make the dump fail.
+    option_file = tmp_path / "source.cnf"
+    option_file.write_text(
+        f"[client]\nhost={SRC.host}\nport={SRC.port}\nuser={USER}\n"
+        f"password={SRC_PASSWORD}\nssl-verify-server-cert=0\n"
+        "[mysqldump]\nflush-logs\nmaster-data=2\nlock-all-tables\ndelete-master-logs\n"
+    )
+    option_file.chmod(0o600)
+    env = tool_env(MIG_SOURCE_DEFAULTS_FILE=str(option_file))
+    for name in ("HOST", "PORT", "USER", "PASSWORD"):
+        del env[f"MIG_SOURCE_{name}"]
+    run_dir = tmp_path / "run"
+    result = tool("--run-dir", str(run_dir), "dump", env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 # ── and the app, last (it writes on login) ───────────────────────────────────

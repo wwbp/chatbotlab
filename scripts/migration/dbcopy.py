@@ -262,8 +262,10 @@ _UNESCAPE = {"0": "\0", "n": "\n", "t": "\t", "\\": "\\"}
 
 
 def _field(raw):
-    # The client prints SQL NULL as the bare word NULL in batch mode. Queries
-    # in this file never select a string that could itself be "NULL".
+    # The client prints SQL NULL as the bare word NULL in batch mode, so a
+    # string that is exactly "NULL" also reads as None. Row hashes, digests and
+    # counts can never be that; in schema text it can (e.g. on MySQL a column
+    # whose string default is 'NULL' reads like DEFAULT NULL).
     if raw == "NULL":
         return None
     return re.sub(r"\\([0nt\\])", lambda m: _UNESCAPE[m.group(1)], raw)
@@ -274,7 +276,10 @@ def query(conn, sql, writable=False):
     proc = _spawn(conn, sql, writable)
     out = proc.stdout.read().decode()
     _finish(conn, proc)
-    return [[_field(f) for f in line.split("\t")] for line in out.splitlines()]
+    # Only "\n" ends a row: the client escapes it inside values, but not
+    # U+2028, \r or the other breaks splitlines() would also split on.
+    lines = out.removesuffix("\n").split("\n") if out else []
+    return [[_field(f) for f in line.split("\t")] for line in lines]
 
 
 ABC_SHA256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
@@ -747,9 +752,20 @@ def compare_table(src, dst, name, table):
             kind, key = "row_extra_on_target", b[0]
             if not _key_exists(dst, name, table["primary_key"], a[0]):
                 kind, key = "row_missing_on_target", a[0]
-            detail = f"first divergence: source key {a[0]}, target key {b[0]}"
+            detail = (
+                f"first divergence: source key {hide_key(a[0])}, "
+                f"target key {hide_key(b[0])}"
+            )
+        if key is not None and not integer_key:
+            key = hide_key(key)
         diffs.append({"table": name, "kind": kind, "key": key, "detail": detail})
     return result, diffs
+
+
+def hide_key(key):
+    """A non-integer key is data (django_session.session_key is a login
+    token): show only a short hash of it, enough to match it up by hand."""
+    return "sha256:" + hashlib.sha256(key.encode()).hexdigest()[:12]
 
 
 def _key_exists(conn, table, primary_key, key):
@@ -861,9 +877,18 @@ SCRATCH = "_dbcopy_preflight"
 def target_can_load(dst):
     """Do, on a scratch table, each kind of thing a restore does."""
     try:
+        # On its own: if this fails (the name is taken), nothing of ours exists
+        # and nothing may be dropped.
         query(
             dst,
-            f"CREATE TABLE {SCRATCH} (id INT AUTO_INCREMENT PRIMARY KEY, v INT, KEY (v));"
+            f"CREATE TABLE {SCRATCH} (id INT AUTO_INCREMENT PRIMARY KEY, v INT, KEY (v))",
+            writable=True,
+        )
+    except Refuse as error:
+        return str(error)
+    try:
+        query(
+            dst,
             f"INSERT INTO {SCRATCH} (v) VALUES (1);"
             f"ALTER TABLE {SCRATCH} AUTO_INCREMENT = 100;"
             f"DROP TABLE {SCRATCH};",
@@ -1107,7 +1132,9 @@ def step_preflight(args):
     }
     args.run_dir.mkdir(parents=True, exist_ok=True)
     path = args.run_dir / "preflight-report.json"
-    path.write_text(json.dumps(scrub_values(report), indent=2, sort_keys=True) + "\n")
+    write_private(
+        path, json.dumps(scrub_values(report), indent=2, sort_keys=True) + "\n"
+    )
     args.record.update(
         source_tables=len(base),
         source_rows=sum(a["tables"].values()),
@@ -1136,6 +1163,21 @@ def step_preflight(args):
     return 1 if failed else 0
 
 
+def _open_log(path):
+    """run.log for appending, readable by the operator only (0600)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.fchmod(fd, 0o600)
+    return os.fdopen(fd, "a")
+
+
+def write_private(path, text):
+    """Write ``text`` to ``path``, readable by the operator only (0600)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)  # also when the file already existed
+    with os.fdopen(fd, "w") as out:
+        out.write(text)
+
+
 # ── dump, restore, reset-target ──────────────────────────────────────────────
 
 # Read-only by construction: none of these makes mariadb-dump lock, flush or
@@ -1154,6 +1196,12 @@ DUMP_OPTIONS = [
     # dump loaded into the wrong database would destroy what is there.
     "--skip-add-drop-table",
     "--max-allowed-packet=1G",
+    # Pinned off whatever a [mysqldump] group in the option file says: no
+    # FLUSH, no global read lock, no binlog position or purge on the source.
+    "--skip-flush-logs",
+    "--skip-lock-all-tables",
+    "--master-data=0",
+    "--skip-delete-master-logs",
 ]
 TRAILER = b"-- Dump completed"
 
@@ -1183,7 +1231,7 @@ def append_log(args, **entry):
     torn = (
         path.exists() and path.stat().st_size and not path.read_bytes().endswith(b"\n")
     )
-    with path.open("a") as log:
+    with _open_log(path) as log:
         if torn:
             log.write("\n")  # never glue an entry onto a torn last line
         # Scrub the values, before JSON escapes ", \ or non-ASCII in them.
@@ -1358,7 +1406,9 @@ def step_dump(args):
             os.fdopen(
                 os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb"
             ) as out,
-            errors.open("wb") as err,
+            os.fdopen(
+                os.open(errors, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb"
+            ) as err,
         ):
             proc = _popen(command, stdout=subprocess.PIPE, stderr=err, env=env)
             while chunk := proc.stdout.read(1 << 20):
@@ -1390,7 +1440,7 @@ def step_dump(args):
             f"{proc.returncode}): {stderr or 'no completion marker'}"
         )
     partial.rename(path)
-    (args.run_dir / "dump.sql.sha256").write_text(f"{digest.hexdigest()}  dump.sql\n")
+    write_private(args.run_dir / "dump.sql.sha256", f"{digest.hexdigest()}  dump.sql\n")
     args.record.update(
         file=str(path),
         bytes=size,
@@ -1499,7 +1549,12 @@ def load_dump(dst, path):
     # --show-warnings: dumps switch strict mode off, so bad data is only a
     # warning; restore treats any warning as failure.
     command, env = _command(
-        CLIENT, dst, "--max-allowed-packet=1G", "--show-warnings", "--skip-force"
+        CLIENT,
+        dst,
+        "--max-allowed-packet=1G",
+        "--show-warnings",
+        "--skip-force",
+        *_sandbox(),
     )
     # One handle, hashed as it is fed: the bytes loaded are the bytes checked.
     digest = hashlib.sha256()
@@ -1775,7 +1830,7 @@ def step_verify(args):
     args.run_dir.mkdir(parents=True, exist_ok=True)
     path = report_path
     text = json.dumps(scrub_values(report), indent=2, sort_keys=True) + "\n"
-    path.write_text(text)
+    write_private(path, text)
     args.record.update(
         tables_compared=report["tables_compared"],
         rows_compared=report["rows_compared"],
