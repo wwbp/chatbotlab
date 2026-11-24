@@ -1442,8 +1442,7 @@ def step_snapshot_check(args):
     restores are manual (docs/deployment/data-migration.rst); this step makes
     that gate explicit: without it on record for this source, dump refuses.
     """
-    source = _identity(Conn.from_env("source"))  # no connection is made
-    args.record["source"] = source
+    # The flags first: they need no connection settings (S1).
     if not args.snapshot_id:
         raise Refuse("give the snapshot's identifier with --snapshot-id")
     if not args.snapshot_verified:
@@ -1452,6 +1451,8 @@ def step_snapshot_check(args):
             "and that restoring it was proven (restored to a scratch instance "
             "and compared with `verify`). If that has not been done, do it first.",
         )
+    source = _identity(Conn.from_env("source"))  # no connection is made
+    args.record["source"] = source
     if args.dry_run:
         say(f"dry-run: would record snapshot {args.snapshot_id}; nothing recorded.")
         return 0
