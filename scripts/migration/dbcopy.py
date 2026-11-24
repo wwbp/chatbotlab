@@ -653,6 +653,9 @@ def check_same_flavour(src, dst):
 
 
 def step_verify(args):
+    # First: whatever happens next, no earlier "ok" report may survive it.
+    report_path = args.run_dir / "verify-report.json"
+    report_path.unlink(missing_ok=True)
     src, dst = connect("source"), connect("target")
     check_same_flavour(src, dst)
     check_different(src, dst)
@@ -709,7 +712,7 @@ def step_verify(args):
         "tables": tables,
     }
     args.run_dir.mkdir(parents=True, exist_ok=True)
-    path = args.run_dir / "verify-report.json"
+    path = report_path
     path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
 
     for name, entry in tables.items():
