@@ -276,3 +276,49 @@ def test_interrupt_exits_2(copied, tmp_path):
     assert proc.returncode == 2, stderr
     assert "INTERRUPTED" in stderr
     assert "Traceback" not in stderr
+
+
+# ── V9: routines and events are compared by signature and schedule ───────────
+
+AS_MIG_USER = "CREATE DEFINER = 'mig_user'@'%' "  # so mig_user can read the body
+ROUTINE_PAIRS = {
+    "parameter_type": (
+        "FUNCTION mig_f(x INT) RETURNS INT DETERMINISTIC NO SQL RETURN 1",
+        "FUNCTION mig_f(x BIGINT) RETURNS INT DETERMINISTIC NO SQL RETURN 1",
+        "DROP FUNCTION IF EXISTS mig_f",
+    ),
+    "return_type": (
+        "FUNCTION mig_f() RETURNS INT DETERMINISTIC NO SQL RETURN 1",
+        "FUNCTION mig_f() RETURNS BIGINT DETERMINISTIC NO SQL RETURN 1",
+        "DROP FUNCTION IF EXISTS mig_f",
+    ),
+    # Same name, both types: keyed by name only, one hides the other.
+    "function_and_procedure": (
+        "FUNCTION mig_f() RETURNS INT DETERMINISTIC NO SQL RETURN 1;"
+        + AS_MIG_USER
+        + "PROCEDURE mig_f() DETERMINISTIC NO SQL DO 1",
+        "FUNCTION mig_f() RETURNS INT DETERMINISTIC NO SQL RETURN 1;"
+        + AS_MIG_USER
+        + "PROCEDURE mig_f() DETERMINISTIC NO SQL DO 2",
+        "DROP FUNCTION IF EXISTS mig_f; DROP PROCEDURE IF EXISTS mig_f",
+    ),
+    "event_schedule": (
+        "EVENT mig_e ON SCHEDULE EVERY 1 DAY DISABLE DO DO 1",
+        "EVENT mig_e ON SCHEDULE EVERY 2 DAY DISABLE DO DO 1",
+        "DROP EVENT IF EXISTS mig_e",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", ROUTINE_PAIRS)
+def test_routine_and_event_signatures_compared(case, copied, tmp_path):
+    on_source, on_target, drop = ROUTINE_PAIRS[case]
+    try:
+        s(AS_MIG_USER + on_source)
+        t(AS_MIG_USER + on_target)
+        result = verify(tmp_path)
+    finally:
+        s(drop)
+        t(drop)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "DIFFERENT" in result.stdout
