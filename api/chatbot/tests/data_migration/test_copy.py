@@ -349,6 +349,39 @@ def _kill_restore_midway(run_dir):
     proc.wait()
 
 
+def _target_sessions():
+    return admin(
+        DST,
+        "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE USER = 'mig_user'",
+    )[0][0]
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP], ids=["TERM", "HUP"])
+def test_a_signalled_restore_stops_its_client_and_logs_the_outcome(
+    sig, dumped, tmp_path
+):
+    # D3: only the Python process is signalled, as a closed terminal or a
+    # plain `kill` would. Its database client must not carry on loading.
+    run_dir = fresh_run_with_dump(dumped, tmp_path)
+    reset_target()
+    proc = subprocess.Popen(
+        [sys.executable, str(SCRIPT), "--run-dir", str(run_dir), "restore"],
+        env=tool_env(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 60
+    while len(target_tables()) < 3:
+        assert proc.poll() is None, "restore finished before it could be signalled"
+        assert time.monotonic() < deadline
+    proc.send_signal(sig)
+    assert proc.wait(timeout=30) == 2
+    time.sleep(2)
+    assert _target_sessions() == "0", "the restore's client is still loading"
+    statuses = [e["status"] for e in read_log(run_dir) if e["step"] == "restore"]
+    assert statuses == ["started", "interrupted"]
+
+
 def test_interrupted_restore_is_detected_cleaned_up_and_redone(dumped, tmp_path):
     run_dir = fresh_run_with_dump(dumped, tmp_path)
     reset_target()
