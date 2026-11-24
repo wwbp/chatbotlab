@@ -243,7 +243,11 @@ def test_help_states_the_exit_code_contract(tmp_path):
 
 
 def _source_commands(commands):
-    return [c for c in commands if f"--host={SRC.host} " in c and f"{SRC_DB}" in c]
+    return [
+        c
+        for c in commands
+        if f"--host={SRC.host} --port={SRC.port} " in c and f"{SRC_DB}" in c
+    ]
 
 
 def test_read_only_survives_a_reconnect(same_flavour, tmp_path):
@@ -283,10 +287,10 @@ def test_each_client_gets_only_its_own_password(same_flavour, tmp_path):
             "MIG_SOURCE_PASSWORD" in environment or "MIG_TARGET_PASSWORD" in environment
         )
         assert not leaked, f"MIG_*_PASSWORD passed to: {argv}"
-        if f"--host={SRC.host} " in argv:
+        if f"--host={SRC.host} --port={SRC.port} " in argv:
             seen["source"] += 1
             leaked = DST_PASSWORD in environment
-        elif f"--host={DST.host} " in argv:
+        elif f"--host={DST.host} --port={DST.port} " in argv:
             seen["target"] += 1
             leaked = SRC_PASSWORD in environment
         assert not leaked, f"the other side's password passed to: {argv}"
@@ -342,7 +346,7 @@ def test_every_source_session_is_read_only_by_argv_and_stdin(same_flavour, tmp_p
     source = [
         (argv, sent)
         for argv, sent in recorded_stdin(tmp_path)
-        if f"--host={SRC.host} " in argv
+        if f"--host={SRC.host} --port={SRC.port} " in argv
     ]
     assert len(source) > 10
     for argv, sent in source:

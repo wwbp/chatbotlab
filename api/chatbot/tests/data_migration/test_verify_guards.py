@@ -21,6 +21,8 @@ from .conftest import (
     SRC_DB,
     SRC_PASSWORD,
     admin,
+    create_limited_account,
+    drop_limited_account,
     plain_copy,
     shim,
     tool,
@@ -182,15 +184,17 @@ def test_select_only_account_cannot_hide_a_trigger(select_only_account, tmp_path
 
 
 def test_unreadable_routine_bodies_refused(copied, tmp_path):
-    # Defined by root: mig_user may run it but not read its body (NULL).
+    # Defined by root: mig_lim may run it but not read its body (NULL).
     routine = "CREATE FUNCTION mig_f() RETURNS INT DETERMINISTIC NO SQL RETURN {}"
+    env = create_limited_account()
     try:
         s(routine.format(1))
         t(routine.format(2))
-        result = verify(tmp_path)
+        result = verify(tmp_path, env)
     finally:
         s("DROP FUNCTION IF EXISTS mig_f")
         t("DROP FUNCTION IF EXISTS mig_f")
+        drop_limited_account()
     assert result.returncode == 2, result.stdout + result.stderr
     assert "mig_f" in result.stderr
 
