@@ -32,6 +32,7 @@ from .conftest import (
     reset_target,
     tool,
     tool_env,
+    tool_recording_commands,
 )
 from .fixture_data import EMOJI_TEXT, N_UTTERANCES, SURVEY_CONTEXT
 
@@ -181,6 +182,21 @@ def test_no_writing_statement_reaches_the_source(same_flavour, tmp_path):
         if re.match(rf"\s*(/\*.*?\*/\s*)*({WRITE_VERBS})\b", s, flags=re.IGNORECASE)
     ]
     assert writes == []
+
+
+def test_no_credential_in_dump_or_restore_command_lines(same_flavour, tmp_path):
+    reset_target()
+    run_dir = tmp_path / "run"
+    for step in ("dump", "restore"):
+        result, commands = tool_recording_commands(
+            tmp_path, "--run-dir", str(run_dir), step
+        )
+        assert result.returncode == 0, result.stderr
+        assert any("--max-allowed-packet" in c for c in commands)  # the big one ran
+        for secret in (SRC_PASSWORD, DST_PASSWORD):
+            assert secret not in "\n".join(commands)
+            assert secret not in result.stdout + result.stderr
+            assert secret not in (run_dir / "run.log").read_text()
 
 
 # ── refusing to start ────────────────────────────────────────────────────────
