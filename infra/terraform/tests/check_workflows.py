@@ -141,6 +141,74 @@ for path in (TERRAFORM / "setup.sh", TERRAFORM / "README.md", TERRAFORM / "boots
     )
 
 
+# --- Deploy secrets: only the chosen environment's, only when asked ----------
+
+staging_yml = all_workflows["staging.yml"]
+production_yml = all_workflows["production.yml"]
+
+
+def aws_secrets(text):
+    return set(re.findall(r"secrets\.(AWS_\w+)", text))
+
+
+# The staging and production deploy workflows must not read one secret in
+# common, or writing it for one environment repoints the other. production.yml
+# may fall back to a shared name (`secrets.AWS_PROD_X || secrets.AWS_X`) only
+# after its own name, so deployments set up before the split keep working.
+check(
+    not any("PROD" in name for name in aws_secrets(staging_yml)),
+    "staging.yml reads a production secret",
+)
+without_fallbacks = re.sub(r"\|\|\s*secrets\.AWS_\w+", "", production_yml)
+shared = {name for name in aws_secrets(without_fallbacks) if "PROD" not in name}
+check(not shared, f"production.yml reads secrets that staging.yml owns: {sorted(shared)}")
+
+check(
+    re.search(r"\n      write_deploy_secrets:\n(?:        .*\n)*?        default: false", deploy),
+    "deploy-infrastructure.yml: needs a 'write_deploy_secrets' input that defaults to false",
+)
+check(
+    len(re.findall(r"gh secret set (?!__PREFLIGHT_TEST__)", deploy)) == 1 and "set_secret()" in deploy,
+    "deploy-infrastructure.yml: 'gh secret set' may appear once, inside set_secret() "
+    "(plus the token preflight)",
+)
+step = re.search(r"- name: Write deployment secrets\n(?:        .*\n|\n)+", deploy)
+check(step, "deploy-infrastructure.yml: 'Write deployment secrets' step not found")
+step = step.group(0) if step else ""
+check(
+    re.search(r"\n        if: [^\n]*inputs\.write_deploy_secrets", step),
+    "deploy-infrastructure.yml: secrets may be written only when write_deploy_secrets is set",
+)
+check(
+    len(re.findall(r"\bset_secret\s+AWS_", deploy)) == len(re.findall(r"\bset_secret\s+AWS_", step)),
+    "deploy-infrastructure.yml: set_secret is called outside the 'Write deployment secrets' step",
+)
+written = {}
+for env_name in ("staging", "production"):
+    branch = re.search(rf"\n\s+{env_name}\)\n(.*?)\n\s+;;", step, re.S)
+    check(branch, f"deploy-infrastructure.yml: no '{env_name})' branch in the secrets step")
+    written[env_name] = set(re.findall(r"set_secret\s+(\w+)", branch.group(1))) if branch else set()
+check(
+    len(re.findall(r"\bset_secret\s+AWS_", step)) == sum(len(names) for names in written.values()),
+    "deploy-infrastructure.yml: a secret is written outside the staging/production branches",
+)
+check(
+    written["staging"] == aws_secrets(staging_yml),
+    f"building staging must write exactly the secrets staging.yml reads; "
+    f"difference: {sorted(written['staging'] ^ aws_secrets(staging_yml))}",
+)
+production_reads = {name for name in aws_secrets(production_yml) if "PROD" in name}
+check(
+    written["production"] == production_reads,
+    f"building production must write exactly the AWS_*PROD* secrets production.yml reads; "
+    f"difference: {sorted(written['production'] ^ production_reads)}",
+)
+# Building infrastructure must not also start an application deploy.
+check(
+    "gh workflow run" not in deploy,
+    "deploy-infrastructure.yml: must not trigger another workflow",
+)
+
 if failures:
     print("\n".join(f"FAIL: {f}" for f in failures))
     sys.exit(1)
