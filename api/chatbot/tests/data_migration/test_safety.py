@@ -18,7 +18,7 @@ from .conftest import (
     reset_target,
     tool,
     tool_env,
-    tool_watching_processes,
+    tool_recording_commands,
 )
 
 # Enough for preflight to pass against a filled target on any same-flavour pair.
@@ -88,18 +88,20 @@ def _assert_no_secret(text, where):
 
 def test_no_credential_in_process_list_output_or_log(same_flavour, tmp_path):
     plain_copy()
+    run_dir = tmp_path / "run"
     for step in (["preflight", *PREFLIGHT_FLAGS], ["verify"]):
-        result, command_lines = tool_watching_processes(
-            "--run-dir", str(tmp_path), *step
+        result, commands = tool_recording_commands(
+            tmp_path, "--run-dir", str(run_dir), *step
         )
         assert result.returncode == 0, result.stdout + result.stderr
-        # The watcher did see the database client being run.
-        assert any("--batch" in line and SRC.host in line for line in command_lines)
-        _assert_no_secret("\n".join(command_lines), "the process list")
+        # Every query the step made is in the record: tens of client runs.
+        assert sum(f"--host={SRC.host}" in c for c in commands) > 5
+        assert sum(f"--host={DST.host}" in c for c in commands) > 5
+        _assert_no_secret("\n".join(commands), "a client command line")
         _assert_no_secret(result.stdout + result.stderr, "the tool's output")
-    for path in tmp_path.iterdir():
+    for path in run_dir.iterdir():
         _assert_no_secret(path.read_text(), path.name)
-    assert USER not in (tmp_path / "run.log").read_text()
+    assert USER not in (run_dir / "run.log").read_text()
 
 
 def test_wrong_password_is_refused_without_echoing_it(source_db, tmp_path):
@@ -128,11 +130,12 @@ def test_credentials_can_come_from_a_client_option_file(same_flavour, tmp_path):
     for name in ("HOST", "PORT", "USER", "PASSWORD"):
         del env[f"MIG_SOURCE_{name}"]
     run_dir = tmp_path / "run"
-    result, command_lines = tool_watching_processes(
-        "--run-dir", str(run_dir), "verify", env=env
+    result, commands = tool_recording_commands(
+        tmp_path, "--run-dir", str(run_dir), "verify", env=env
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    _assert_no_secret("\n".join(command_lines), "the process list")
+    assert any(str(option_file) in c for c in commands)
+    _assert_no_secret("\n".join(commands), "a client command line")
     _assert_no_secret((run_dir / "run.log").read_text(), "run.log")
 
 

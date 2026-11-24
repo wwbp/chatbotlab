@@ -16,7 +16,6 @@ import os
 import shutil
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import NamedTuple
@@ -283,28 +282,25 @@ def read_log(run_dir):
     return [json.loads(line) for line in lines]
 
 
-def tool_watching_processes(*args, env=None):
-    """Run the tool while recording every command line on the machine.
+def tool_recording_commands(tmp_path, *args, env=None):
+    """Run the tool and record every database client command line it issues.
 
-    Returns (result, set of command lines seen while it ran), read from /proc
-    as `ps` would.
+    Wrappers named like the clients go first on PATH; each appends its full
+    argument list (exactly what `ps` would show) to a file, then becomes the
+    real client. Complete and deterministic, unlike sampling the process list.
+    Returns (result, list of command lines).
     """
-    seen = set()
-    done = threading.Event()
-
-    def watch():
-        while not done.is_set():
-            for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
-                try:
-                    seen.add(cmdline.read_bytes().replace(b"\0", b" ").decode())
-                except OSError:
-                    continue
-
-    watcher = threading.Thread(target=watch)
-    watcher.start()
-    try:
-        result = tool(*args, env=env)
-    finally:
-        done.set()
-        watcher.join()
-    return result, seen
+    bin_dir = tmp_path / "recording-bin"
+    bin_dir.mkdir(exist_ok=True)
+    record = tmp_path / "recorded-commands.txt"
+    record.write_text("")
+    for name, real in (("mariadb", CLIENT), ("mariadb-dump", DUMP)):
+        wrapper = bin_dir / name
+        wrapper.write_text(
+            f"#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >> '{record}'\nexec '{real}' \"$@\"\n"
+        )
+        wrapper.chmod(0o755)
+    env = dict(env or tool_env())
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    result = tool(*args, env=env)
+    return result, record.read_text().splitlines()
