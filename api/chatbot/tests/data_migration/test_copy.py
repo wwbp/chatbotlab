@@ -17,13 +17,16 @@ import time
 import pytest
 
 from .conftest import (
+    CLIENT,
     DST,
     DST_DB,
     DST_PASSWORD,
+    ROOT_PASSWORD,
     SCRIPT,
     SRC,
     SRC_DB,
     SRC_PASSWORD,
+    _root_args,
     admin,
     db_collation,
     django,
@@ -43,6 +46,9 @@ WRITE_VERBS = (
     "INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP|TRUNCATE|RENAME|GRANT|REVOKE"
     "|LOCK|FLUSH|CALL|LOAD|OPTIMIZE|ANALYZE|REPAIR"
 )
+
+
+CONFIRM = f"{DST.host}/{DST_DB}"
 
 
 def target_tables():
@@ -340,7 +346,7 @@ def test_interrupted_restore_is_detected_cleaned_up_and_redone(dumped, tmp_path)
     result = tool("--run-dir", str(run_dir), "reset-target")
     assert result.returncode == 2
     result = tool(
-        "--run-dir", str(run_dir), "reset-target", "--confirm-database", "wrong_name"
+        "--run-dir", str(run_dir), "reset-target", "--confirm", f"{DST.host}/wrong_name"
     )
     assert result.returncode == 2
     assert target_tables() == partial
@@ -349,16 +355,14 @@ def test_interrupted_restore_is_detected_cleaned_up_and_redone(dumped, tmp_path)
         "--run-dir",
         str(run_dir),
         "reset-target",
-        "--confirm-database",
-        DST_DB,
+        "--confirm",
+        CONFIRM,
         "--dry-run",
     )
     assert result.returncode == 0, result.stderr
     assert target_tables() == partial
 
-    result = tool(
-        "--run-dir", str(run_dir), "reset-target", "--confirm-database", DST_DB
-    )
+    result = tool("--run-dir", str(run_dir), "reset-target", "--confirm", CONFIRM)
     assert result.returncode == 0, result.stderr
     assert target_tables() == []
 
@@ -384,8 +388,8 @@ def test_reset_target_only_empties_a_database_this_run_loaded(dumped, tmp_path):
         "--run-dir",
         str(run_dir),
         "reset-target",
-        "--confirm-database",
-        SRC_DB,
+        "--confirm",
+        f"{SRC.host}/{SRC_DB}",
         env=as_if_source_were_target,
     )
     assert result.returncode == 2
@@ -398,8 +402,8 @@ def test_reset_target_only_empties_a_database_this_run_loaded(dumped, tmp_path):
         "--run-dir",
         str(run_dir),
         "reset-target",
-        "--confirm-database",
-        SRC_DB,
+        "--confirm",
+        f"{SRC.host}/{SRC_DB}",
         env=as_if_source_were_target,
     )
     assert result.returncode == 2
@@ -417,12 +421,93 @@ def test_reset_target_refuses_a_database_that_was_not_empty_before(dumped, tmp_p
         ).returncode
         == 0
     )
-    result = tool(
-        "--run-dir", str(run_dir), "reset-target", "--confirm-database", DST_DB
-    )
+    result = tool("--run-dir", str(run_dir), "reset-target", "--confirm", CONFIRM)
     assert result.returncode == 2
     assert "was not empty" in result.stderr
     assert "precious" in target_tables()
+
+
+# ── reset-target must never empty the wrong database (D1) ──────────────────
+
+
+def reset(run_dir, confirm=CONFIRM, env=None):
+    return tool(
+        "--run-dir", str(run_dir), "reset-target", "--confirm", confirm, env=env
+    )
+
+
+def test_reset_target_refuses_after_a_successful_verify(copy):
+    run_dir, results = copy
+    assert results["verify"].returncode == 0
+    before = target_tables()
+    result = reset(run_dir)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "verif" in result.stderr
+    assert target_tables() == before
+
+
+@pytest.fixture
+def half_restored(dumped, tmp_path):
+    run_dir = fresh_run_with_dump(dumped, tmp_path)
+    reset_target()
+    _kill_restore_midway(run_dir)
+    time.sleep(1)  # let the server notice its client is gone
+    return run_dir
+
+
+def test_reset_target_refuses_objects_the_dump_did_not_name(half_restored):
+    admin(DST, "CREATE TABLE mig_stowaway (id INT PRIMARY KEY)", DST_DB)
+    result = reset(half_restored)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "mig_stowaway" in result.stderr
+    assert "mig_stowaway" in target_tables()
+
+
+def test_reset_target_checks_the_server_identity_by_query(half_restored):
+    # As if the recorded restore had reached some other server.
+    log = half_restored / "run.log"
+    entries = [json.loads(line) for line in log.read_text().splitlines()]
+    for e in entries:
+        if e["step"] == "restore" and e["status"] == "started":
+            e["target_identity"] = {
+                **e.get("target_identity", {}),
+                "hostname": "elsewhere",
+            }
+    log.write_text("".join(json.dumps(e) + "\n" for e in entries))
+    before = target_tables()
+    result = reset(half_restored)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "identity" in result.stderr
+    assert target_tables() == before
+
+
+def test_reset_target_refuses_while_others_are_connected(half_restored):
+    idle = subprocess.Popen(
+        [CLIENT, *_root_args(DST), DST_DB],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={"MYSQL_PWD": ROOT_PASSWORD, "PATH": "/usr/bin:/bin"},
+    )
+    idle.stdin.write(b"DO SLEEP(6);")
+    idle.stdin.close()
+    time.sleep(0.5)
+    before = target_tables()
+    try:
+        result = reset(half_restored)
+    finally:
+        idle.wait()
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "session" in result.stderr
+    assert target_tables() == before
+
+
+def test_reset_target_confirmation_names_host_and_database(half_restored):
+    before = target_tables()
+    result = reset(half_restored, confirm=DST_DB)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "host/database" in result.stderr
+    assert target_tables() == before
 
 
 # ── and the app, last (it writes on login) ───────────────────────────────────
