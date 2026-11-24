@@ -187,3 +187,34 @@ def test_unreadable_routine_bodies_refused(copied, tmp_path):
         t("DROP FUNCTION IF EXISTS mig_f")
     assert result.returncode == 2, result.stdout + result.stderr
     assert "mig_f" in result.stderr
+
+
+# ── V5: two different databases, and something to compare ───────────────────
+
+
+def test_target_pointing_at_the_source_is_refused(copied, tmp_path):
+    env = tool_env(
+        **{
+            f"MIG_TARGET_{k}": tool_env()[f"MIG_SOURCE_{k}"]
+            for k in ("HOST", "PORT", "USER", "PASSWORD", "DATABASE")
+        }
+    )
+    result = verify(tmp_path, env)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "same database" in result.stderr
+
+
+def test_empty_source_is_refused(copied, tmp_path):
+    for server in (SRC, DST):
+        admin(
+            server,
+            "CREATE DATABASE mig_void; GRANT ALL PRIVILEGES ON mig_void.* TO 'mig_user'@'%'",
+        )
+    try:
+        env = tool_env(MIG_SOURCE_DATABASE="mig_void", MIG_TARGET_DATABASE="mig_void")
+        result = verify(tmp_path, env)
+    finally:
+        for server in (SRC, DST):
+            admin(server, "DROP DATABASE IF EXISTS mig_void")
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "no tables" in result.stderr
