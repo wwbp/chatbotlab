@@ -136,6 +136,33 @@ def shim(tmp_path, name, body):
     return tool_env(PATH=f"{bin_dir}:{os.environ['PATH']}")
 
 
+# Exactly what verify requires: lists every routine but cannot read the body
+# of one it did not define (ALL PRIVILEGES would: MariaDB 11.3+ includes
+# SHOW CREATE ROUTINE in it).
+LIMITED = "mig_lim"
+LIMITED_GRANTS = "SELECT, SHOW VIEW, TRIGGER, EVENT, EXECUTE"
+
+
+def create_limited_account():
+    """mig_lim on both servers, same passwords as mig_user; returns its env."""
+    for server, db, password in (
+        (SRC, SRC_DB, SRC_PASSWORD),
+        (DST, DST_DB, DST_PASSWORD),
+    ):
+        admin(
+            server,
+            f"DROP USER IF EXISTS '{LIMITED}'@'%';"
+            f"CREATE USER '{LIMITED}'@'%' IDENTIFIED BY '{password}';"
+            f"GRANT {LIMITED_GRANTS} ON {db}.* TO '{LIMITED}'@'%';",
+        )
+    return tool_env(MIG_SOURCE_USER=LIMITED, MIG_TARGET_USER=LIMITED)
+
+
+def drop_limited_account():
+    for server in (SRC, DST):
+        admin(server, f"DROP USER IF EXISTS '{LIMITED}'@'%'")
+
+
 def django(code, server, db, password):
     """Run a snippet in a fresh Django process pointed at one of the test DBs."""
     env = {

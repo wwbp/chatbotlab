@@ -1482,6 +1482,16 @@ def _recorded_snapshot(args, src):
     return recorded[-1]["snapshot_id"]
 
 
+# The only warnings restore accepts. Neither touches data:
+# - an event was created while the target's scheduler is off (it is defined,
+#   just not running);
+# - MySQL 8 deprecates integer display widths (int(11)) in the DDL.
+HARMLESS_WARNINGS = (
+    "Warning (Code 1105): Event scheduler is switched off",
+    "Warning (Code 1681): Integer display width is deprecated",
+)
+
+
 def load_dump(dst, path):
     """Feed the dump file to the client. Target only, ever."""
     if dst.role != "target":
@@ -1588,9 +1598,7 @@ def step_restore(args):
     warnings = [
         w
         for w in re.findall(r"(?m)^(?:Warning|Error) \(Code \d+\).*$", output)
-        # The one harmless warning: an event was created while the target's
-        # scheduler is off (it is defined, just not running).
-        if not w.startswith("Warning (Code 1105): Event scheduler is switched off")
+        if not w.startswith(HARMLESS_WARNINGS)
     ]
     if output:
         say(f"restore: client output:\n{output}")
