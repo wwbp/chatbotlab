@@ -199,7 +199,7 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: '~1.9'
+          terraform_version: '~1.11'
           terraform_wrapper: false
 
       # Offline: the AWS provider is mocked in infra/terraform/tests/.
@@ -210,3 +210,8 @@ jobs:
           terraform init -backend=false -input=false
           terraform validate
           terraform test
+
+      # Text checks on the infrastructure workflows, so an edit cannot bring
+      # back a hazard such as destroy-on-failure.
+      - name: Workflow guard checks
+        run: python3 infra/terraform/tests/check_workflows.py

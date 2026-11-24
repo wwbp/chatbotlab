@@ -20,6 +20,12 @@ name: Destroy Infrastructure
 on:
   workflow_dispatch:
     inputs:
+      # Typed, not chosen from a list, and with no default: a list would
+      # preselect its first entry.
+      environment:
+        description: 'Environment to destroy: type "staging" or "production"'
+        required: true
+        type: string
       confirm_destroy:
         description: 'Type "destroy" to confirm you want to delete all infrastructure'
         required: true
@@ -42,10 +48,15 @@ jobs:
       # ── 1. Validate confirmations before touching anything ────────────────────
       - name: Validate confirmations
         env:
+          ENVIRONMENT:     ${{ inputs.environment }}
           CONFIRM_DESTROY: ${{ inputs.confirm_destroy }}
           CONFIRM_DATA:    ${{ inputs.confirm_data_loss }}
         run: |
           fail=0
+          if [[ "$ENVIRONMENT" != "staging" && "$ENVIRONMENT" != "production" ]]; then
+            echo "::error::Environment must be exactly 'staging' or 'production'. Got: '$ENVIRONMENT'"
+            fail=1
+          fi
           if [[ "$CONFIRM_DESTROY" != "destroy" ]]; then
             echo "::error::First field must be exactly 'destroy'. Got: '$CONFIRM_DESTROY'"
             fail=1
@@ -65,7 +76,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: '~1.9'
+          terraform_version: '~1.11'
           terraform_wrapper: false
 
       # ── 4. AWS credentials ────────────────────────────────────────────────────
@@ -81,6 +92,7 @@ jobs:
         id: state
         env:
           TF_PROJECT_PREFIX: ${{ secrets.TF_PROJECT_PREFIX }}
+          ENVIRONMENT: ${{ inputs.environment }}
         run: |
           # Required, with no fallback. This workflow deletes infrastructure, so
           # a guessed prefix could target the wrong resources entirely.
@@ -95,17 +107,28 @@ jobs:
             echo "::error::State bucket $BUCKET not found — there may be no infrastructure to destroy."
             exit 1
           fi
-          echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
-          echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
-          echo "prefix=$TF_PROJECT_PREFIX" >> "$GITHUB_OUTPUT"
+          # Stop before anything is emptied if this environment has no state:
+          # with nothing in state Terraform would destroy nothing, but the
+          # bucket-emptying step below would still have deleted its files.
+          if ! aws s3api head-object --bucket "$BUCKET" --key "${TF_PROJECT_PREFIX}/${ENVIRONMENT}/terraform.tfstate" >/dev/null 2>&1; then
+            echo "::error::No Terraform state for '$ENVIRONMENT' in the state bucket — nothing here was built by Terraform under that name."
+            exit 1
+          fi
+          {
+            echo "bucket=$BUCKET"
+            echo "account_id=$ACCOUNT_ID"
+            echo "prefix=$TF_PROJECT_PREFIX"
+          } >> "$GITHUB_OUTPUT"
 
       # ── 6. Initialise Terraform ───────────────────────────────────────────────
       - name: Initialise Terraform
         working-directory: infra/terraform
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
         run: |
           terraform init \
             -backend-config="bucket=${{ steps.state.outputs.bucket }}" \
-            -backend-config="key=${{ steps.state.outputs.prefix }}/terraform.tfstate" \
+            -backend-config="key=${{ steps.state.outputs.prefix }}/${ENVIRONMENT}/terraform.tfstate" \
             -backend-config="region=us-east-1" \
             -backend-config="encrypt=true" \
             -reconfigure \
@@ -135,6 +158,7 @@ jobs:
       - name: Empty S3 buckets
         env:
           PREFIX: ${{ steps.state.outputs.prefix }}
+          ENVIRONMENT: ${{ inputs.environment }}
           STATE_BUCKET: ${{ steps.state.outputs.bucket }}
         run: |
           empty_bucket() {
@@ -156,11 +180,13 @@ jobs:
             echo "  Done — s3://$b is empty."
           }
 
-          # Everything this deployment owns, minus the state bucket, which has
-          # to survive: the destroy running right after this reads state from
-          # it. It is managed separately and is deliberately left behind.
+          # Everything this environment owns. The match includes the
+          # environment: matching on the project prefix alone would also empty
+          # the other environment's buckets. The state bucket is named
+          # <prefix>-tfstate-…, so it does not match; the explicit check stays
+          # as a second guard, because the destroy right after this reads it.
           for b in $(aws s3api list-buckets \
-                       --query "Buckets[?starts_with(Name, '${PREFIX}-')].Name" \
+                       --query "Buckets[?starts_with(Name, '${PREFIX}-${ENVIRONMENT}-')].Name" \
                        --output text); do
             [ "$b" = "$STATE_BUCKET" ] && { echo "Keeping state bucket $b."; continue; }
             empty_bucket "$b"
@@ -170,8 +196,10 @@ jobs:
       # rds.tf sets deletion_protection = false, but guard against any manual
       # change that may have enabled it — destroy would fail silently otherwise.
       - name: Disable RDS deletion protection
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
         run: |
-          RDS_ID="${{ steps.state.outputs.prefix }}-production-database"
+          RDS_ID="${{ steps.state.outputs.prefix }}-${ENVIRONMENT}-database"
           STATUS=$(aws rds describe-db-instances \
             --db-instance-identifier "$RDS_ID" \
             --query 'DBInstances[0].DBInstanceStatus' --output text 2>/dev/null \
@@ -191,7 +219,7 @@ jobs:
         working-directory: infra/terraform
         env:
           TF_VAR_project_name:                ${{ secrets.TF_PROJECT_PREFIX }}
-          TF_VAR_environment:                 production
+          TF_VAR_environment:                 ${{ inputs.environment }}
           TF_VAR_github_org:                  ${{ github.repository_owner }}
           TF_VAR_github_repo:                 ${{ github.event.repository.name }}
           TF_VAR_openai_api_key:              ${{ secrets.OPENAI_API_KEY }}
@@ -226,8 +254,8 @@ jobs:
             echo ""
             echo "### What was NOT deleted"
             echo "The Terraform state bucket (\`${{ steps.state.outputs.prefix }}-tfstate-${ACCOUNT_ID}\`) was left in place."
-            echo "It is now empty and costs less than \$0.01/month. To remove it completely, delete it"
-            echo "manually in the [AWS S3 console](https://s3.console.aws.amazon.com/s3/buckets)."
+            echo "It holds one state file per environment and costs less than \$0.01/month. Do not delete it"
+            echo "while the other environment exists."
             echo ""
             echo "To redeploy in the future, run the **Deploy Infrastructure** workflow again."
           } >> "$GITHUB_STEP_SUMMARY"
