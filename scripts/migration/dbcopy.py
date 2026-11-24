@@ -795,18 +795,6 @@ def table_activity(conn):
     return listed, base
 
 
-def has_select_on_database(conn):
-    # An account granted only some tables sees a smaller database and nothing
-    # errors. Grants made through roles are not seen here: this fails safe.
-    me = "REPLACE(GRANTEE, CHAR(39), '') = CURRENT_USER() AND PRIVILEGE_TYPE = 'SELECT'"
-    sql = (
-        f"SELECT (SELECT COUNT(*) FROM information_schema.USER_PRIVILEGES WHERE {me})"
-        f" + (SELECT COUNT(*) FROM information_schema.SCHEMA_PRIVILEGES WHERE {me}"
-        " AND DATABASE() LIKE TABLE_SCHEMA)"
-    )
-    return query(conn, sql)[0][0] != "0"
-
-
 def routines_and_events(conn):
     """Names of the database's routines and events, e.g. "PROCEDURE p"."""
     return [
@@ -997,15 +985,30 @@ def step_preflight(args):
         fatal=not args.require_quiesced,
     )
     problem = ""
-    if not has_select_on_database(src):
+    missing = missing_privileges(src, DEFINITION_PRIVILEGES)
+    if missing:
         problem = (
-            "the source account does not hold the SELECT privilege on the "
-            "whole database; tables it cannot see would silently be left out"
+            f"the source account lacks {', '.join(missing)} on the whole database; "
+            "tables, views, triggers, events or routines it cannot see would "
+            "silently be left out of the dump"
+        )
+    unreadable = [
+        r[0]
+        for r in query(
+            src,
+            "SELECT CONCAT(ROUTINE_TYPE, ' ', ROUTINE_NAME) FROM information_schema.ROUTINES"
+            " WHERE ROUTINE_SCHEMA = DATABASE() AND ROUTINE_DEFINITION IS NULL",
+        )
+    ]
+    if unreadable:
+        problem = "; ".join(
+            filter(None, [problem, f"cannot read the body of {', '.join(unreadable)}"])
         )
     check(
         "source_privileges",
         problem,
-        f"SELECT on the whole database; {len(base)} tables readable",
+        f"{', '.join(DEFINITION_PRIVILEGES)} on the whole database; "
+        f"{len(base)} tables readable",
     )
 
     target_listed, target_base = table_activity(dst)
