@@ -327,6 +327,24 @@ def test_dump_with_a_lot_on_stderr_does_not_deadlock(same_flavour, tmp_path):
     assert (run_dir / "dump.sql").exists()
 
 
+def test_float_the_dump_would_round_is_refused(same_flavour, tmp_path):
+    # D7: mariadb-dump writes FLOAT with 6 significant digits; 1.500001 would
+    # come back as 1.5. Values that survive that (the fixture's) are copied.
+    admin(
+        SRC,
+        "CREATE TABLE mig_flt (id INT PRIMARY KEY, x FLOAT);"
+        "INSERT INTO mig_flt VALUES (1, 1.5), (2, 1.500001)",
+        SRC_DB,
+    )
+    try:
+        result = tool("--run-dir", str(tmp_path), "dump")
+    finally:
+        admin(SRC, "DROP TABLE mig_flt", SRC_DB)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "mig_flt.x" in result.stderr
+    assert not (tmp_path / "dump.sql").exists()
+
+
 # ── restore must not swallow warnings (D4) ─────────────────────────────────
 
 # Like a real dump, it turns strict mode off: 'abc' into an INT is then a
