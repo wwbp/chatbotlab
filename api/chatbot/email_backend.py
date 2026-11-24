@@ -23,7 +23,9 @@ def describe_error(error):
     SES names the rejected address in its message, e.g. "... failed the check
     in region US-EAST-1: a@upenn.edu"; logs keep only "***@upenn.edu".
     """
-    return f"{type(error).__name__}: {re.sub(r'[^\s@:;,<>]+@', '***@', str(error))}"
+    # A quoted name or local part in front goes too: "Smith, John" <j@x.com>.
+    text = re.sub(r'(?:"[^"]*"\s*<?)?[^\s@:;,<>"]*@', "***@", str(error))
+    return f"{type(error).__name__}: {text}"
 
 
 class SESBackend(BaseEmailBackend):
@@ -39,6 +41,7 @@ class SESBackend(BaseEmailBackend):
                 )
             except Exception as error:
                 # Subject = purpose; domains only, never the address or body.
+                # Subjects are logged, so they must not contain personal data.
                 logger.error(
                     "email send failed (%s) to %s: %s",
                     message.subject,
