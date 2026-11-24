@@ -92,7 +92,7 @@ resources is ``{PROJECT_PREFIX}-production``, where ``{PROJECT_PREFIX}`` is the 
      - One per AWS account. See gotcha below.
    * - Terraform state bucket
      - (created by workflow script)
-     - ``{PROJECT_PREFIX}-tfstate-{ACCOUNT_ID}``, versioned, AES-256 encrypted
+     - ``{PROJECT_PREFIX}-tfstate-{ACCOUNT_ID}``, versioned, AES-256 encrypted. One state file per environment: ``{PROJECT_PREFIX}/{environment}/terraform.tfstate``, locked with an S3 lock file
 
 
 Deployment workflows
@@ -105,7 +105,7 @@ Runs ``terraform apply`` against the remote S3 state backend. Steps:
 
 1. **Check required secrets**. Validates presence and GH_PAT write access before touching AWS.
 2. **Bootstrap state bucket**. Creates ``{PROJECT_PREFIX}-tfstate-{ACCOUNT_ID}`` if absent (idempotent).
-3. **Terraform init**. Points to the remote state bucket.
+3. **Terraform init**. Points to the state file of the environment selected in the ``environment`` input. A second run on the same environment stops with a lock error.
 4. **ACM certificate** (custom domain only). Targeted apply, so the validation CNAME can be printed before the full apply blocks waiting for DNS.
 5. **Print DNS validation record** (custom domain only). Written to the workflow Summary.
 6. **``terraform apply``**. Full infrastructure apply.

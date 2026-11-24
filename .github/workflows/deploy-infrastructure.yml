@@ -49,6 +49,16 @@ name: Deploy Infrastructure
 on:
   workflow_dispatch:
     inputs:
+      # No default on purpose: the person starting the run chooses. Each
+      # environment has its own Terraform state, so a run only ever touches
+      # the environment named here.
+      environment:
+        description: 'Which environment to build or update'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
       eb_instance_type:
         description: 'App server EC2 instance type (e.g. t3.small, t3.medium)'
         required: false
@@ -127,7 +137,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: '~1.9'
+          terraform_version: '~1.11'
           terraform_wrapper: false
 
       # ── 4. AWS credentials (long-lived IAM user key for this bootstrap step) ──
@@ -175,16 +185,29 @@ jobs:
             echo "State bucket created: $BUCKET"
           fi
 
+          # State used to live at one key for the whole project, and that
+          # stack was always "production". Starting again from an empty
+          # per-environment state would try to build a second copy on top of
+          # it, so stop until the old state file has been moved.
+          if aws s3api head-object --bucket "$BUCKET" --key "${TF_PROJECT_PREFIX}/terraform.tfstate" >/dev/null 2>&1; then
+            echo "::error::Old state file found at s3://<state bucket>/<prefix>/terraform.tfstate. It describes a production stack. Move it to <prefix>/production/terraform.tfstate (aws s3 mv), then run this workflow again."
+            exit 1
+          fi
+
           echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
           echo "prefix=$TF_PROJECT_PREFIX" >> "$GITHUB_OUTPUT"
 
       # ── 6. Point Terraform at the remote state bucket ─────────────────────────
+      # One state file per environment. The lock (use_lockfile) is set in the
+      # backend block in main.tf, so it cannot be left off here.
       - name: Initialise Terraform
         working-directory: infra/terraform
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
         run: |
           terraform init \
             -backend-config="bucket=${{ steps.bootstrap.outputs.bucket }}" \
-            -backend-config="key=${{ steps.bootstrap.outputs.prefix }}/terraform.tfstate" \
+            -backend-config="key=${{ steps.bootstrap.outputs.prefix }}/${ENVIRONMENT}/terraform.tfstate" \
             -backend-config="region=us-east-1" \
             -backend-config="encrypt=true" \
             -reconfigure \
@@ -197,7 +220,7 @@ jobs:
         working-directory: infra/terraform
         env:
           TF_VAR_project_name:                ${{ secrets.TF_PROJECT_PREFIX }}
-          TF_VAR_environment:                 production
+          TF_VAR_environment:                 ${{ inputs.environment }}
           TF_VAR_github_org:                  ${{ github.repository_owner }}
           TF_VAR_github_repo:                 ${{ github.event.repository.name }}
           TF_VAR_github_org_id:               ${{ github.repository_owner_id }}
@@ -245,7 +268,7 @@ jobs:
         working-directory: infra/terraform
         env:
           TF_VAR_project_name:                ${{ secrets.TF_PROJECT_PREFIX }}
-          TF_VAR_environment:                 production
+          TF_VAR_environment:                 ${{ inputs.environment }}
           TF_VAR_github_org:                  ${{ github.repository_owner }}
           TF_VAR_github_repo:                 ${{ github.event.repository.name }}
           TF_VAR_github_org_id:               ${{ github.repository_owner_id }}

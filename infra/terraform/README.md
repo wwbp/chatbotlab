@@ -58,7 +58,7 @@ nothing to configure in the AWS console after apply completes.
 | Elastic Beanstalk | Docker on AL2023, ALB | Django API server |
 | IAM instance role | Least privilege | App reads/writes S3, calls Bedrock — no hardcoded keys |
 | IAM GitHub OIDC role | Scoped to this repo | GitHub Actions deploys without storing AWS keys |
-| Terraform state | S3 + DynamoDB | Shared, locked, encrypted — created by bootstrap |
+| Terraform state | S3 | One bucket, `<project_name>-tfstate-<account id>`. One state file per environment (`<project_name>/<environment>/terraform.tfstate`), encrypted, locked with an S3 lock file (`use_lockfile`) |
 
 ---
 
@@ -67,7 +67,7 @@ nothing to configure in the AWS console after apply completes.
 Install these before running anything:
 
 ```bash
-# Terraform >= 1.9
+# Terraform >= 1.11
 brew install terraform          # macOS
 # or: https://developer.hashicorp.com/terraform/install
 
@@ -76,7 +76,7 @@ brew install awscli             # macOS
 # or: https://aws.amazon.com/cli/
 
 # Verify
-terraform version               # should show >= 1.9.x
+terraform version               # should show >= 1.11.x
 aws --version                   # should show aws-cli/2.x
 ```
 
@@ -141,7 +141,7 @@ making any changes.
 
 What the script does:
 1. Checks that `terraform`, `aws`, and credentials are ready
-2. Runs the bootstrap step (creates the S3 state bucket and DynamoDB lock table)
+2. Runs the bootstrap step (creates the S3 state bucket)
 3. Runs `terraform init` pointing at that state bucket
 4. Shows you the full plan — review it before confirming
 5. Applies the plan
@@ -200,6 +200,15 @@ account or credentials. CI runs it on every pull request:
 
 ```bash
 terraform init -backend=false && terraform validate && terraform test
+```
+
+`tests/check_workflows.py` reads the infrastructure workflows as text and fails
+if a known hazard comes back (destroy on failure, a hardcoded environment, a
+state key shared by both environments, a missing state lock). CI runs it in the
+same job:
+
+```bash
+python3 infra/terraform/tests/check_workflows.py   # from the repository root
 ```
 
 ## Testing on a separate AWS account
@@ -441,7 +450,7 @@ Not yet done. Suggested baseline before any load test:
 
 | File | What it does |
 |---|---|
-| `bootstrap/main.tf` | Creates the S3 bucket and DynamoDB table for Terraform state. Run once. |
+| `bootstrap/main.tf` | Creates the S3 bucket for Terraform state. Run once per AWS account. |
 | `main.tf` | AWS provider (v6.4) and empty S3 backend declaration |
 | `variables.tf` | All input variables with descriptions |
 | `locals.tf` | Shared naming convention and common tags |
