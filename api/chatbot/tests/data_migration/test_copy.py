@@ -308,6 +308,40 @@ def test_a_failed_dump_leaves_nothing_restore_could_use(kind, same_flavour, tmp_
     assert target_tables() == []
 
 
+# ── restore must not swallow warnings (D4) ─────────────────────────────────
+
+# Like a real dump, it turns strict mode off: 'abc' into an INT is then a
+# warning, and the row is stored as 0.
+LOSSY_DUMP = b"""/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
+CREATE TABLE mig_w (id INT PRIMARY KEY, n INT);
+INSERT INTO mig_w VALUES (1, 'abc');
+-- Dump completed
+"""
+
+
+def run_with_handmade_dump(dumped, run_dir, data):
+    """A run directory whose recorded dump is ``data`` (checksum and all)."""
+    (entry_,) = [e for e in read_log(dumped) if e["step"] == "dump"]
+    (run_dir / "dump.sql").write_bytes(data)
+    entry_.update(
+        sha256=hashlib.sha256(data).hexdigest(),
+        bytes=len(data),
+        tables=1,
+        object_names=["TABLE mig_w"],
+    )
+    (run_dir / "run.log").write_text(json.dumps(entry_) + "\n")
+    return run_dir
+
+
+def test_restore_fails_on_any_warning(dumped, tmp_path):
+    run_dir = run_with_handmade_dump(dumped, tmp_path, LOSSY_DUMP)
+    reset_target()
+    result = tool("--run-dir", str(run_dir), "restore")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "1366" in result.stdout + result.stderr  # Incorrect integer value
+    assert entry(run_dir, "restore", "failed")
+
+
 # ── --dry-run ────────────────────────────────────────────────────────────────
 
 
