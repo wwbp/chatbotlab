@@ -5,12 +5,18 @@ at the wrong thing, and checks verify refuses (2) or reports a difference (1)
 instead of passing. Objects a test creates are removed again.
 """
 
+import signal
+import subprocess
+import sys
+import time
+
 import pytest
 
 from .conftest import (
     DST,
     DST_DB,
     DST_PASSWORD,
+    SCRIPT,
     SRC,
     SRC_DB,
     SRC_PASSWORD,
@@ -241,3 +247,32 @@ def test_stale_ok_report_removed_by_a_refused_run(copied, tmp_path):
     result = verify(tmp_path, tool_env(MIG_TARGET_DATABASE=""))
     assert result.returncode == 2, result.stdout + result.stderr
     assert not stale.exists()
+
+
+# ── V8: a crash or an interrupt is exit 2, never 1 and never a traceback ─────
+
+
+def test_unexpected_error_exits_2_without_traceback(copied, tmp_path):
+    # A client that prints nothing and succeeds: the tool cannot parse that.
+    env = shim(tmp_path, "mariadb", "cat >/dev/null; exit 0")
+    result = verify(tmp_path / "run", env)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "CRASHED" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_interrupt_exits_2(copied, tmp_path):
+    env = shim(tmp_path, "mariadb", "cat >/dev/null; exec sleep 5")
+    proc = subprocess.Popen(
+        [sys.executable, str(SCRIPT), "--run-dir", str(tmp_path / "run"), "verify"],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    time.sleep(1)
+    proc.send_signal(signal.SIGINT)
+    _, stderr = proc.communicate(timeout=30)
+    assert proc.returncode == 2, stderr
+    assert "INTERRUPTED" in stderr
+    assert "Traceback" not in stderr
