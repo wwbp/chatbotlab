@@ -122,6 +122,8 @@ INSTALLED_APPS = [
 # Export button. "view" ties export to the model's view permission, so a role
 # can export exactly what it can read.
 IMPORT_EXPORT_EXPORT_PERMISSION_CODE = "view"
+# IMPORT_EXPORT_ESCAPE_FORMULAE_ON_EXPORT stays off: in django-import-export
+# 4.4.4 it deletes a leading "=" and ignores + - @. See chatbot/admin.py.
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",

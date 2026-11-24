@@ -2,6 +2,8 @@ import datetime as dt
 import io
 import json
 import logging
+import numbers
+import re
 import time
 import uuid
 
@@ -263,7 +265,49 @@ class HistoryAdmin(SimpleHistoryAdmin, BaseAdmin):
     history page fails, so they keep BaseAdmin and Django's own action log."""
 
 
-class DataExportMixin(ExportMixin):
+# Formula escaping. A spreadsheet runs a cell that starts with one of
+# = + - @ tab or carriage-return as a formula, and the cells are typed by
+# participants ("CSV injection"). In the formats a spreadsheet opens as plain
+# text, such a cell gets an apostrophe in front, which spreadsheets read as
+# "this is text"; nothing is removed. A cell that already has apostrophes
+# before the character gets one more, so removing one always gives back
+# exactly what was typed (docs/data/exporting.rst shows analysts how).
+#
+# JSON, YAML and HTML are read by programs or browsers and are left alone.
+# XLSX/XLS/ODS are not installed, so not offered; test_only_text_formats_are_
+# offered fails if that changes, because openpyxl writes "=..." as a formula.
+#
+# It takes two classes because the format is known to the admin and the type
+# of a value (text, or a number such as -1 that must stay a number) only to
+# the Resource, before it renders everything to strings for CSV. Every admin
+# with an Export button uses both; test_every_export_is_formula_safe checks.
+FORMULA_ESCAPED_FORMATS = (base_formats.CSV, base_formats.TSV)
+FORMULA_START = re.compile(r"'*[=+\-@\t\r]")
+
+
+class FormulaSafeExportMixin(ExportMixin):
+    def get_export_data(self, file_format, request, queryset, **kwargs):
+        # import-export hands kwargs down to Resource.export_field.
+        kwargs["escape_formulae"] = isinstance(file_format, FORMULA_ESCAPED_FORMATS)
+        return super().get_export_data(file_format, request, queryset, **kwargs)
+
+
+class FormulaSafeResource(resources.ModelResource):
+    def export_field(self, field, instance, **kwargs):
+        value = super().export_field(field, instance, **kwargs)
+        if (
+            kwargs.get("escape_formulae")
+            and isinstance(value, str)
+            and FORMULA_START.match(value)
+            # Everything that is not a number is treated as text: safer than
+            # listing the text types, should a new kind of field be exported.
+            and not isinstance(field.get_value(instance), numbers.Number)
+        ):
+            value = "'" + value
+        return value
+
+
+class DataExportMixin(FormulaSafeExportMixin):
     """Export for participant data, made to open cleanly in Excel.
 
     Excel only reads a CSV as UTF-8 when the file starts with a byte-order mark;
@@ -289,7 +333,7 @@ class DataExportMixin(ExportMixin):
 # "user_group" is exported as "condition", the word researchers use for it.
 
 
-class ConversationResource(resources.ModelResource):
+class ConversationResource(FormulaSafeResource):
     condition = Field(attribute="user_group", column_name="condition")
     message_count = Field(attribute="message_count", column_name="message_count")
 
@@ -311,7 +355,7 @@ class ConversationResource(resources.ModelResource):
         return queryset.annotate(message_count=Count("utterances"))
 
 
-class BotResource(resources.ModelResource):
+class BotResource(FormulaSafeResource):
     """Resource class for exporting Bot data"""
 
     class Meta:
@@ -319,7 +363,7 @@ class BotResource(resources.ModelResource):
         # Export all fields by default
 
 
-class UtteranceResource(resources.ModelResource):
+class UtteranceResource(FormulaSafeResource):
     conversation_id = Field(
         attribute="conversation__conversation_id", column_name="conversation_id"
     )
@@ -343,7 +387,7 @@ class UtteranceResource(resources.ModelResource):
         )
 
 
-class KeystrokeResource(resources.ModelResource):
+class KeystrokeResource(FormulaSafeResource):
     class Meta:
         model = Keystroke
         fields = (
@@ -355,7 +399,7 @@ class KeystrokeResource(resources.ModelResource):
         )
 
 
-class SurveyResponseResource(resources.ModelResource):
+class SurveyResponseResource(FormulaSafeResource):
     # answers is exported as one JSON text cell, e.g. [{"question": ..., "answer":
     # ...}]; json.loads (or jsonlite::fromJSON) turns it back into a list.
     class Meta:
@@ -1012,7 +1056,7 @@ class UtteranceAdmin(DataExportMixin, ReadOnlyDataAdmin):
 
 
 @admin.register(Bot)
-class BotAdmin(ExportMixin, HistoryAdmin):
+class BotAdmin(FormulaSafeExportMixin, HistoryAdmin):
     resource_class = BotResource
     form = BotAdminForm
 

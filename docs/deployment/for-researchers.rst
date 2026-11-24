@@ -324,7 +324,7 @@ Troubleshooting
 ---------------
 
 **The workflow failed partway through.**
-The workflow automatically rolls back and destroys any partially-created resources. Fix the issue (usually a missing or incorrect secret) and re-run the workflow from scratch.
+The workflow leaves the resources it already created in place. It does not delete anything. Fix the issue (usually a missing or incorrect secret) and run the workflow again. It continues from where it stopped.
 
 **The admin panel will not log in.**
 Make sure you are going to ``/api/admin/`` (not just ``/admin/``). The username is ``admin`` and the password is the value you set as ``ADMIN_PANEL_PASSWORD``.
