@@ -1262,11 +1262,17 @@ def step_dump(args):
     digest = hashlib.sha256()
     size = 0
     tail = b""
+    # stderr to a file, not a pipe: a pipe nobody reads until the end fills
+    # up and blocks the dump forever.
+    errors = args.run_dir / "dump.stderr"
     # 0600 from creation: this file is the whole database in plain text.
-    with os.fdopen(
-        os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb"
-    ) as out:
-        proc = _popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    with (
+        os.fdopen(
+            os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb"
+        ) as out,
+        errors.open("wb") as err,
+    ):
+        proc = _popen(command, stdout=subprocess.PIPE, stderr=err, env=env)
         while chunk := proc.stdout.read(1 << 20):
             out.write(chunk)
             digest.update(chunk)
@@ -1274,7 +1280,9 @@ def step_dump(args):
             tail = (tail + chunk)[-200:]
         out.flush()
         os.fsync(out.fileno())
-    stderr = proc.stderr.read().decode(errors="replace").strip()
+    proc.wait()
+    stderr = errors.read_bytes()[-4000:].decode(errors="replace").strip()
+    errors.unlink()
     # mariadb-dump can die mid-table and still leave a plausible-looking file;
     # its last line is the only proof it reached the end.
     if proc.wait() != 0 or TRAILER not in tail:
