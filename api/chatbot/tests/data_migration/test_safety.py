@@ -352,3 +352,16 @@ def test_every_source_session_is_read_only_by_argv_and_stdin(same_flavour, tmp_p
     for argv, sent in source:
         assert "SET SESSION TRANSACTION READ ONLY" in argv, argv
         assert not READ_WRITE.search(sent), sent[:500]
+
+
+def test_preflight_report_and_run_log_are_private(same_flavour, tmp_path):
+    # Review 1: everything in the run directory is the operator's alone.
+    plain_copy()
+    run_dir = tmp_path / "run"
+    (run_dir).mkdir()
+    (run_dir / "run.log").write_text("")  # an existing, world-readable log
+    (run_dir / "run.log").chmod(0o644)
+    result = tool("--run-dir", str(run_dir), "preflight", *PREFLIGHT_FLAGS)
+    assert result.returncode == 0, result.stdout + result.stderr
+    modes = {p.name: oct(p.stat().st_mode & 0o777) for p in run_dir.iterdir()}
+    assert modes == {"run.log": "0o600", "preflight-report.json": "0o600"}
