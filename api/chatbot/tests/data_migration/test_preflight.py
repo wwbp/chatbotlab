@@ -359,3 +359,36 @@ def test_target_with_only_a_routine_or_event_is_not_empty(
     failed = check(report, "target_empty")
     assert failed["status"] == "fail"
     assert "mig_left" in failed["detail"]
+
+
+def test_source_account_must_be_able_to_dump_everything(same_or_newer_target, tmp_path):
+    # P9: SELECT alone dumps no triggers, events, routine bodies or views.
+    admin(
+        SRC,
+        "DROP USER IF EXISTS 'mig_sel'@'%';"
+        f"CREATE USER 'mig_sel'@'%' IDENTIFIED BY '{SRC_PASSWORD}';"
+        f"GRANT SELECT ON {SRC_DB}.* TO 'mig_sel'@'%'",
+    )
+    try:
+        result, report = preflight(tmp_path, env=tool_env(MIG_SOURCE_USER="mig_sel"))
+    finally:
+        admin(SRC, "DROP USER IF EXISTS 'mig_sel'@'%'")
+    assert result.returncode == 1, result.stdout + result.stderr
+    failed = check(report, "source_privileges")
+    assert failed["status"] == "fail"
+    for privilege in ("SHOW VIEW", "TRIGGER", "EVENT"):
+        assert privilege in failed["detail"]
+
+
+def test_unreadable_routine_body_fails_preflight(same_or_newer_target, tmp_path):
+    # Defined by root: mig_user may run it but its body reads as NULL.
+    admin(
+        SRC, "CREATE FUNCTION mig_f() RETURNS INT DETERMINISTIC NO SQL RETURN 1", SRC_DB
+    )
+    try:
+        result, report = preflight(tmp_path)
+    finally:
+        admin(SRC, "DROP FUNCTION IF EXISTS mig_f", SRC_DB)
+    assert result.returncode == 1, result.stdout + result.stderr
+    failed = check(report, "source_privileges")
+    assert "mig_f" in failed["detail"]
