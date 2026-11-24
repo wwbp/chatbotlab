@@ -7,7 +7,19 @@ instead of passing. Objects a test creates are removed again.
 
 import pytest
 
-from .conftest import DST, DST_DB, SRC, SRC_DB, admin, plain_copy, shim, tool, tool_env
+from .conftest import (
+    DST,
+    DST_DB,
+    DST_PASSWORD,
+    SRC,
+    SRC_DB,
+    SRC_PASSWORD,
+    admin,
+    plain_copy,
+    shim,
+    tool,
+    tool_env,
+)
 
 
 def s(sql):
@@ -128,3 +140,50 @@ def test_identical_views_pass(copied, tmp_path):
         s("DROP VIEW IF EXISTS mig_v")
         t("DROP VIEW IF EXISTS mig_v")
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# ── V4: definitions the account cannot see must not compare equal ────────────
+
+
+@pytest.fixture
+def select_only_account(copied):
+    for server, db, password in (
+        (SRC, SRC_DB, SRC_PASSWORD),
+        (DST, DST_DB, DST_PASSWORD),
+    ):
+        admin(
+            server,
+            "DROP USER IF EXISTS 'mig_ro'@'%';"
+            f"CREATE USER 'mig_ro'@'%' IDENTIFIED BY '{password}';"
+            f"GRANT SELECT ON {db}.* TO 'mig_ro'@'%';",
+        )
+    yield tool_env(MIG_SOURCE_USER="mig_ro", MIG_TARGET_USER="mig_ro")
+    for server in (SRC, DST):
+        admin(server, "DROP USER IF EXISTS 'mig_ro'@'%'")
+
+
+def test_select_only_account_cannot_hide_a_trigger(select_only_account, tmp_path):
+    try:
+        s(
+            "CREATE TRIGGER mig_tr BEFORE INSERT ON mig_empty "
+            "FOR EACH ROW SET NEW.note = NEW.note"
+        )
+        result = verify(tmp_path, select_only_account)
+    finally:
+        s("DROP TRIGGER IF EXISTS mig_tr")
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "TRIGGER" in result.stderr
+
+
+def test_unreadable_routine_bodies_refused(copied, tmp_path):
+    # Defined by root: mig_user may run it but not read its body (NULL).
+    routine = "CREATE FUNCTION mig_f() RETURNS INT DETERMINISTIC NO SQL RETURN {}"
+    try:
+        s(routine.format(1))
+        t(routine.format(2))
+        result = verify(tmp_path)
+    finally:
+        s("DROP FUNCTION IF EXISTS mig_f")
+        t("DROP FUNCTION IF EXISTS mig_f")
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "mig_f" in result.stderr
