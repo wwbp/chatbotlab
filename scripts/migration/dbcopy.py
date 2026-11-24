@@ -1157,8 +1157,10 @@ def main(argv=None):
         args.record["message"] = str(error)
         sys.stderr.write(scrub(f"REFUSED: {error}\n"))
     except KeyboardInterrupt:
+        status = "interrupted"
         sys.stderr.write("INTERRUPTED: stopped before finishing; nothing was proven.\n")
     except Exception as error:  # noqa: BLE001 - any bug must be exit 2, not 1
+        status = "crashed"
         message = f"{type(error).__name__}: {error}"
         args.record["message"] = message
         sys.stderr.write(scrub(f"CRASHED: {message}\nNothing was proven.\n"))
