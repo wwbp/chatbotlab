@@ -841,9 +841,18 @@ SCRATCH = "_dbcopy_preflight"
 def target_can_load(dst):
     """Do, on a scratch table, each kind of thing a restore does."""
     try:
+        # On its own: if this fails (the name is taken), nothing of ours exists
+        # and nothing may be dropped.
         query(
             dst,
-            f"CREATE TABLE {SCRATCH} (id INT AUTO_INCREMENT PRIMARY KEY, v INT, KEY (v));"
+            f"CREATE TABLE {SCRATCH} (id INT AUTO_INCREMENT PRIMARY KEY, v INT, KEY (v))",
+            writable=True,
+        )
+    except Refuse as error:
+        return str(error)
+    try:
+        query(
+            dst,
             f"INSERT INTO {SCRATCH} (v) VALUES (1);"
             f"ALTER TABLE {SCRATCH} AUTO_INCREMENT = 100;"
             f"DROP TABLE {SCRATCH};",
