@@ -807,6 +807,19 @@ def has_select_on_database(conn):
     return query(conn, sql)[0][0] != "0"
 
 
+def routines_and_events(conn):
+    """Names of the database's routines and events, e.g. "PROCEDURE p"."""
+    return [
+        row[0]
+        for row in query(
+            conn,
+            "SELECT CONCAT(ROUTINE_TYPE, ' ', ROUTINE_NAME) FROM information_schema.ROUTINES"
+            " WHERE ROUTINE_SCHEMA = DATABASE() UNION ALL SELECT CONCAT('EVENT ', EVENT_NAME)"
+            " FROM information_schema.EVENTS WHERE EVENT_SCHEMA = DATABASE()",
+        )
+    ]
+
+
 SCRATCH = "_dbcopy_preflight"
 
 
@@ -997,15 +1010,20 @@ def step_preflight(args):
 
     target_listed, target_base = table_activity(dst)
     b["tables"] = {r["table_name"]: r["rows"] for r in target_base}
-    present = [r["table_name"] for r in target_listed]
+    present = [r["table_name"] for r in target_listed] + routines_and_events(dst)
     problem = ""
     if present:
         problem = (
-            f"target already has {len(present)} table(s): {', '.join(present[:10])}"
+            f"target already has {len(present)} object(s): {', '.join(present[:10])}"
         )
         if not args.allow_non_empty_target:
             problem += "; pass --allow-non-empty-target to accept"
-    check("target_empty", problem, "no tables", fatal=not args.allow_non_empty_target)
+    check(
+        "target_empty",
+        problem,
+        "no tables, views, routines or events",
+        fatal=not args.allow_non_empty_target,
+    )
     check(
         "target_privileges",
         target_can_load(dst) or "",
