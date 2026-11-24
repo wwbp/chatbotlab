@@ -226,3 +226,15 @@ def test_run_log_says_interrupted_not_refused(source_db, tmp_path):
     assert proc.wait(timeout=30) == 2
     (entry,) = read_log(tmp_path / "run")
     assert entry["status"] == "interrupted"
+
+
+def test_help_states_the_exit_code_contract(tmp_path):
+    # P3: code, tests, --help and the runbook use one rule.
+    result = tool("--help")
+    assert result.returncode == 0
+    text = " ".join(result.stdout.split())
+    assert (
+        "0 succeeded; 1 a check or comparison found a problem; 2 refused, crashed or interrupted"
+        in text
+    )
+    assert "Anything but 0 means stop" in text
