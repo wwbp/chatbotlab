@@ -641,9 +641,20 @@ def compare_table(src, dst, name, table):
             kind, key = "row_extra_on_target", b[0]
             if not _key_exists(dst, name, table["primary_key"], a[0]):
                 kind, key = "row_missing_on_target", a[0]
-            detail = f"first divergence: source key {a[0]}, target key {b[0]}"
+            detail = (
+                f"first divergence: source key {hide_key(a[0])}, "
+                f"target key {hide_key(b[0])}"
+            )
+        if key is not None and not integer_key:
+            key = hide_key(key)
         diffs.append({"table": name, "kind": kind, "key": key, "detail": detail})
     return result, diffs
+
+
+def hide_key(key):
+    """A non-integer key is data (django_session.session_key is a login
+    token): show only a short hash of it, enough to match it up by hand."""
+    return "sha256:" + hashlib.sha256(key.encode()).hexdigest()[:12]
 
 
 def _key_exists(conn, table, primary_key, key):
@@ -654,6 +665,14 @@ def _key_exists(conn, table, primary_key, key):
         f"= CAST({literal} AS BINARY)"
     )
     return query(conn, sql)[0][0] != "0"
+
+
+def write_private(path, text):
+    """Write ``text`` to ``path``, readable by the operator only (0600)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)  # also when the file already existed
+    with os.fdopen(fd, "w") as out:
+        out.write(text)
 
 
 # ── verify ───────────────────────────────────────────────────────────────────
@@ -732,7 +751,7 @@ def step_verify(args):
     }
     args.run_dir.mkdir(parents=True, exist_ok=True)
     path = report_path
-    path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    write_private(path, json.dumps(report, indent=2, sort_keys=True) + "\n")
 
     for name, entry in tables.items():
         mark = "DIFF" if name in bad else "ok  "
