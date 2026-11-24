@@ -255,6 +255,31 @@ The MariaDB user is created only on first initialisation. Run `make reset` to re
 
 Branch from `main`, keep CI green, and open a pull request. See [CONTRIBUTING.md](CONTRIBUTING.md) for the working conventions.
 
+## Citation
+
+If you use ChatbotLab in your research, please cite:
+
+> Giorgi, S., Sedoc, J., Singh, A. P., Kjell, O. N. E., Lee, S., & Ungar, L. H. (2026, August 15).
+> *ChatbotLab: An Open Framework for Human-Like Chatbot Interaction and Survey Data Collection.*
+> PsyArXiv. https://osf.io/preprints/psyarxiv/f6xua_v1
+
+## Acknowledgements
+
+ChatbotLab is developed at the World Well-Being Project (WWBP). The roles below are the
+contributions stated in the paper above.
+
+| Person | Contribution |
+|---|---|
+| Salvatore Giorgi | Conceptualization; Formal analysis; Methodology; Resources; Software; Supervision; Visualization; Writing (original draft, review and editing) |
+| João Sedoc | Conceptualization; Methodology; Software; Supervision; Writing (review and editing) |
+| Abhay Singh | Formal analysis; Software; Writing (review and editing). Current maintainer of this repository |
+| Oscar Kjell | Formal analysis; Visualization; Writing (original draft) |
+| Soojin Lee | Formal analysis; Software; Writing (review and editing) |
+| Lyle H. Ungar | Conceptualization; Methodology; Funding acquisition; Resources; Supervision; Writing (original draft, review and editing) |
+
+Code contributions have also come from Sourabh Swargam, Manvi Kaul and Kostiantyn Dementiev.
+ChatbotLab builds on [Kani](https://github.com/zhudotexe/kani).
+
 ## License
 
 ChatbotLab is released under the [MIT License](LICENSE).
