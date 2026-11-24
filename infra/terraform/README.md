@@ -269,7 +269,7 @@ the instance role. Three variables control it:
 | Variable | Sets | Value |
 |---|---|---|
 | `site_url` | `SITE_URL` | The public URL, e.g. `https://chatbot.mylab.org`. Empty: `https://<domain_name>` if a custom domain is set, otherwise unset (invites then fail with a warning in the admin) |
-| `email_backend` | `EMAIL_BACKEND` | `chatbot.email_backend.SESBackend` to send. The default prints emails to the application log and sends nothing |
+| `email_backend` | `EMAIL_BACKEND` | `chatbot.email_backend.SESBackend` to send. Empty by default: Terraform then leaves the setting alone (a value set by hand on the environment is kept) and the application prints emails to its log |
 | `default_from_email` | `DEFAULT_FROM_EMAIL` | The sender, e.g. `"ChatbotLab <no-reply@mylab.org>"` |
 
 When `default_from_email` is set, Terraform also gives the instance role one

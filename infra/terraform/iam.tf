@@ -104,7 +104,7 @@ resource "aws_iam_role_policy" "eb_instance_application_access" {
 
 # Sending staff invites and password resets through Amazon SES.
 #
-# Created only when a sender is configured. The application
+# Created only when the SES backend is selected and a sender is configured. The application
 # (api/chatbot/email_backend.py) calls the SES v2 SendEmail API with a raw
 # MIME message and passes the sender explicitly, so the one statement here
 # allows sending from exactly that address and from no other. SendRawEmail is
@@ -114,7 +114,7 @@ resource "aws_iam_role_policy" "eb_instance_application_access" {
 # the account to leave the SES sandbox: both need a person (a DNS record or a
 # confirmation email, and a support request). See README, "Email".
 resource "aws_iam_role_policy" "eb_instance_send_email" {
-  count = local.ses_from_address != "" ? 1 : 0
+  count = local.ses_from_address != "" && var.email_backend == "chatbot.email_backend.SESBackend" ? 1 : 0
 
   name = "${local.name_prefix}-send-email"
   role = aws_iam_role.eb_instance_role.name
@@ -123,10 +123,16 @@ resource "aws_iam_role_policy" "eb_instance_send_email" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "SendFromConfiguredAddressOnly"
-        Effect   = "Allow"
-        Action   = ["ses:SendEmail", "ses:SendRawEmail"]
-        Resource = "arn:aws:ses:${var.aws_region}:${data.aws_caller_identity.current.account_id}:identity/*"
+        Sid    = "SendFromConfiguredAddressOnly"
+        Effect = "Allow"
+        Action = ["ses:SendEmail", "ses:SendRawEmail"]
+        # SES authorises a send against the address identity or its domain
+        # identity, whichever is verified. Naming both, and no others, keeps
+        # the instance from sending as any other identity in the account.
+        Resource = [
+          "arn:aws:ses:${var.aws_region}:${data.aws_caller_identity.current.account_id}:identity/${local.ses_from_address}",
+          "arn:aws:ses:${var.aws_region}:${data.aws_caller_identity.current.account_id}:identity/${split("@", local.ses_from_address)[1]}",
+        ]
         Condition = {
           StringEquals = { "ses:FromAddress" = local.ses_from_address }
         }

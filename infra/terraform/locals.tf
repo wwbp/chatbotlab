@@ -45,7 +45,8 @@ locals {
   # The bare address out of "Name <address>". api/chatbot/email_backend.py
   # passes exactly this to SES as FromEmailAddress, and the IAM policy in
   # iam.tf conditions on it.
-  ses_from_address = try(regex("<([^<>]+)>", var.default_from_email)[0], trimspace(var.default_from_email))
+  # The last bracketed group, trimmed, as Python's parseaddr reads it.
+  ses_from_address = trimspace(try(regex("<([^<>]*)>\\s*$", var.default_from_email)[0], var.default_from_email))
 
   # Use the caller-supplied key if provided; otherwise use the auto-generated
   # one from random_password.django_secret_key (stored in state, stable across
