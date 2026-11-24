@@ -263,3 +263,43 @@ def test_dry_run_connects_but_writes_nothing(same_or_newer_target, tmp_path):
     entries = read_log(tmp_path)
     assert entries[-1]["step"] == "preflight"
     assert entries[-1]["dry_run"] is True
+
+
+# ── P1: database text never becomes SQL ─────────────────────────────────────
+
+AWKWARD_NAMES = ["it's", "back\\slash"]
+# Sorts first; ends the string literal it is pasted into, re-enables writes
+# and inserts.
+INJECTING_NAME = "0';SET TRANSACTION READ WRITE;INSERT mig_empty VALUES(7,'');#"
+
+
+def _make_table(name, rows):
+    ident = "`" + name.replace("`", "``") + "`"
+    admin(
+        SRC,
+        f"CREATE TABLE {ident} (id INT PRIMARY KEY);"
+        + "".join(f"INSERT INTO {ident} VALUES ({i});" for i in range(rows)),
+        SRC_DB,
+    )
+    return f"DROP TABLE IF EXISTS {ident}"
+
+
+def test_awkward_table_names_are_counted_exactly(same_or_newer_target, tmp_path):
+    drops = [_make_table(n, i + 2) for i, n in enumerate(AWKWARD_NAMES)]
+    try:
+        result, report = preflight(tmp_path)
+    finally:
+        admin(SRC, ";".join(drops), SRC_DB)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert report["source"]["tables"]["it's"] == 2
+    assert report["source"]["tables"]["back\\slash"] == 3
+
+
+def test_a_table_name_cannot_write_to_the_source(same_or_newer_target, tmp_path):
+    drop = _make_table(INJECTING_NAME, 1)
+    try:
+        preflight(tmp_path)
+        written = admin(SRC, "SELECT COUNT(*) FROM mig_empty", SRC_DB)[0][0]
+    finally:
+        admin(SRC, drop + "; DELETE FROM mig_empty", SRC_DB)
+    assert written == "0"
