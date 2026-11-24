@@ -18,7 +18,8 @@ are visible in the process list):
 
 Only the standard library and the ``mariadb`` client binary are used.
 
-Exit status: 0 success, 1 the check found a problem, 2 could not run.
+Exit status: 0 succeeded; 1 a check or comparison found a problem; 2 refused,
+crashed or interrupted. Anything but 0 means stop.
 """
 
 import argparse
@@ -106,6 +107,18 @@ class Conn:
         }
 
 
+def _defaults(conn):
+    """Option-file arguments; must come first on any client command line.
+
+    Only the file the operator named is read, never ~/.my.cnf or /etc/my.cnf:
+    an inherited ``safe-updates``, ``select_limit`` or ``force`` there would
+    silently cap or excuse what this tool reads.
+    """
+    if conn.defaults_file:
+        return [f"--defaults-file={conn.defaults_file}"]
+    return ["--no-defaults"]
+
+
 def _spawn(conn, sql, writable=False):
     """The only place a database client is started.
 
@@ -118,9 +131,7 @@ def _spawn(conn, sql, writable=False):
         raise Refuse("no `mariadb` or `mysql` client binary on PATH")
     if writable and conn.role != "target":
         raise Refuse("refusing to open a writable session on the source")
-    args = [CLIENT]
-    if conn.defaults_file:
-        args.append(f"--defaults-extra-file={conn.defaults_file}")  # must be first
+    args = [CLIENT, *_defaults(conn)]
     for flag, value in (("host", conn.host), ("port", conn.port), ("user", conn.user)):
         if value:
             args.append(f"--{flag}={value}")
@@ -130,9 +141,16 @@ def _spawn(conn, sql, writable=False):
         "--batch",
         "--skip-column-names",
         "--quick",  # stream rows; never buffer a whole table in the client
+        "--skip-force",  # stop at the first SQL error, even if a file says force
         conn.database,
     ]
-    preamble = "SET time_zone = '+00:00';"
+    # No row cap, whatever an option file's init-command or the server's
+    # global settings say (2^64-1 is "no limit").
+    preamble = (
+        "SET time_zone = '+00:00';"
+        "SET SESSION sql_select_limit = 18446744073709551615;"
+        "SET SESSION max_join_size = 18446744073709551615;"
+    )
     if not writable:
         preamble += "SET SESSION TRANSACTION READ ONLY;"
     if conn.version and conn.flavour == "mysql":
@@ -179,10 +197,71 @@ def query(conn, sql, writable=False):
     return [[_field(f) for f in line.split("\t")] for line in out.splitlines()]
 
 
+ABC_SHA256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+
 def connect(role):
     conn = Conn.from_env(role)
-    conn.version = query(conn, "SELECT VERSION()")[0][0]
+    conn.version, digest = query(conn, "SELECT VERSION(), SHA2('abc', 256)")[0]
+    # Everything verify proves rests on the server's SHA2 (NULL on a server
+    # built without it).
+    if digest != ABC_SHA256:
+        raise Refuse(
+            f"{role}: SHA2('abc', 256) returned {digest!r}, not the known digest"
+        )
     return conn
+
+
+def identity(conn):
+    """Which server and database this session really reached, by asking it.
+
+    Host names in the environment prove nothing: a tunnel, an alias or a
+    renamed endpoint can lead anywhere.
+    """
+    names = ["hostname", "port", "datadir", "database"]
+    sql = "SELECT @@hostname, @@port, @@datadir, DATABASE()"
+    if conn.flavour == "mysql":
+        names.append("server_uuid")
+        sql += ", @@server_uuid"
+    return dict(zip(names, query(conn, sql)[0], strict=True))
+
+
+def check_different(src, dst):
+    if identity(src) == identity(dst):
+        raise Refuse("source and target are the same database on the same server")
+
+
+# Without these, information_schema silently hides triggers (TRIGGER), events
+# (EVENT), routines (EXECUTE) and view bodies (SHOW VIEW): both sides would
+# show nothing and agree.
+DEFINITION_PRIVILEGES = ("SELECT", "SHOW VIEW", "TRIGGER", "EVENT", "EXECUTE")
+
+
+def missing_privileges(conn, needed):
+    """Privileges in ``needed`` the account holds neither globally nor on the
+    database. Grants made through roles are not seen here: this fails safe."""
+    me = "REPLACE(GRANTEE, CHAR(39), '') = CURRENT_USER()"
+    held = {
+        row[0]
+        for row in query(
+            conn,
+            f"SELECT PRIVILEGE_TYPE FROM information_schema.USER_PRIVILEGES WHERE {me}"
+            " UNION SELECT PRIVILEGE_TYPE FROM information_schema.SCHEMA_PRIVILEGES"
+            f" WHERE {me} AND DATABASE() LIKE TABLE_SCHEMA",
+        )
+    }
+    return [p for p in needed if p not in held]
+
+
+def require_definition_privileges(conn):
+    missing = missing_privileges(conn, DEFINITION_PRIVILEGES)
+    if missing:
+        raise Refuse(
+            f"{conn.role}: the account lacks {', '.join(missing)} on {conn.database}; "
+            "without them triggers, events, routines or view definitions are "
+            "invisible and would compare as equal. Grant "
+            f"{', '.join(DEFINITION_PRIVILEGES)} on the database.",
+        )
 
 
 def connect_both(args):
@@ -193,9 +272,7 @@ def connect_both(args):
     dst = connect("target")
     args.record["target"] = dst.describe()
     check_same_flavour(src, dst)
-    identity = "SELECT @@hostname, @@port, @@datadir, DATABASE()"
-    if query(src, identity) == query(dst, identity):
-        raise Refuse("source and target are the same database on the same server")
+    check_different(src, dst)
     return src, dst
 
 
@@ -230,7 +307,7 @@ def read_schema(conn):
             "default collation": default[1],
         },
         "tables": {},
-        "views": [],
+        "views": {},
         "routines": {},
         "triggers": {},
         "events": {},
@@ -247,12 +324,13 @@ def read_schema(conn):
         ],
         "TABLES",
     ):
+        if row["table_type"] == "VIEW":
+            continue  # read below, from information_schema.VIEWS
         if row["table_type"] != "BASE TABLE":
-            # ponytail: views are compared by name only (their definitions embed
-            # the database name). The app has none; compare definitions if it
-            # ever does.
-            schema["views"].append(row["table_name"])
-            continue
+            raise Refuse(
+                f"{conn.role}: {row['table_name']} is a {row['table_type']}; "
+                "verify can only compare base tables and views",
+            )
         schema["tables"][row.pop("table_name")] = {
             "options": {
                 "engine": row["engine"],
@@ -341,18 +419,53 @@ def read_schema(conn):
     for row in checks:
         tables[row["table_name"]]["check"][row["constraint_name"]] = row["check_clause"]
     for kind, table, name, columns in (
-        ("routines", "ROUTINES", "ROUTINE_NAME",
-         ["ROUTINE_TYPE", "SHA2(ROUTINE_DEFINITION, 256) AS definition_sha256", "SQL_MODE"]),
-        ("triggers", "TRIGGERS", "TRIGGER_NAME",
+        # A function and a procedure may share a name: key by both.
+        ("routines", "ROUTINES", "CONCAT(ROUTINE_TYPE, ' ', ROUTINE_NAME) AS name",
+         ["DTD_IDENTIFIER", "IS_DETERMINISTIC", "SECURITY_TYPE", "SQL_DATA_ACCESS",
+          "SHA2(ROUTINE_DEFINITION, 256) AS definition_sha256", "SQL_MODE"]),
+        ("triggers", "TRIGGERS", "TRIGGER_NAME AS name",
          ["EVENT_OBJECT_TABLE", "ACTION_TIMING", "EVENT_MANIPULATION",
           "SHA2(ACTION_STATEMENT, 256) AS definition_sha256"]),
-        ("events", "EVENTS", "EVENT_NAME",
-         ["STATUS", "SHA2(EVENT_DEFINITION, 256) AS definition_sha256"]),
+        ("events", "EVENTS", "EVENT_NAME AS name",
+         ["STATUS", "EVENT_TYPE", "EXECUTE_AT", "INTERVAL_VALUE", "INTERVAL_FIELD",
+          "STARTS", "ENDS", "ON_COMPLETION", "TIME_ZONE",
+          "SHA2(EVENT_DEFINITION, 256) AS definition_sha256"]),
     ):  # fmt: skip
         where = f"{table[:-1]}_SCHEMA = DATABASE()"
         for row in _rows(conn, [name, *columns], table, where=where):
-            schema[kind][row.pop(name.lower())] = row
-    schema["views"].sort()
+            if row["definition_sha256"] is None:
+                raise Refuse(
+                    f"{conn.role}: cannot read the body of {kind[:-1]} {row['name']}; "
+                    "the account must be its definer or hold SHOW_ROUTINE (MySQL) / "
+                    "SHOW CREATE ROUTINE or SELECT on mysql.proc (MariaDB)",
+                )
+            schema[kind][row.pop("name")] = row
+    # Parameters, and a function's return type (position 0).
+    for row in _rows(
+        conn,
+        ["CONCAT(ROUTINE_TYPE, ' ', SPECIFIC_NAME) AS name", "ORDINAL_POSITION",
+         "PARAMETER_MODE", "PARAMETER_NAME", "DTD_IDENTIFIER"],
+        "PARAMETERS",
+        where="SPECIFIC_SCHEMA = DATABASE()",
+        order="ROUTINE_TYPE, SPECIFIC_NAME, ORDINAL_POSITION",
+    ):  # fmt: skip
+        routine = schema["routines"].get(row.pop("name"))
+        if routine is not None:
+            routine.setdefault("parameters", []).append(row)
+    # Each side's definition names its own database: drop that qualifier.
+    for row in _rows(
+        conn,
+        ["TABLE_NAME",
+         "REPLACE(VIEW_DEFINITION, CONCAT('`', DATABASE(), '`.'), '') AS definition",
+         "CHECK_OPTION", "SECURITY_TYPE"],
+        "VIEWS",
+    ):  # fmt: skip
+        if not row["definition"]:
+            raise Refuse(
+                f"{conn.role}: cannot read the definition of view "
+                f"{row['table_name']}; grant SHOW VIEW on the database",
+            )
+        schema["views"][row.pop("table_name")] = row
     return schema
 
 
@@ -387,9 +500,7 @@ def diff_schema(src, dst):
                 key,
                 _explain(src["database"][key], dst["database"][key]),
             )
-    if src["views"] != dst["views"]:
-        add(None, "database", "views", _explain(src["views"], dst["views"]))
-    for kind in ("routines", "triggers", "events"):
+    for kind in ("views", "routines", "triggers", "events"):
         for name in sorted(src[kind].keys() | dst[kind].keys()):
             a, b = src[kind].get(name), dst[kind].get(name)
             if a != b:
@@ -411,15 +522,17 @@ def diff_schema(src, dst):
                 if a[part].get(item) != b[part].get(item):
                     detail = _explain(a[part].get(item), b[part].get(item))
                     add(name, "schema", f"{part} {item}", detail)
-        # The target's counter may be ahead (rows added since), never behind:
-        # behind means new rows would reuse ids that deleted rows once had.
-        if (a["auto_increment"] or 0) > (b["auto_increment"] or 0):
+        # Must be equal. Behind means new rows would reuse ids that deleted rows
+        # once had; ahead means the target is not a copy of this source state
+        # (it was written to, or copied from a later source). The dump carries
+        # the counter exactly, so a faithful copy is always equal.
+        if a["auto_increment"] != b["auto_increment"]:
             add(
                 name,
                 "auto_increment",
                 None,
                 f"source={a['auto_increment']} target={b['auto_increment']} "
-                "(target must be at least the source's)",
+                "(must be equal)",
             )
     return diffs
 
@@ -451,11 +564,20 @@ def row_hash_sql(table, columns, primary_key):
     * rows are read ORDER BY primary key, so the result does not depend on how
       or in what order either server stores them.
 
-    Numbers and datetimes are hashed as the server renders them as text; the
+    Numbers and datetimes are hashed as the server renders them as text
+    (FLOAT widened to DOUBLE first, see ``cell``); the
     session time zone is pinned to UTC. That rendering is the same for two
     servers of the same flavour, which is all verify accepts.
     """
-    cells = ", ".join(f"IFNULL(SHA2({q(c)}, 256), 'NULL')" for c in columns)
+
+    def cell(name):
+        # FLOAT renders with only 6 significant digits; widened to DOUBLE it
+        # renders exactly (every float is exactly representable as a double).
+        if columns[name]["data_type"] == "float":
+            return f"{q(name)} + 0E0"
+        return q(name)
+
+    cells = ", ".join(f"IFNULL(SHA2({cell(c)}, 256), 'NULL')" for c in columns)
     row = f"SHA2(CONCAT_WS('|', {cells}), 256)"
     if primary_key:
         keys = ", ".join(q(c) for c in primary_key)
@@ -479,7 +601,7 @@ def compare_table(src, dst, name, table):
 
     Memory use is constant: nothing is collected. Returns (result, diffs).
     """
-    sql = row_hash_sql(name, list(table["column"]), table["primary_key"])
+    sql = row_hash_sql(name, table["column"], table["primary_key"])
     integer_key = table["primary_key"] and all(
         table["column"][c]["data_type"] in INTEGER_TYPES for c in table["primary_key"]
     )
@@ -498,6 +620,14 @@ def compare_table(src, dst, name, table):
             first = lines
     _finish(src, procs[0])
     _finish(dst, procs[1])
+    # Independent of how the rows were read: every row the table has was hashed.
+    for side, conn in enumerate((src, dst)):
+        total = int(query(conn, f"SELECT COUNT(*) FROM {q(name)}")[0][0])
+        if total != counts[side]:
+            raise Refuse(
+                f"{name}: {conn.role} has {total} rows by COUNT(*) but only "
+                f"{counts[side]} row hashes were read; the comparison is incomplete"
+            )
 
     result = {
         "rows_source": counts[0],
@@ -897,7 +1027,12 @@ def check_same_flavour(src, dst):
 
 
 def step_verify(args):
+    # First: whatever happens next, no earlier "ok" report may survive it.
+    report_path = args.run_dir / "verify-report.json"
+    report_path.unlink(missing_ok=True)
     src, dst = connect_both(args)
+    for conn in (src, dst):
+        require_definition_privileges(conn)
     if args.dry_run:
         say(
             "dry-run: would compare schema and every row of "
@@ -907,6 +1042,10 @@ def step_verify(args):
         return 0
     started = time.monotonic()
     schema_src, schema_dst = read_schema(src), read_schema(dst)
+    if not schema_src["tables"]:
+        raise Refuse(
+            f"source database {src.database} has no tables: nothing to compare"
+        )
     diffs = diff_schema(schema_src, schema_dst)
     tables = {}
     for name, table in sorted(schema_src["tables"].items()):
@@ -945,7 +1084,7 @@ def step_verify(args):
         "tables": tables,
     }
     args.run_dir.mkdir(parents=True, exist_ok=True)
-    path = args.run_dir / "verify-report.json"
+    path = report_path
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     path.write_text(text)
     args.record.update(
@@ -1017,6 +1156,12 @@ def main(argv=None):
     except Refuse as error:
         args.record["message"] = str(error)
         sys.stderr.write(scrub(f"REFUSED: {error}\n"))
+    except KeyboardInterrupt:
+        sys.stderr.write("INTERRUPTED: stopped before finishing; nothing was proven.\n")
+    except Exception as error:  # noqa: BLE001 - any bug must be exit 2, not 1
+        message = f"{type(error).__name__}: {error}"
+        args.record["message"] = message
+        sys.stderr.write(scrub(f"CRASHED: {message}\nNothing was proven.\n"))
     finally:
         entry = {
             "time": datetime.now(UTC).isoformat(timespec="seconds"),

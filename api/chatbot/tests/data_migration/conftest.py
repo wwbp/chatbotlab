@@ -120,6 +120,19 @@ def tool(*args, env=None):
     )
 
 
+def shim(tmp_path, name, body):
+    """Put a fake ``name`` first on PATH; return the tool env that uses it.
+
+    ``$REAL`` in ``body`` is the real database client.
+    """
+    bin_dir = tmp_path / "shim-bin"
+    bin_dir.mkdir(exist_ok=True)
+    path = bin_dir / name
+    path.write_text(f"#!/bin/sh\nREAL={CLIENT}\n{body}\n")
+    path.chmod(0o755)
+    return tool_env(PATH=f"{bin_dir}:{os.environ['PATH']}")
+
+
 def django(code, server, db, password):
     """Run a snippet in a fresh Django process pointed at one of the test DBs."""
     env = {

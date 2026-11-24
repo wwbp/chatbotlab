@@ -6,8 +6,8 @@
 #   1. Checks that the tools I need (terraform, aws CLI) are installed
 #   2. Checks that AWS credentials are configured
 #   3. Checks that terraform.tfvars exists (copy from terraform.tfvars.example)
-#   4. Runs the bootstrap step to create the S3 state bucket and DynamoDB lock
-#      table (skips if already done)
+#   4. Runs the bootstrap step to create the S3 state bucket (skips if
+#      already done)
 #   5. Runs `terraform init` pointing at the backend created in step 4
 #   6. Runs `terraform apply` to provision all infrastructure
 #   7. Prints the GitHub Actions secrets you need to configure
@@ -19,7 +19,8 @@
 #   bash setup.sh
 #
 # To deploy a second environment (e.g. production), set environment="production"
-# in a separate terraform.tfvars and run again.
+# in terraform.tfvars and run again. Each environment has its own state file
+# (<project_name>/<environment>/terraform.tfstate) in the same bucket.
 # -----------------------------------------------------------------------------
 
 set -euo pipefail
@@ -94,18 +95,20 @@ BACKEND_HCL="$SCRIPT_DIR/backend.hcl"
 
 cd "$BOOTSTRAP_DIR"
 
+# project_name and environment have no defaults (they name live AWS resources,
+# so guessing them is unsafe). Read the values the operator already set in
+# terraform.tfvars, so the state bucket, the state key and the main config agree.
+PROJECT_NAME=$(grep -E '^\s*project_name\s*=' "$TFVARS" | head -1 | cut -d'"' -f2)
+ENVIRONMENT=$(grep -E '^\s*environment\s*=' "$TFVARS" | head -1 | cut -d'"' -f2)
+[[ -n "$PROJECT_NAME" ]] \
+  || die "project_name is not set in $TFVARS — add it before running setup."
+[[ "$ENVIRONMENT" == "staging" || "$ENVIRONMENT" == "production" ]] \
+  || die "environment in $TFVARS must be \"staging\" or \"production\"."
+
 if [[ -f "$BACKEND_HCL" ]]; then
   info "backend.hcl already exists — skipping bootstrap (state backend is already provisioned)"
 else
-  info "Running bootstrap to create S3 state bucket and DynamoDB lock table..."
-  # project_name has no default (it names live AWS resources, so guessing it is
-  # unsafe). Read the value the operator already set in terraform.tfvars and
-  # pass it through, so the state bucket and the main config agree.
-  PROJECT_NAME=$(grep -E '^\s*project_name\s*=' "$TFVARS" | head -1 | cut -d'"' -f2)
-  if [[ -z "$PROJECT_NAME" ]]; then
-    echo "ERROR: project_name is not set in $TFVARS — add it before running setup." >&2
-    exit 1
-  fi
+  info "Running bootstrap to create the S3 state bucket..."
   terraform init -reconfigure -input=false
   terraform apply -auto-approve -input=false -var="project_name=$PROJECT_NAME"
   info "Bootstrap complete. backend.hcl written to $BACKEND_HCL"
@@ -119,12 +122,16 @@ header "Initialising Terraform with remote state"
 
 cd "$SCRIPT_DIR"
 
+# One state file per environment. A backend.hcl written by an older bootstrap
+# still carries a project-wide key; the key given here overrides it. The state
+# lock is set in main.tf.
 terraform init \
   -backend-config="$BACKEND_HCL" \
+  -backend-config="key=${PROJECT_NAME}/${ENVIRONMENT}/terraform.tfstate" \
   -reconfigure \
   -input=false
 
-info "Terraform initialised"
+info "Terraform initialised (state: ${PROJECT_NAME}/${ENVIRONMENT}/terraform.tfstate)"
 
 # -----------------------------------------------------------------------------
 # Step 6 — Plan then apply
