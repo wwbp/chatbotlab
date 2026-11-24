@@ -157,7 +157,11 @@ def row_added(_):
         " VALUES ('conv_00001', 1, 1, 1, '2025-01-01 00:00:00')"
     )
     new_id = one("SELECT MAX(id) FROM chatbot_keystroke")
-    undo = f"DELETE FROM chatbot_keystroke WHERE id = {new_id}"
+    # Put the counter back too: verify requires it equal to the source's.
+    undo = (
+        f"DELETE FROM chatbot_keystroke WHERE id = {new_id};"
+        f"ALTER TABLE chatbot_keystroke AUTO_INCREMENT = {new_id}"
+    )
     return undo, ("chatbot_keystroke", "row_extra_on_target", new_id)
 
 

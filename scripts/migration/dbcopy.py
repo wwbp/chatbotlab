@@ -496,15 +496,17 @@ def diff_schema(src, dst):
                 if a[part].get(item) != b[part].get(item):
                     detail = _explain(a[part].get(item), b[part].get(item))
                     add(name, "schema", f"{part} {item}", detail)
-        # The target's counter may be ahead (rows added since), never behind:
-        # behind means new rows would reuse ids that deleted rows once had.
-        if (a["auto_increment"] or 0) > (b["auto_increment"] or 0):
+        # Must be equal. Behind means new rows would reuse ids that deleted rows
+        # once had; ahead means the target is not a copy of this source state
+        # (it was written to, or copied from a later source). The dump carries
+        # the counter exactly, so a faithful copy is always equal.
+        if a["auto_increment"] != b["auto_increment"]:
             add(
                 name,
                 "auto_increment",
                 None,
                 f"source={a['auto_increment']} target={b['auto_increment']} "
-                "(target must be at least the source's)",
+                "(must be equal)",
             )
     return diffs
 
