@@ -33,6 +33,7 @@ from .conftest import (
     django,
     read_log,
     read_report,
+    recorded_stdin,
     reset_target,
     shim,
     tool,
@@ -343,6 +344,103 @@ def test_float_the_dump_would_round_is_refused(same_flavour, tmp_path):
     assert result.returncode == 2, result.stdout + result.stderr
     assert "mig_flt.x" in result.stderr
     assert not (tmp_path / "dump.sql").exists()
+
+
+# ── D6: the smaller ways a dump or restore can go wrong ─────────────────────
+
+
+def test_missing_dump_binary_is_a_clean_refusal(same_flavour, tmp_path):
+    bin_dir = tmp_path / "only-client"
+    bin_dir.mkdir()
+    (bin_dir / "mariadb").symlink_to(CLIENT)
+    env = tool_env(PATH=str(bin_dir))
+    result = tool("--run-dir", str(tmp_path / "run"), "dump", env=env)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "REFUSED" in result.stderr
+    assert "mariadb-dump" in result.stderr
+
+
+def test_dump_failure_names_the_exit_code(same_flavour, tmp_path):
+    env = shim(tmp_path, "mariadb-dump", BROKEN_DUMPS["half_then_error"])
+    result = tool("--run-dir", str(tmp_path / "run"), "dump", env=env)
+    assert result.returncode == 2
+    assert "exit code 2" in result.stderr
+
+
+def test_disk_full_during_dump_leaves_no_partial_file(same_flavour, tmp_path):
+    # A file-size limit stands in for a full disk: writes fail with EFBIG.
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    result = subprocess.run(
+        ["sh", "-c", 'ulimit -f 2000; exec "$@"', "sh", sys.executable, str(SCRIPT),
+         "--run-dir", str(run_dir), "dump"],
+        env=tool_env(),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )  # fmt: skip
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "REFUSED" in result.stderr
+    assert sorted(p.name for p in run_dir.iterdir()) == ["run.log"]
+
+
+def test_a_torn_last_line_in_run_log_does_not_break_the_run(dumped, tmp_path):
+    run_dir = fresh_run_with_dump(dumped, tmp_path)
+    with (run_dir / "run.log").open("a") as log:
+        log.write('{"step": "restore", "sta')  # the machine died mid-write
+    reset_target()
+    result = tool("--run-dir", str(run_dir), "restore")
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = (run_dir / "run.log").read_text().splitlines()
+    assert lines[-3] == '{"step": "restore", "sta'
+    assert json.loads(lines[-1])["status"] == "ok"
+
+
+@pytest.mark.parametrize(
+    ("create", "drop"),
+    [
+        ("CREATE SEQUENCE mig_seq", "DROP SEQUENCE IF EXISTS mig_seq"),
+        (
+            "CREATE EVENT mig_live ON SCHEDULE EVERY 1 DAY ENABLE DO DO 1",
+            "DROP EVENT IF EXISTS mig_live",
+        ),
+    ],
+    ids=["sequence", "enabled_event"],
+)
+def test_dump_refuses_objects_it_cannot_copy_safely(
+    create, drop, same_flavour, tmp_path
+):
+    # A sequence is not a view; an enabled event would start writing to the
+    # target the moment it is restored.
+    if "SEQUENCE" in create and same_flavour != "mariadb":
+        pytest.skip("MariaDB-only object")
+    admin(SRC, create, SRC_DB)
+    try:
+        result = tool("--run-dir", str(tmp_path), "dump")
+    finally:
+        admin(SRC, drop, SRC_DB)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "mig_" in result.stderr
+    assert not (tmp_path / "dump.sql").exists()
+
+
+def test_dump_reports_definers(copy):
+    run_dir, results = copy
+    assert "DEFINER" in results["dump"].stdout
+    assert entry(run_dir, "dump")["definers"]
+
+
+def test_restore_feeds_the_bytes_it_checked(same_flavour, tmp_path):
+    run_dir = tmp_path / "run"
+    reset_target()
+    for step in ("dump", "restore"):
+        result, _ = tool_recording_commands(tmp_path, "--run-dir", str(run_dir), step)
+        assert result.returncode == 0, result.stderr
+    (sent,) = [
+        s for argv, s in recorded_stdin(tmp_path) if "--max-allowed-packet" in argv
+    ]
+    assert hashlib.sha256(sent.encode()).hexdigest() == entry(run_dir, "dump")["sha256"]
+    assert entry(run_dir, "restore")["fed_sha256"] == entry(run_dir, "dump")["sha256"]
 
 
 # ── restore must not swallow warnings (D4) ─────────────────────────────────
