@@ -1087,7 +1087,9 @@ def step_preflight(args):
     }
     args.run_dir.mkdir(parents=True, exist_ok=True)
     path = args.run_dir / "preflight-report.json"
-    path.write_text(json.dumps(scrub_values(report), indent=2, sort_keys=True) + "\n")
+    write_private(
+        path, json.dumps(scrub_values(report), indent=2, sort_keys=True) + "\n"
+    )
     args.record.update(
         source_tables=len(base),
         source_rows=sum(a["tables"].values()),
@@ -1114,6 +1116,13 @@ def step_preflight(args):
     verdict = f"PREFLIGHT FAILED: {', '.join(failed)}" if failed else "PREFLIGHT OK"
     say(f"{verdict}. Report: {path}")
     return 1 if failed else 0
+
+
+def _open_log(path):
+    """run.log for appending, readable by the operator only (0600)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.fchmod(fd, 0o600)
+    return os.fdopen(fd, "a")
 
 
 def write_private(path, text):
@@ -1288,7 +1297,7 @@ def main(argv=None):
             **args.record,
         }
         args.run_dir.mkdir(parents=True, exist_ok=True)
-        with (args.run_dir / "run.log").open("a") as log:
+        with _open_log(args.run_dir / "run.log") as log:
             # Scrub the values, before JSON escapes ", \ or non-ASCII in them.
             log.write(json.dumps(scrub_values(entry), sort_keys=True) + "\n")
     return code
