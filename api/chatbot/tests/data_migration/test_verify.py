@@ -70,7 +70,12 @@ def test_identical_copy_passes(clean_report):
     report = clean_report
     assert report["ok"] is True
     assert report["differences"] == []
-    source_tables = {row[0] for row in admin(SRC, "SHOW TABLES", SRC_DB)}
+    source_tables = {
+        row[0]
+        for row in admin(
+            SRC, "SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'", SRC_DB
+        )
+    }
     assert set(report["tables"]) == source_tables
     assert {"django_migrations", "chatbot_utterance", "mig_nopk"} <= source_tables
 

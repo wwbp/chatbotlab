@@ -80,6 +80,11 @@ CREATE TABLE mig_composite (
 );
 INSERT INTO mig_composite VALUES (1, 'a', 'x'), (1, 'A', 'y'), (2, 'a', NULL);
 CREATE TABLE mig_empty (id INT PRIMARY KEY, note VARCHAR(10) NULL);
+CREATE TRIGGER mig_child_bi BEFORE INSERT ON mig_child
+    FOR EACH ROW SET NEW.parent_id = NEW.parent_id;
+CREATE PROCEDURE mig_proc() SELECT COUNT(*) FROM mig_types;
+CREATE VIEW mig_view AS SELECT id, dec_col FROM mig_types;
+CREATE EVENT mig_event ON SCHEDULE EVERY 1 DAY DISABLE DO SET @mig = 1;
 """
 
 
