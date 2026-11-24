@@ -24,6 +24,7 @@ from .conftest import (
     DUMP,
     ROOT_PASSWORD,
     SCRIPT,
+    SNAPSHOT,
     SRC,
     SRC_DB,
     SRC_PASSWORD,
@@ -45,7 +46,7 @@ from .fixture_data import EMOJI_TEXT, N_UTTERANCES, SURVEY_CONTEXT
 
 # Accepts an older target, so the same tests run on every same-flavour pair.
 PREFLIGHT = ["preflight", "--allow-version-downgrade"]
-STEPS = [PREFLIGHT, ["dump"], ["restore"], ["verify"]]
+STEPS = [PREFLIGHT, SNAPSHOT, ["dump"], ["restore"], ["verify"]]
 WRITE_VERBS = (
     "INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP|TRUNCATE|RENAME|GRANT|REVOKE"
     "|LOCK|FLUSH|CALL|LOAD|OPTIMIZE|ANALYZE|REPAIR"
@@ -53,6 +54,11 @@ WRITE_VERBS = (
 
 
 CONFIRM = f"{DST.host}/{DST_DB}"
+
+
+def snapshot(run_dir):
+    """Record the snapshot gate, which dump requires, in ``run_dir``."""
+    assert tool("--run-dir", str(run_dir), *SNAPSHOT).returncode == 0
 
 
 def target_tables():
@@ -88,6 +94,7 @@ def copy(same_flavour, tmp_path_factory):
 def dumped(same_flavour, tmp_path_factory):
     """A run directory holding just a good dump."""
     run_dir = tmp_path_factory.mktemp("dumped")
+    assert tool("--run-dir", str(run_dir), *SNAPSHOT).returncode == 0
     result = tool("--run-dir", str(run_dir), "dump")
     assert result.returncode == 0, result.stderr
     return run_dir
@@ -112,6 +119,7 @@ def test_every_step_succeeds_and_the_copy_verifies(copy):
     assert report["tables"]["chatbot_utterance"]["rows_target"] == N_UTTERANCES + 9
     assert [e["step"] for e in read_log(run_dir) if e["status"] == "ok"] == [
         "preflight",
+        "snapshot-check",
         "dump",
         "restore",
         "verify",
@@ -207,6 +215,7 @@ def test_no_writing_statement_reaches_the_source(same_flavour, tmp_path):
 def test_no_credential_in_dump_or_restore_command_lines(same_flavour, tmp_path):
     reset_target()
     run_dir = tmp_path / "run"
+    assert tool("--run-dir", str(run_dir), *SNAPSHOT).returncode == 0
     for step in ("dump", "restore"):
         result, commands = tool_recording_commands(
             tmp_path, "--run-dir", str(run_dir), step
@@ -308,11 +317,14 @@ BROKEN_DUMPS = {
 def test_a_failed_dump_leaves_nothing_restore_could_use(kind, same_flavour, tmp_path):
     env = shim(tmp_path, "mariadb-dump", BROKEN_DUMPS[kind])
     run_dir = tmp_path / "run"
+    snapshot(run_dir)
     result = tool("--run-dir", str(run_dir), "dump", env=env)
     assert result.returncode == 2, result.stdout + result.stderr
     assert "dump failed or is incomplete" in result.stderr
     assert sorted(p.name for p in run_dir.iterdir()) == ["run.log"]
-    assert [e["status"] for e in read_log(run_dir)] == ["refused"]
+    assert [e["status"] for e in read_log(run_dir) if e["step"] == "dump"] == [
+        "refused"
+    ]
     reset_target()
     result = tool("--run-dir", str(run_dir), "restore")
     assert result.returncode == 2
@@ -325,6 +337,7 @@ def test_dump_with_a_lot_on_stderr_does_not_deadlock(same_flavour, tmp_path):
     noisy = f'head -c 200000 /dev/zero | tr "\\0" x >&2; exec "{DUMP}" "$@"'
     env = shim(tmp_path, "mariadb-dump", noisy)
     run_dir = tmp_path / "run"
+    snapshot(run_dir)
     try:
         result = subprocess.run(
             [sys.executable, str(SCRIPT), "--run-dir", str(run_dir), "dump"],
@@ -348,6 +361,7 @@ def test_float_the_dump_would_round_is_refused(same_flavour, tmp_path):
         "INSERT INTO mig_flt VALUES (1, 1.5), (2, 1.500001)",
         SRC_DB,
     )
+    snapshot(tmp_path)
     try:
         result = tool("--run-dir", str(tmp_path), "dump")
     finally:
@@ -365,6 +379,7 @@ def test_missing_dump_binary_is_a_clean_refusal(same_flavour, tmp_path):
     bin_dir.mkdir()
     (bin_dir / "mariadb").symlink_to(CLIENT)
     env = tool_env(PATH=str(bin_dir))
+    snapshot(tmp_path / "run")
     result = tool("--run-dir", str(tmp_path / "run"), "dump", env=env)
     assert result.returncode == 2, result.stdout + result.stderr
     assert "REFUSED" in result.stderr
@@ -373,6 +388,7 @@ def test_missing_dump_binary_is_a_clean_refusal(same_flavour, tmp_path):
 
 def test_dump_failure_names_the_exit_code(same_flavour, tmp_path):
     env = shim(tmp_path, "mariadb-dump", BROKEN_DUMPS["half_then_error"])
+    snapshot(tmp_path / "run")
     result = tool("--run-dir", str(tmp_path / "run"), "dump", env=env)
     assert result.returncode == 2
     assert "exit code 2" in result.stderr
@@ -381,7 +397,7 @@ def test_dump_failure_names_the_exit_code(same_flavour, tmp_path):
 def test_disk_full_during_dump_leaves_no_partial_file(same_flavour, tmp_path):
     # A file-size limit stands in for a full disk: writes fail with EFBIG.
     run_dir = tmp_path / "run"
-    run_dir.mkdir()
+    snapshot(run_dir)
     result = subprocess.run(
         ["sh", "-c", 'ulimit -f 2000; exec "$@"', "sh", sys.executable, str(SCRIPT),
          "--run-dir", str(run_dir), "dump"],
@@ -426,6 +442,7 @@ def test_dump_refuses_objects_it_cannot_copy_safely(
     if "SEQUENCE" in create and same_flavour != "mariadb":
         pytest.skip("MariaDB-only object")
     admin(SRC, create, SRC_DB)
+    snapshot(tmp_path)
     try:
         result = tool("--run-dir", str(tmp_path), "dump")
     finally:
@@ -444,6 +461,7 @@ def test_dump_reports_definers(copy):
 def test_restore_feeds_the_bytes_it_checked(same_flavour, tmp_path):
     run_dir = tmp_path / "run"
     reset_target()
+    snapshot(run_dir)
     for step in ("dump", "restore"):
         result, _ = tool_recording_commands(tmp_path, "--run-dir", str(run_dir), step)
         assert result.returncode == 0, result.stderr
@@ -507,6 +525,7 @@ def test_restore_fails_on_any_warning(dumped, tmp_path):
 
 
 def test_dump_dry_run_writes_no_file(same_flavour, tmp_path):
+    assert tool("--run-dir", str(tmp_path), *SNAPSHOT).returncode == 0
     result = tool("--run-dir", str(tmp_path), "dump", "--dry-run")
     assert result.returncode == 0, result.stderr
     assert "dry-run" in result.stdout.lower()
@@ -821,6 +840,7 @@ def test_option_file_cannot_make_the_dump_flush_or_lock(same_flavour, tmp_path):
     for name in ("HOST", "PORT", "USER", "PASSWORD"):
         del env[f"MIG_SOURCE_{name}"]
     run_dir = tmp_path / "run"
+    assert tool("--run-dir", str(run_dir), *SNAPSHOT, env=env).returncode == 0
     result = tool("--run-dir", str(run_dir), "dump", env=env)
     assert result.returncode == 0, result.stdout + result.stderr
 

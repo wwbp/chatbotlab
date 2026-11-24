@@ -4,6 +4,7 @@
 Steps (each runs on its own):
 
     preflight   check both servers; fail on anything that would spoil the copy
+    snapshot-check  record which snapshot protects the source (dump needs it)
     dump        consistent logical dump of the source to <run-dir>/dump.sql
     restore     load that dump into the (empty) target
     verify      prove source and target hold the same schema and the same data
@@ -1325,6 +1326,7 @@ def step_dump(args):
     path = args.run_dir / "dump.sql"
     if path.exists():
         raise Refuse(f"{path} already exists; use a new --run-dir for a new dump")
+    args.record["snapshot_id"] = _recorded_snapshot(args, src)
     if not DUMP:
         raise Refuse(
             "no mariadb-dump (or mysqldump) on PATH; install the MariaDB client"
@@ -1476,6 +1478,58 @@ def _recorded_dump(args):
             "loads a dump made by `dump` in the same run directory",
         )
     return dumps[-1]
+
+
+def _identity(conn):
+    """Which database, as written in the run log."""
+    return {k: conn.describe()[k] for k in ("host", "port", "database")}
+
+
+def step_snapshot_check(args):
+    """Record the operator's statement about the source's snapshot.
+
+    This tool does not call any cloud API. Taking the snapshot and proving it
+    restores are manual (docs/deployment/data-migration.rst); this step makes
+    that gate explicit: without it on record for this source, dump refuses.
+    """
+    # The flags first: they need no connection settings (S1).
+    if not args.snapshot_id:
+        raise Refuse("give the snapshot's identifier with --snapshot-id")
+    if not args.snapshot_verified:
+        raise Refuse(
+            "pass --snapshot-verified to state that this snapshot is complete "
+            "and that restoring it was proven (restored to a scratch instance "
+            "and compared with `verify`). If that has not been done, do it first.",
+        )
+    source = _identity(Conn.from_env("source"))  # no connection is made
+    args.record["source"] = source
+    if args.dry_run:
+        say(f"dry-run: would record snapshot {args.snapshot_id}; nothing recorded.")
+        return 0
+    args.record.update(snapshot_id=args.snapshot_id, snapshot_verified=True)
+    say(
+        f"snapshot-check: recorded snapshot {args.snapshot_id} as taken and "
+        f"restore-proven for {source['database']} on {source['host']}."
+    )
+    return 0
+
+
+def _recorded_snapshot(args, src):
+    recorded = [
+        e
+        for e in run_log(args)
+        if e["step"] == "snapshot-check"
+        and e["status"] == "ok"
+        and not e["dry_run"]
+        and e["source"] == _identity(src)
+    ]
+    if not recorded:
+        raise Refuse(
+            f"no snapshot is recorded for this source in {args.run_dir / 'run.log'}. "
+            "Take a snapshot of the source, prove it restores, then run "
+            "`snapshot-check --snapshot-id <id> --snapshot-verified`.",
+        )
+    return recorded[-1]["snapshot_id"]
 
 
 # The only warnings restore accepts. Neither touches data:
@@ -1838,6 +1892,15 @@ def main(argv=None):
         help="fail unless the source has no other sessions and no writes",
     )
     preflight.add_argument("--quiesce-seconds", type=int, default=5)
+    snapshot = step(
+        "snapshot-check", step_snapshot_check, "record the source's snapshot"
+    )
+    snapshot.add_argument("--snapshot-id", default="", metavar="ID")
+    snapshot.add_argument(
+        "--snapshot-verified",
+        action="store_true",
+        help="you assert the snapshot is complete and its restore was proven",
+    )
     dump = step("dump", step_dump, "dump the source to <run-dir>/dump.sql")
     dump.add_argument(
         "--source-is-quiesced",

@@ -47,6 +47,9 @@ USER = "mig_user"
 SRC_PASSWORD = "-".join(["source", "side", "test", "pw"])
 DST_PASSWORD = "-".join(["target", "side", "test", "pw"])
 
+# The operator's recorded statement that a snapshot exists and restores.
+SNAPSHOT = ["snapshot-check", "--snapshot-id", "test-snapshot-1", "--snapshot-verified"]
+
 CLIENT = shutil.which("mariadb") or shutil.which("mysql") or "mysql"
 DUMP = shutil.which("mariadb-dump") or shutil.which("mysqldump") or "mysqldump"
 
