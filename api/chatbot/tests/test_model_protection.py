@@ -105,4 +105,5 @@ def test_validate_apply_delete_spares_models_bots_use(bedrock, capsys):
 def test_validate_probe_sends_no_sampling_params(bedrock):
     converse = _run()
     config = converse.call_args.kwargs["inferenceConfig"]
-    assert "temperature" not in config and "topP" not in config
+    assert "temperature" not in config
+    assert "topP" not in config

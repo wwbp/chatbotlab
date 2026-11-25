@@ -357,7 +357,9 @@ class Bot(models.Model):
     )
     ai_model = models.ForeignKey(
         Model,
-        on_delete=models.CASCADE,
+        # PROTECT: deleting a model must never delete the bots (and the study
+        # configuration) on it. Retire a model with is_active=False instead.
+        on_delete=models.PROTECT,
         related_name="bots",
         null=False,
         blank=False,

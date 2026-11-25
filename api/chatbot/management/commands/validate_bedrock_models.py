@@ -11,7 +11,11 @@ logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
-    help = "Validate configured Amazon Bedrock models and deactivate ones with invalid identifiers."
+    help = (
+        "Validate configured Amazon Bedrock models. Report-only unless --apply, "
+        "which deactivates failing models (or, with --delete, deletes the ones "
+        "no bot uses)."
+    )
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -21,21 +25,31 @@ class Command(BaseCommand):
             help="AWS region for the Bedrock runtime client.",
         )
         parser.add_argument(
+            "--apply",
+            action="store_true",
+            help="Change the database. Without it the command only reports.",
+        )
+        parser.add_argument(
             "--dry-run",
             action="store_true",
             dest="dry_run",
-            help="Only report invalid models without making database changes.",
+            help="Report only (the default; kept for old invocations).",
         )
         parser.add_argument(
             "--delete",
             action="store_true",
             dest="delete",
-            help="Delete invalid models instead of only deactivating them.",
+            help=(
+                "With --apply, delete invalid models instead of deactivating "
+                "them. Refused for any model a bot uses."
+            ),
         )
 
     def handle(self, *args, **options):
         region = options["region"]
-        dry_run = options["dry_run"]
+        # Report-only unless explicitly asked: a failed probe can be a transient
+        # outage or missing credentials, not a dead model.
+        dry_run = options["dry_run"] or not options["apply"]
         delete_invalid = options["delete"]
 
         bedrock_models = Model.objects.filter(provider__name="Bedrock").order_by(
@@ -63,11 +77,9 @@ class Command(BaseCommand):
                 "content": [{"text": "Bedrock connectivity check."}],
             },
         ]
-        inference_config = {
-            "maxTokens": 8,
-            "temperature": 0.1,
-            "topP": 0.9,
-        }
+        # No temperature/topP: newer Claude models reject them, which would
+        # report a working model as invalid.
+        inference_config = {"maxTokens": 8}
 
         for model in bedrock_models:
             try:
@@ -92,7 +104,7 @@ class Command(BaseCommand):
 
         if dry_run:
             self.stdout.write(
-                self.style.WARNING("Dry run enabled, no changes applied.")
+                self.style.WARNING("Report only, no changes applied (use --apply).")
             )
             return
 
@@ -107,7 +119,15 @@ class Command(BaseCommand):
             if not model:
                 continue
 
-            if delete_invalid:
+            n_bots = model.bots.count()
+            if delete_invalid and n_bots:
+                self.stdout.write(
+                    self.style.ERROR(
+                        f"Refused to delete {model_identifier}: {n_bots} bot(s) use it."
+                        " Deactivated instead.",
+                    ),
+                )
+            if delete_invalid and not n_bots:
                 model.delete()
                 action = "deleted"
             else:
