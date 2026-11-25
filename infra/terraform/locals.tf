@@ -11,6 +11,9 @@ locals {
   # Example: "humanlike-chatbot-staging"
   name_prefix = "${var.project_name}-${var.environment}"
 
+  # Required by the apply roles in bootstrap/iam/ on every role they create.
+  permissions_boundary_arn = var.use_permissions_boundary ? "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/${var.project_name}-terraform-boundary-${var.environment}" : null
+
   # These tags appear on every resource via the provider default_tags block
   # in main.tf. They make cost reports and console searches much easier.
   common_tags = {

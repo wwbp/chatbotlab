@@ -28,8 +28,9 @@
 # =============================================================================
 
 resource "aws_iam_role" "eb_instance_role" {
-  name        = "${local.name_prefix}-eb-instance-role"
-  description = "I allow EC2 instances managed by Elastic Beanstalk to access the data S3 bucket, call Bedrock AI models, and read SSM parameters."
+  name                 = "${local.name_prefix}-eb-instance-role"
+  permissions_boundary = local.permissions_boundary_arn
+  description          = "I allow EC2 instances managed by Elastic Beanstalk to access the data S3 bucket, call Bedrock AI models, and read SSM parameters."
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -153,8 +154,9 @@ resource "aws_iam_instance_profile" "eb_instance_profile" {
 # =============================================================================
 
 resource "aws_iam_role" "eb_service_role" {
-  name        = "${local.name_prefix}-eb-service-role"
-  description = "I allow the Elastic Beanstalk service to monitor instance health and apply platform updates on my behalf."
+  name                 = "${local.name_prefix}-eb-service-role"
+  permissions_boundary = local.permissions_boundary_arn
+  description          = "I allow the Elastic Beanstalk service to monitor instance health and apply platform updates on my behalf."
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -209,8 +211,9 @@ locals {
 
 # The IAM role that GitHub Actions workflows assume during deployments
 resource "aws_iam_role" "github_actions_deployment" {
-  name        = "${local.name_prefix}-github-actions"
-  description = "I allow GitHub Actions workflows in ${var.github_org}/${var.github_repo} to deploy the frontend to S3, invalidate CloudFront, and deploy the backend to Elastic Beanstalk."
+  name                 = "${local.name_prefix}-github-actions"
+  permissions_boundary = local.permissions_boundary_arn
+  description          = "I allow GitHub Actions workflows in ${var.github_org}/${var.github_repo} to deploy the frontend to S3, invalidate CloudFront, and deploy the backend to Elastic Beanstalk."
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"

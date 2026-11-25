@@ -5,8 +5,8 @@
       "Sid": "ListStateBucket",
       "Effect": "Allow",
       "Action": [
-        "s3:ListBucket",
-        "s3:GetBucketLocation"
+        "s3:GetBucketLocation",
+        "s3:ListBucket"
       ],
       "Resource": "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>"
     },
@@ -15,9 +15,9 @@
       "Effect": "Allow",
       "Action": [
         "s3:CreateBucket",
+        "s3:PutBucketPublicAccessBlock",
         "s3:PutBucketVersioning",
-        "s3:PutEncryptionConfiguration",
-        "s3:PutBucketPublicAccessBlock"
+        "s3:PutEncryptionConfiguration"
       ],
       "Resource": "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>"
     },
@@ -25,9 +25,9 @@
       "Sid": "ReadWriteOwnStateAndLock",
       "Effect": "Allow",
       "Action": [
+        "s3:DeleteObject",
         "s3:GetObject",
-        "s3:PutObject",
-        "s3:DeleteObject"
+        "s3:PutObject"
       ],
       "Resource": "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>/<PREFIX>/production/*"
     },
@@ -41,41 +41,65 @@
       ]
     },
     {
-      "Sid": "ElasticBeanstalkStorageBucket",
-      "Effect": "Allow",
-      "Action": "s3:*",
-      "Resource": [
-        "arn:aws:s3:::elasticbeanstalk-*",
-        "arn:aws:s3:::elasticbeanstalk-*/*"
-      ]
-    },
-    {
-      "Sid": "ManageOwnIamNames",
-      "Effect": "Allow",
-      "Action": "iam:*",
-      "Resource": [
-        "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-production-*",
-        "arn:aws:iam::<ACCOUNT_ID>:instance-profile/<PREFIX>-production-*",
-        "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
-      ]
-    },
-    {
-      "Sid": "ServiceLinkedRoles",
-      "Effect": "Allow",
-      "Action": "iam:CreateServiceLinkedRole",
-      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/aws-service-role/*"
-    },
-    {
-      "Sid": "ReadIam",
+      "Sid": "ElasticBeanstalkBucketLevel",
       "Effect": "Allow",
       "Action": [
-        "iam:Get*",
-        "iam:List*"
+        "s3:CreateBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketPolicy",
+        "s3:ListBucket"
       ],
-      "Resource": "*"
+      "Resource": "arn:aws:s3:::elasticbeanstalk-*"
     },
     {
-      "Sid": "ManageStackServices",
+      "Sid": "ElasticBeanstalkOwnApplicationKeys",
+      "Effect": "Allow",
+      "Action": [
+        "s3:DeleteObject",
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::elasticbeanstalk-*/<PREFIX>-production/*"
+    },
+    {
+      "Sid": "ManageOwnDatabase",
+      "Effect": "Allow",
+      "Action": "rds:*",
+      "Resource": [
+        "arn:aws:rds:*:<ACCOUNT_ID>:db:<PREFIX>-production-*",
+        "arn:aws:rds:*:<ACCOUNT_ID>:subgrp:<PREFIX>-production-*",
+        "arn:aws:rds:*:<ACCOUNT_ID>:pg:<PREFIX>-production-*",
+        "arn:aws:rds:*:<ACCOUNT_ID>:snapshot:<PREFIX>-production-*",
+        "arn:aws:rds:*:<ACCOUNT_ID>:og:default:*"
+      ]
+    },
+    {
+      "Sid": "ManageOwnCache",
+      "Effect": "Allow",
+      "Action": "elasticache:*",
+      "Resource": "arn:aws:elasticache:*:<ACCOUNT_ID>:serverlesscache:<PREFIX>-production-*"
+    },
+    {
+      "Sid": "ManageOwnElasticBeanstalk",
+      "Effect": "Allow",
+      "Action": "elasticbeanstalk:*",
+      "Resource": [
+        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:application/<PREFIX>-production",
+        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:applicationversion/<PREFIX>-production/*",
+        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:environment/<PREFIX>-production/*",
+        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:configurationtemplate/<PREFIX>-production/*",
+        "arn:aws:elasticbeanstalk:*::solutionstack/*",
+        "arn:aws:elasticbeanstalk:*::platform/*"
+      ]
+    },
+    {
+      "Sid": "ManageOwnLogGroups",
+      "Effect": "Allow",
+      "Action": "logs:*",
+      "Resource": "arn:aws:logs:*:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/<PREFIX>-production-*"
+    },
+    {
+      "Sid": "ManageNetworkCdnAndEbPlumbing",
       "Effect": "Allow",
       "Action": [
         "acm:*",
@@ -84,16 +108,148 @@
         "cloudfront:*",
         "cloudwatch:*",
         "ec2:*",
-        "elasticache:*",
-        "elasticbeanstalk:*",
-        "elasticloadbalancing:*",
-        "logs:*",
-        "rds:*",
+        "elasticloadbalancing:*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:ResourceTag/Environment": "staging",
+          "aws:ResourceTag/elasticbeanstalk:environment-name": [
+            "humanlike-bot-development-env",
+            "humanlikebot-env"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ReadEverythingElse",
+      "Effect": "Allow",
+      "Action": [
+        "acm:Describe*",
+        "acm:List*",
+        "autoscaling:Describe*",
+        "cloudformation:Describe*",
+        "cloudformation:Get*",
+        "cloudformation:List*",
+        "cloudfront:Describe*",
+        "cloudfront:Get*",
+        "cloudfront:List*",
+        "ec2:Describe*",
+        "elasticache:Describe*",
+        "elasticache:ListTagsForResource",
+        "elasticbeanstalk:Describe*",
+        "elasticbeanstalk:List*",
+        "elasticloadbalancing:Describe*",
+        "iam:Get*",
+        "iam:List*",
+        "logs:Describe*",
+        "rds:Describe*",
+        "rds:ListTagsForResource",
         "s3:ListAllMyBuckets",
-        "sns:*",
         "sts:GetCallerIdentity"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "CreateOwnRolesUnderBoundary",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePermissionsBoundary"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-production-*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::<ACCOUNT_ID>:policy/<PREFIX>-terraform-boundary-production"
+        }
+      }
+    },
+    {
+      "Sid": "ManageOwnRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:DeleteRole",
+        "iam:DeleteRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-production-*"
+    },
+    {
+      "Sid": "AttachOnlyElasticBeanstalkManagedPolicies",
+      "Effect": "Allow",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-production-*",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": [
+            "arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier",
+            "arn:aws:iam::aws:policy/AdministratorAccess-AWSElasticBeanstalk",
+            "arn:aws:iam::aws:policy/AWSElasticBeanstalkManagedUpdatesCustomerRolePolicy",
+            "arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ManageOwnInstanceProfiles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:AddRoleToInstanceProfile",
+        "iam:CreateInstanceProfile",
+        "iam:DeleteInstanceProfile",
+        "iam:RemoveRoleFromInstanceProfile",
+        "iam:TagInstanceProfile",
+        "iam:UntagInstanceProfile"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:instance-profile/<PREFIX>-production-*"
+    },
+    {
+      "Sid": "PassOwnRolesToElasticBeanstalkAndEc2",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-production-*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": [
+            "ec2.amazonaws.com",
+            "elasticbeanstalk.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ServiceLinkedRoles",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/aws-service-role/*"
+    },
+    {
+      "Sid": "DenyBoundaryTampering",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicy",
+        "iam:DeletePolicyVersion",
+        "iam:DeleteRolePermissionsBoundary",
+        "iam:SetDefaultPolicyVersion",
+        "iam:TagPolicy",
+        "iam:UntagPolicy"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyTerraformRoles",
+      "Effect": "Deny",
+      "Action": "*",
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-terraform-*"
     },
     {
       "Sid": "DenyHandBuiltLiveDeployment",
@@ -107,6 +263,7 @@
         "arn:aws:rds:*:*:snapshot:awseb-e-*",
         "arn:aws:cloudfront::*:distribution/E2Q6P4TGU4GOC",
         "arn:aws:cloudfront::*:distribution/E2XKRGQ6R0OG6W",
+        "arn:aws:s3:::elasticbeanstalk-*/humanlikebot/*",
         "arn:aws:s3:::bot.wwbp.org",
         "arn:aws:s3:::bot.wwbp.org/*",
         "arn:aws:s3:::dev.bot.wwbp.org",
@@ -116,6 +273,68 @@
         "arn:aws:s3:::dev.bot-avatar.wwbp.org",
         "arn:aws:s3:::dev.bot-avatar.wwbp.org/*"
       ]
+    },
+    {
+      "Sid": "DenyHandBuiltLiveEnvironmentResources",
+      "Effect": "Deny",
+      "Action": "*",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/elasticbeanstalk:environment-name": [
+            "humanlike-bot-development-env",
+            "humanlikebot-env"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyOidcProviderChanges",
+      "Effect": "Deny",
+      "Action": [
+        "iam:AddClientIDToOpenIDConnectProvider",
+        "iam:CreateOpenIDConnectProvider",
+        "iam:DeleteOpenIDConnectProvider",
+        "iam:RemoveClientIDFromOpenIDConnectProvider",
+        "iam:TagOpenIDConnectProvider",
+        "iam:UntagOpenIDConnectProvider",
+        "iam:UpdateOpenIDConnectProviderThumbprint"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyOtherStagingNames",
+      "Effect": "Deny",
+      "Action": "*",
+      "Resource": [
+        "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>/<PREFIX>/staging/*",
+        "arn:aws:s3:::<PREFIX>-staging-*",
+        "arn:aws:s3:::<PREFIX>-staging-*/*",
+        "arn:aws:s3:::elasticbeanstalk-*/<PREFIX>-staging/*",
+        "arn:aws:rds:*:<ACCOUNT_ID>:db:<PREFIX>-staging-*",
+        "arn:aws:rds:*:<ACCOUNT_ID>:subgrp:<PREFIX>-staging-*",
+        "arn:aws:rds:*:<ACCOUNT_ID>:pg:<PREFIX>-staging-*",
+        "arn:aws:rds:*:<ACCOUNT_ID>:snapshot:<PREFIX>-staging-*",
+        "arn:aws:elasticache:*:<ACCOUNT_ID>:serverlesscache:<PREFIX>-staging-*",
+        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:application/<PREFIX>-staging",
+        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:applicationversion/<PREFIX>-staging/*",
+        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:environment/<PREFIX>-staging/*",
+        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:configurationtemplate/<PREFIX>-staging/*",
+        "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-staging-*",
+        "arn:aws:iam::<ACCOUNT_ID>:instance-profile/<PREFIX>-staging-*",
+        "arn:aws:logs:*:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/<PREFIX>-staging-*"
+      ]
+    },
+    {
+      "Sid": "DenyOtherStagingTags",
+      "Effect": "Deny",
+      "Action": "*",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Environment": "staging"
+        }
+      }
     }
   ]
 }

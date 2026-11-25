@@ -173,6 +173,12 @@ variable "domain_name" {
   default     = ""
 }
 
+variable "use_permissions_boundary" {
+  description = "Give every IAM role this stack creates the permissions boundary <project_name>-terraform-boundary-<environment> (bootstrap/iam/boundary-<environment>.json). The GitHub Actions apply roles may create roles only with it, so the workflows set this to true."
+  type        = bool
+  default     = false
+}
+
 variable "create_github_oidc_provider" {
   description = "Set to false if a GitHub Actions OIDC provider already exists in this AWS account. Each account allows exactly one OIDC provider per URL — creating a second one for token.actions.githubusercontent.com will fail. Check with: aws iam list-open-id-connect-providers"
   type        = bool

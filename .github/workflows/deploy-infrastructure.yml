@@ -22,9 +22,9 @@ name: Deploy Infrastructure
 #
 #   plan   Runs on every pull request that touches infra/terraform/**, once
 #          for staging and once for production, after a reviewer approves it
-#          in the `plan` GitHub Environment. Read-only: it assumes a role
-#          that cannot change AWS, takes no state lock, and is given no real
-#          application secrets. It skips with a notice when the role is not
+#          in the plan-<environment> GitHub Environment. Read-only: it
+#          assumes a role that cannot change AWS, takes no state lock, and is
+#          given no real application secrets. It skips with a notice when the role is not
 #          configured (and on pull requests from forks, which get no secrets).
 #
 #   apply  Runs only when a person starts the workflow by hand. It runs in the
@@ -52,8 +52,9 @@ name: Deploy Infrastructure
 #     GH_PAT                Token that can write repository secrets. Needed
 #                           only when write_deploy_secrets is ticked.
 #
-#   Environment secret (Settings → Environments → plan)
-#     TF_PLAN_ROLE_ARN      Read-only IAM role the plan job assumes.
+#   Environment secret (Settings → Environments → plan-staging / plan-production)
+#     TF_PLAN_ROLE_ARN      Read-only IAM role the plan job assumes for that
+#                           environment.
 #
 #   Environment secrets (Settings → Environments → staging / production)
 #     TF_APPLY_ROLE_ARN     IAM role the apply job assumes.
@@ -120,11 +121,11 @@ jobs:
     name: Plan (${{ matrix.environment }})
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # Runs only after a required reviewer approves it in the `plan` GitHub
-    # Environment: it runs the pull request's code with a role that can read
-    # the Terraform state (which still holds secrets). The plan role trusts
-    # only this Environment's subject.
-    environment: plan
+    # Runs only after a required reviewer approves it in the
+    # plan-<environment> GitHub Environment: it runs the pull request's code
+    # with a role that can read that environment's Terraform state (which
+    # still holds secrets). Each plan role trusts only its own Environment.
+    environment: plan-${{ matrix.environment }}
     permissions:
       id-token: write
       contents: read
@@ -141,6 +142,7 @@ jobs:
       TF_VAR_github_org_id:               ${{ github.repository_owner_id }}
       TF_VAR_github_repo_id:              ${{ github.repository_id }}
       TF_VAR_create_github_oidc_provider: false
+      TF_VAR_use_permissions_boundary:    true
       # This job runs the pull request's own code, so it is given no real
       # application secrets. The plan therefore always shows the database
       # password and the secret application settings as changed. Ignore those
@@ -159,7 +161,7 @@ jobs:
           TF_PROJECT_PREFIX: ${{ secrets.TF_PROJECT_PREFIX }}
         run: |
           if [[ -z "$TF_PLAN_ROLE_ARN" || -z "$TF_PROJECT_PREFIX" ]]; then
-            echo "::notice::Terraform plan skipped: the TF_PLAN_ROLE_ARN (plan Environment) and TF_PROJECT_PREFIX (repository) secrets are not both set (or this pull request comes from a fork). See infra/terraform/README.md, 'Running Terraform from GitHub Actions'."
+            echo "::notice::Terraform plan skipped: the TF_PLAN_ROLE_ARN (plan-<environment> Environment) and TF_PROJECT_PREFIX (repository) secrets are not both set (or this pull request comes from a fork). See infra/terraform/README.md, 'Running Terraform from GitHub Actions'."
             echo "configured=false" >> "$GITHUB_OUTPUT"
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
@@ -274,6 +276,7 @@ jobs:
       TF_VAR_admin_panel_password:        ${{ secrets.ADMIN_PANEL_PASSWORD }}
       TF_VAR_survey_ingest_token:         ${{ secrets.SURVEY_INGEST_TOKEN }}
       TF_VAR_create_github_oidc_provider: false
+      TF_VAR_use_permissions_boundary:    true
 
     steps:
       # ── 1. Fail fast before touching AWS if anything is missing ───────────────

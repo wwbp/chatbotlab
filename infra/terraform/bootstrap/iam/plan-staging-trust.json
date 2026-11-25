@@ -11,8 +11,8 @@
         "StringEquals": {
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
           "token.actions.githubusercontent.com:sub": [
-            "repo:wwbp/chatbotlab:environment:plan",
-            "repo:wwbp@42522115/chatbotlab@882137210:environment:plan"
+            "repo:wwbp/chatbotlab:environment:plan-staging",
+            "repo:wwbp@42522115/chatbotlab@882137210:environment:plan-staging"
           ]
         },
         "StringLike": {

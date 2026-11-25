@@ -54,6 +54,10 @@ resource "aws_acm_certificate" "custom_domain" {
   domain_name       = var.domain_name
   validation_method = "DNS"
 
+  # The us_east_1 provider has no default_tags; the apply role's scope
+  # relies on the Environment tag.
+  tags = local.common_tags
+
   lifecycle {
     create_before_destroy = true
   }
