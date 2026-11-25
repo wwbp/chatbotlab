@@ -22,6 +22,11 @@ def check(ok, message):
         failures.append(message)
 
 
+# A terraform subcommand, allowing global options in between
+# (`terraform -chdir=infra/terraform apply`).
+TF = r"\bterraform\b[^\n|;&]*?\b"
+
+
 def uncommented(path):
     """File text without comment-only lines, so prose may name a hazard."""
     lines = path.read_text().splitlines()
@@ -49,10 +54,10 @@ deploy = uncommented(WORKFLOWS / "deploy-infrastructure.yml")
 # used to run `terraform destroy` on any failure, and to delete the database
 # with no snapshot when it judged the state "orphaned".
 for pattern in (
-    r"terraform\s+destroy",
-    r"terraform\s+state\s+rm",
-    r"terraform\s+import",
-    r"terraform\s+apply[^\n]*-destroy",
+    TF + r"destroy\b",
+    TF + r"state\s+rm\b",
+    TF + r"import\b",
+    TF + r"apply\b[^\n]*-destroy",
     r"\baws\s+\S+\s+(delete|terminate|remove)-",
     r"\baws\s+s3\s+(rm|rb)\b",
 ):
@@ -362,7 +367,7 @@ check(
     "deploy-infrastructure.yml: top-level permissions must be empty; each job asks for its own",
 )
 for name, text in infra_workflows.items():
-    grants = set(re.findall(r"\n\s+([\w-]+): write\b", text))
+    grants = set(re.findall(r"([\w-]+):\s*write\b", text)) | set(re.findall(r"\bwrite-all\b", text))
     check(
         grants <= {"id-token"},
         f"{name}: the only write permission allowed is id-token (OIDC), found {sorted(grants)}",
@@ -384,9 +389,9 @@ check(
     re.search(r"\n    if: github\.event_name == 'pull_request'\n", "\n" + plan_job),
     "plan job: must run only on pull_request",
 )
-check(not re.search(r"terraform\s+apply", plan_job), "plan job: must never apply")
+check(not re.search(TF + r"apply\b", plan_job), "plan job: must never apply")
 plan_secrets = set(re.findall(r"secrets\.(\w+)", plan_job))
-allowed = {"TF_PLAN_ROLE_ARN", "TF_PROJECT_PREFIX", "CREATE_GITHUB_OIDC_PROVIDER"}
+allowed = {"TF_PLAN_ROLE_ARN", "TF_PROJECT_PREFIX"}
 check(
     plan_secrets <= allowed,
     f"plan job: may read only {sorted(allowed)}, also reads {sorted(plan_secrets - allowed)}",
@@ -403,7 +408,7 @@ for line in deploy.splitlines():
 # Environment of the same name as the stack.
 for name, text in {"deploy-infrastructure.yml": deploy}.items():
     for job_name, job in jobs_of(text).items():
-        if not re.search(r"terraform\s+(apply|destroy)", job):
+        if not re.search(TF + r"(apply|destroy)\b", job):
             continue
         check(
             "\n    environment: ${{ inputs.environment }}\n" in "\n" + job,
@@ -422,17 +427,23 @@ check(
     re.search(r"\n      action:\n(?:        .*\n)*?        default: plan\n", triggers),
     "deploy-infrastructure.yml: needs an 'action' input that defaults to plan",
 )
+# `inputs.action == 'apply'`, optionally narrowed with `&& …`; never widened.
+APPLY_IF = (
+    r"\n        if: (\$\{\{ *)?inputs\.action == 'apply'"
+    r"( && (?:(?!\|\||always\(\)|cancelled\(\)|failure\(\))[^\n])+?)?( *\}\})? *\n"
+)
 for step in steps_of(apply_job):
-    if re.search(r"terraform\s+apply|gh secret set (?!__PREFLIGHT_TEST__)|set_secret ", step):
+    if re.search(TF + r"apply\b|gh secret set (?!__PREFLIGHT_TEST__)|set_secret ", step):
         title = step.splitlines()[0]
         check(
-            re.search(r"\n        if: [^\n]*inputs\.action == 'apply'", step),
-            f"apply job, step '{title}': changes something, so it must be conditional on inputs.action == 'apply'",
+            re.search(APPLY_IF, step),
+            f"apply job, step '{title}': changes something, so its if: must be inputs.action == 'apply' "
+            f"(optionally '&& …', never '||', always() or !cancelled())",
         )
 # The full apply runs the plan that was just printed, nothing else.
 full_applies = [
     line.strip() for line in apply_job.splitlines()
-    if re.search(r"terraform\s+apply", line) and "-target" not in line
+    if re.search(TF + r"apply\b", line) and "-target" not in line
 ]
 check(
     full_applies == ["terraform apply -input=false tfplan"],
@@ -458,6 +469,113 @@ for line in deploy.splitlines():
             '-var-file="environments/${ENVIRONMENT}.tfvars"' in line,
             f"deploy-infrastructure.yml: every plan must read the environment's settings file: '{line.strip()}'",
         )
+
+# --- Apply only what was planned, and only what was meant ---------------------
+
+apply_steps = steps_of(apply_job)
+titles = [st.splitlines()[0] for st in apply_steps]
+
+
+def step_index(prefix):
+    return next((i for i, t in enumerate(titles) if t.startswith(f"name: {prefix}")), -1)
+
+
+# A plan that deletes or replaces anything stops the run unless the person
+# starting it ticked allow_destroy.
+check(
+    re.search(r"\n      allow_destroy:\n(?:        .*\n)*?        default: false\n(?:        .*\n)*?        type: boolean", triggers),
+    "deploy-infrastructure.yml: needs a boolean 'allow_destroy' input that defaults to false",
+)
+i_plan, i_gate, i_apply = step_index("Plan"), step_index("Check the plan for deletions"), step_index("Apply infrastructure")
+check(
+    -1 not in (i_plan, i_gate, i_apply) and i_plan < i_gate < i_apply,
+    f"apply job: 'Check the plan for deletions' must sit between 'Plan' and 'Apply infrastructure'; order {titles}",
+)
+gate = apply_steps[i_gate] if i_gate >= 0 else ""
+check(
+    "terraform show -json tfplan" in gate
+    and 'index("delete")' in gate
+    and re.search(r'if \[\[ "\$ALLOW_DESTROY" != "true" \]\]; then\n(?:.*\n)*?\s+exit 1\n', gate)
+    and "ALLOW_DESTROY: ${{ inputs.allow_destroy }}" in gate,
+    "apply job: the deletion check must read 'terraform show -json tfplan', find actions containing "
+    "\"delete\", and exit 1 unless ALLOW_DESTROY (from inputs.allow_destroy) is true",
+)
+check(
+    re.search(APPLY_IF, "\n" + gate) or "\n        if:" not in "\n" + gate,
+    "apply job: the deletion check must run whenever the apply runs",
+)
+check(
+    "continue-on-error" not in apply_job and "continue-on-error" not in plan_job,
+    "deploy-infrastructure.yml: no step may continue on error",
+)
+
+# An unreadable state bucket is an error, not "never built": skipping the
+# plan would hide every change the pull request makes.
+locate = next((st for st in steps_of(plan_job) if st.startswith("name: Locate Terraform state")), "")
+check(
+    re.search(r'\n {10}aws s3api head-bucket --bucket "\$BUCKET"\n', locate),
+    "plan job: Locate Terraform state must run 'aws s3api head-bucket' on its own line, so any error fails the step",
+)
+check(
+    "(404)" in locate and re.search(r"else\n(?:.*\n)*?\s+exit 1\n", locate),
+    "plan job: only a 404 on the state key may mean 'not built yet'; any other error must exit 1",
+)
+for name, text in infra_workflows.items():
+    for line in text.splitlines():
+        if "head-object" in line:
+            check(
+                not re.search(r"2>&1|2>/dev/null", line) or "2>&1 >/dev/null" in line,
+                f"{name}: head-object must not discard its error (403 would read as 'absent'): '{line.strip()}'",
+            )
+
+# The account's one GitHub OIDC provider is shared with the live deploys. The
+# workflows' roles may not change it, so Terraform must only refer to it: a
+# guessed "true" would let a stack own it, and destroying that stack would
+# delete every GitHub sign-in in the account.
+for name, text in all_workflows.items():
+    check("CREATE_GITHUB_OIDC_PROVIDER" not in text, f"{name}: must not read CREATE_GITHUB_OIDC_PROVIDER")
+    for value in re.findall(r"TF_VAR_create_github_oidc_provider:\s*(.+)", text):
+        check(
+            value.strip().strip("'\"") == "false",
+            f"{name}: TF_VAR_create_github_oidc_provider must be literally false, got '{value.strip()}'",
+        )
+check(
+    "CREATE_GITHUB_OIDC_PROVIDER" not in (TERRAFORM / "README.md").read_text(),
+    "README.md: the CREATE_GITHUB_OIDC_PROVIDER secret is gone; the workflows always use the existing provider",
+)
+check(
+    re.search(r"TF_VAR_create_github_oidc_provider:\s*'?false", deploy)
+    and re.search(r"TF_VAR_create_github_oidc_provider:\s*'?false", destroy),
+    "deploy and destroy workflows must set TF_VAR_create_github_oidc_provider to false",
+)
+
+# On a pull request without the plan role (or from a fork), every step after
+# the configuration check must skip, not fail.
+plan_steps = steps_of(plan_job)
+for st in plan_steps[1:]:
+    check(
+        re.search(r"\n        if: steps\.(config\.outputs\.configured|state\.outputs\.found) == 'true'\n", st),
+        f"plan job, step '{st.splitlines()[0]}': must be skipped unless the plan role is configured",
+    )
+# The apply job always signs in with its own role.
+creds = [st for st in apply_steps if "aws-actions/configure-aws-credentials" in st]
+check(
+    len(creds) == 1 and "\n        if:" not in creds[0]
+    and "role-to-assume: ${{ secrets.TF_APPLY_ROLE_ARN }}" in creds[0],
+    "apply job: one unconditional configure-aws-credentials step assuming secrets.TF_APPLY_ROLE_ARN",
+)
+
+# Prose must not promise more than the workflow does.
+reference = (ROOT / "docs" / "deployment" / "technical-reference.rst").read_text()
+check(
+    "stops with a lock error" not in reference.split("``production.yml``")[0]
+    or "waits" in reference.split("``production.yml``")[0],
+    "technical-reference.rst: a second run on the same environment now waits (concurrency), say so",
+)
+check(
+    "nothing else" not in reference.split("``production.yml``")[0],
+    "technical-reference.rst: the targeted ACM apply runs before the plan; do not say the apply does nothing else",
+)
 
 # --- IAM roles for Terraform: committed, and checked here ---------------------
 # The Terraform roles live in the same AWS account as the hand-built live
