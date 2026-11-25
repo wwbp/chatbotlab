@@ -167,28 +167,37 @@ GITHUB_ORG=$(grep 'github_org' "$TFVARS" | head -1 | sed 's/.*=[ ]*"\(.*\)".*/\1
 GITHUB_REPO=$(grep 'github_repo' "$TFVARS" | head -1 | sed 's/.*=[ ]*"\(.*\)".*/\1/')
 echo -e "${BOLD}Go to: https://github.com/${GITHUB_ORG:-<your-org>}/${GITHUB_REPO:-<your-repo>}/settings/secrets/actions${RESET}"
 echo ""
-echo "Copy these values into your repository secrets:"
+echo "Copy these values into your repository secrets ($ENVIRONMENT only — the"
+echo "other environment's deploy workflow reads different names):"
 echo ""
 
-# Use terraform output to get each value
-for secret in \
-  github_secret_AWS_ACCOUNT_ID \
-  github_secret_AWS_ROLE_NAME \
-  github_secret_AWS_S3_BUCKET_NAME_FRONTEND \
-  github_secret_AWS_S3_PROD_BUCKET_NAME_FRONTEND \
-  github_secret_AWS_CLOUDFRONT_DISTRIBUTION_ID \
-  github_secret_AWS_PROD_CLOUDFRONT_DISTRIBUTION_ID \
-  github_secret_AWS_BACKEND_APPLICATION_NAME \
-  github_secret_AWS_BACKEND_ENVIRONMENT_NAME \
-  github_secret_AWS_PROD_BACKEND_ENVIRONMENT_NAME; do
-
-  VALUE=$(terraform output -raw "$secret" 2>/dev/null || echo "(run terraform output $secret)")
-  SECRET_NAME="${secret#github_secret_}"
-  printf "  ${BOLD}%-50s${RESET} %s\n" "$SECRET_NAME" "$VALUE"
-done
+# The same (secret, output) pairs the Deploy Infrastructure workflow writes;
+# check_workflows.py keeps the two lists equal.
+show() {
+  VALUE=$(terraform output -raw "github_secret_$2" 2>/dev/null || echo "(run terraform output github_secret_$2)")
+  printf "  ${BOLD}%-50s${RESET} %s\n" "$1" "$VALUE"
+}
+case "$ENVIRONMENT" in
+  staging)
+    show AWS_ACCOUNT_ID                 AWS_ACCOUNT_ID
+    show AWS_ROLE_NAME                  AWS_ROLE_NAME
+    show AWS_S3_BUCKET_NAME_FRONTEND    AWS_S3_BUCKET_NAME_FRONTEND
+    show AWS_CLOUDFRONT_DISTRIBUTION_ID AWS_CLOUDFRONT_DISTRIBUTION_ID
+    show AWS_BACKEND_APPLICATION_NAME   AWS_BACKEND_APPLICATION_NAME
+    show AWS_BACKEND_ENVIRONMENT_NAME   AWS_BACKEND_ENVIRONMENT_NAME
+    ;;
+  production)
+    show AWS_PROD_ACCOUNT_ID                 AWS_ACCOUNT_ID
+    show AWS_PROD_ROLE_NAME                  AWS_ROLE_NAME
+    show AWS_S3_PROD_BUCKET_NAME_FRONTEND    AWS_S3_BUCKET_NAME_FRONTEND
+    show AWS_PROD_CLOUDFRONT_DISTRIBUTION_ID AWS_CLOUDFRONT_DISTRIBUTION_ID
+    show AWS_PROD_BACKEND_APPLICATION_NAME   AWS_BACKEND_APPLICATION_NAME
+    show AWS_PROD_BACKEND_ENVIRONMENT_NAME   AWS_BACKEND_ENVIRONMENT_NAME
+    ;;
+esac
 
 echo ""
 info "Frontend URL: $(terraform output -raw frontend_url)"
 info "Backend URL:  $(terraform output -raw backend_api_url)"
 echo ""
-info "Next step: push to your staging branch to trigger the first deployment."
+info "Next step: deploy the app — push to the staging branch (staging) or main (production)."

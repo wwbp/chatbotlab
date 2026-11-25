@@ -2,9 +2,9 @@
 # outputs.tf — values printed after `terraform apply` completes
 #
 # After a successful apply, Terraform prints everything defined here.
-# I use this file to surface the six GitHub Actions secrets you need to
-# update, the two URLs you can immediately open in a browser, and a few
-# values useful for debugging.
+# I use this file to surface the six deploy secret values (see below for
+# which secret names each environment uses), the two URLs you can open in a
+# browser, and a few values useful for debugging.
 #
 # You can re-print outputs at any time with:
 #   terraform output
@@ -27,53 +27,42 @@ output "backend_api_url" {
 }
 
 # -----------------------------------------------------------------------------
-# GitHub Actions secrets
-# Copy these six values into your GitHub repository secrets at:
-#   https://github.com/<org>/<repo>/settings/secrets/actions
+# Deploy secret values
+# Each value goes into a differently named GitHub secret per environment:
+# staging.yml reads AWS_*, production.yml reads AWS_PROD_* / AWS_S3_PROD_*.
+# Set only the names of the environment this stack is (setup.sh prints them,
+# and the Deploy Infrastructure workflow writes them when asked). Setting a
+# staging name from a production stack would point staging deploys, which
+# empty the frontend bucket first, at production.
 # -----------------------------------------------------------------------------
 
 output "github_secret_AWS_ACCOUNT_ID" {
-  description = "Set as GitHub secret AWS_ACCOUNT_ID"
+  description = "AWS account ID. Deploy secret: AWS_ACCOUNT_ID for staging, AWS_PROD_ACCOUNT_ID for production."
   value       = data.aws_caller_identity.current.account_id
 }
 
 output "github_secret_AWS_ROLE_NAME" {
-  description = "Set as GitHub secret AWS_ROLE_NAME — the IAM role GitHub Actions assumes via OIDC"
+  description = "IAM role GitHub Actions assumes via OIDC. Deploy secret: AWS_ROLE_NAME for staging, AWS_PROD_ROLE_NAME for production."
   value       = aws_iam_role.github_actions_deployment.name
 }
 
 output "github_secret_AWS_S3_BUCKET_NAME_FRONTEND" {
-  description = "Set as GitHub secret AWS_S3_BUCKET_NAME_FRONTEND (used in staging.yml) — the S3 bucket that holds the compiled React app"
-  value       = aws_s3_bucket.frontend_assets.id
-}
-
-output "github_secret_AWS_S3_PROD_BUCKET_NAME_FRONTEND" {
-  description = "Set as GitHub secret AWS_S3_PROD_BUCKET_NAME_FRONTEND (used in production.yml)"
+  description = "Frontend bucket. Holds the compiled React app. Deploy secret: AWS_S3_BUCKET_NAME_FRONTEND for staging, AWS_S3_PROD_BUCKET_NAME_FRONTEND for production."
   value       = aws_s3_bucket.frontend_assets.id
 }
 
 output "github_secret_AWS_CLOUDFRONT_DISTRIBUTION_ID" {
-  description = "Set as GitHub secret AWS_CLOUDFRONT_DISTRIBUTION_ID (staging.yml) — used to invalidate the CDN cache after each frontend deploy"
-  value       = aws_cloudfront_distribution.frontend.id
-}
-
-output "github_secret_AWS_PROD_CLOUDFRONT_DISTRIBUTION_ID" {
-  description = "Set as GitHub secret AWS_PROD_CLOUDFRONT_DISTRIBUTION_ID (production.yml)"
+  description = "CloudFront distribution invalidated after each frontend deploy. Deploy secret: AWS_CLOUDFRONT_DISTRIBUTION_ID for staging, AWS_PROD_CLOUDFRONT_DISTRIBUTION_ID for production."
   value       = aws_cloudfront_distribution.frontend.id
 }
 
 output "github_secret_AWS_BACKEND_APPLICATION_NAME" {
-  description = "Set as GitHub secret AWS_BACKEND_APPLICATION_NAME — the Elastic Beanstalk application name"
+  description = "Elastic Beanstalk application. Deploy secret: AWS_BACKEND_APPLICATION_NAME for staging, AWS_PROD_BACKEND_APPLICATION_NAME for production."
   value       = aws_elastic_beanstalk_application.chatbot_api.name
 }
 
 output "github_secret_AWS_BACKEND_ENVIRONMENT_NAME" {
-  description = "Set as GitHub secret AWS_BACKEND_ENVIRONMENT_NAME (staging.yml)"
-  value       = aws_elastic_beanstalk_environment.chatbot_api.name
-}
-
-output "github_secret_AWS_PROD_BACKEND_ENVIRONMENT_NAME" {
-  description = "Set as GitHub secret AWS_PROD_BACKEND_ENVIRONMENT_NAME (production.yml)"
+  description = "Elastic Beanstalk environment. Deploy secret: AWS_BACKEND_ENVIRONMENT_NAME for staging, AWS_PROD_BACKEND_ENVIRONMENT_NAME for production."
   value       = aws_elastic_beanstalk_environment.chatbot_api.name
 }
 
