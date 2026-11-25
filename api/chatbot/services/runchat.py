@@ -149,7 +149,7 @@ async def save_chat_to_db(
 async def kani_reply(engine, system_prompt, chat_history, query):
     """Send one message through kani and return the reply text.
 
-    The chat path's only LLM call; check_models uses it too, so a model check
+    run_chat_round's LLM call; check_models uses it too, so a model check
     exercises exactly what a participant's message does.
     """
     kani = Kani(engine, system_prompt=system_prompt, chat_history=chat_history)
