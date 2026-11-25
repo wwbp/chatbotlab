@@ -2,21 +2,13 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "MostAnyStackRoleMayDo",
+      "Sid": "ElasticBeanstalkDrivenServices",
       "Effect": "Allow",
       "Action": [
         "autoscaling:*",
         "cloudformation:*",
-        "cloudfront:*",
-        "cloudwatch:*",
         "ec2:*",
-        "elasticbeanstalk:*",
-        "elasticloadbalancing:*",
-        "logs:*",
-        "s3:*",
-        "sns:*",
-        "sqs:*",
-        "xray:*"
+        "elasticloadbalancing:*"
       ],
       "Resource": "*",
       "Condition": {
@@ -30,20 +22,135 @@
       }
     },
     {
-      "Sid": "ApplicationCalls",
+      "Sid": "OwnElasticBeanstalk",
+      "Effect": "Allow",
+      "Action": "elasticbeanstalk:*",
+      "Resource": [
+        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:application/<PREFIX>-production",
+        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:applicationversion/<PREFIX>-production/*",
+        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:environment/<PREFIX>-production/*",
+        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:configurationtemplate/<PREFIX>-production/*",
+        "arn:aws:elasticbeanstalk:*::solutionstack/*",
+        "arn:aws:elasticbeanstalk:*::platform/*"
+      ]
+    },
+    {
+      "Sid": "OwnBuckets",
       "Effect": "Allow",
       "Action": [
-        "bedrock:InvokeModel",
-        "bedrock:InvokeModelWithResponseStream",
-        "ecr:BatchCheckLayerAvailability",
-        "ecr:BatchGetImage",
-        "ecr:GetAuthorizationToken",
-        "ecr:GetDownloadUrlForLayer",
-        "ses:SendEmail",
-        "ses:SendRawEmail",
+        "s3:DeleteObject",
+        "s3:GetBucketLocation",
+        "s3:GetObject",
+        "s3:ListBucket",
+        "s3:PutObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::<PREFIX>-production-*",
+        "arn:aws:s3:::<PREFIX>-production-*/*"
+      ]
+    },
+    {
+      "Sid": "ElasticBeanstalkBucketOwnKeys",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::elasticbeanstalk-*/<PREFIX>-production/*"
+    },
+    {
+      "Sid": "ElasticBeanstalkBucketLevel",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketLocation",
+        "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::elasticbeanstalk-*"
+    },
+    {
+      "Sid": "InvalidateOwnDistributions",
+      "Effect": "Allow",
+      "Action": [
+        "cloudfront:CreateInvalidation",
+        "cloudfront:GetDistribution",
+        "cloudfront:GetInvalidation"
+      ],
+      "Resource": "arn:aws:cloudfront::<ACCOUNT_ID>:distribution/*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:ResourceTag/Environment": "staging",
+          "aws:ResourceTag/elasticbeanstalk:environment-name": [
+            "humanlike-bot-development-env",
+            "humanlikebot-env"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "OwnLogGroups",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:DescribeLogStreams",
+        "logs:PutLogEvents",
+        "logs:PutRetentionPolicy"
+      ],
+      "Resource": "arn:aws:logs:*:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/<PREFIX>-production-*"
+    },
+    {
+      "Sid": "MetricsAndTraces",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:PutMetricData",
+        "xray:GetSamplingRules",
+        "xray:GetSamplingTargets",
+        "xray:PutTelemetryRecords",
+        "xray:PutTraceSegments"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "OwnParameters",
+      "Effect": "Allow",
+      "Action": [
         "ssm:GetParameter",
         "ssm:GetParameters",
         "ssm:GetParametersByPath"
+      ],
+      "Resource": "arn:aws:ssm:*:<ACCOUNT_ID>:parameter/<PREFIX>-production/*"
+    },
+    {
+      "Sid": "SendFromConfiguredDomain",
+      "Effect": "Allow",
+      "Action": [
+        "ses:SendEmail",
+        "ses:SendRawEmail"
+      ],
+      "Resource": [
+        "arn:aws:ses:*:<ACCOUNT_ID>:identity/<SES_FROM_DOMAIN>",
+        "arn:aws:ses:*:<ACCOUNT_ID>:identity/*@<SES_FROM_DOMAIN>"
+      ]
+    },
+    {
+      "Sid": "InvokeModels",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:Converse",
+        "bedrock:ConverseStream",
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "PullImages",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:GetAuthorizationToken",
+        "ecr:GetDownloadUrlForLayer"
       ],
       "Resource": "*"
     },
@@ -170,7 +277,9 @@
         "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:configurationtemplate/<PREFIX>-staging/*",
         "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-staging-*",
         "arn:aws:iam::<ACCOUNT_ID>:instance-profile/<PREFIX>-staging-*",
-        "arn:aws:logs:*:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/<PREFIX>-staging-*"
+        "arn:aws:logs:*:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/<PREFIX>-staging-*",
+        "arn:aws:ssm:*:<ACCOUNT_ID>:parameter/<PREFIX>-staging/*",
+        "arn:aws:secretsmanager:*:<ACCOUNT_ID>:secret:<PREFIX>-staging/*"
       ]
     },
     {

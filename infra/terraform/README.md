@@ -249,7 +249,8 @@ The policies are committed in `bootstrap/iam/` and checked by
 
 ```bash
 for f in bootstrap/iam/*.json; do
-  sed -e "s/<ACCOUNT_ID>/$ACCOUNT_ID/g" -e "s/<PREFIX>/$PREFIX/g" "$f" > "/tmp/$(basename "$f")"
+  sed -e "s/<ACCOUNT_ID>/$ACCOUNT_ID/g" -e "s/<PREFIX>/$PREFIX/g" \
+      -e "s/<SES_FROM_DOMAIN>/$SES_FROM_DOMAIN/g" "$f" > "/tmp/$(basename "$f")"
 done
 ```
 
@@ -270,11 +271,21 @@ steps 5 to 7 in GitHub. Everything happens per environment `<env>` =
    with `terraform state rm aws_iam_openid_connect_provider.github_actions[0]`
    (by hand, with admin credentials) first.
 2. **Permissions boundary** `<PREFIX>-terraform-boundary-<env>`, a customer
-   managed policy from `bootstrap/iam/boundary-<env>.json`. It caps every
-   role the stack creates (EB instance and service roles, the deploy role):
-   no IAM changes, no Terraform state, nothing live, nothing of the other
-   environment. The apply role can create roles only with this boundary
-   attached, and cannot edit or detach it.
+   managed policy from `bootstrap/iam/boundary-<env>.json` (also replace
+   `<SES_FROM_DOMAIN>` with the domain the app sends email from). It caps
+   every role the stack creates (EB instance and service roles, the deploy
+   role): no IAM changes, no Terraform state, S3 only the environment's
+   buckets and EB keys, SSM only `parameter/<PREFIX>-<env>/`, nothing live,
+   nothing of the other environment. Terraform always attaches it, also when
+   run locally with `setup.sh`, so create it before the first apply. The apply
+   role may create or change a role (inline policies, attached policies) only
+   when that role carries this boundary, and cannot remove or swap it.
+   **Roles that already exist** (a stack built before this change) must get
+   the boundary once, by an administrator, before the apply policy is granted:
+   `aws iam put-role-permissions-boundary --role-name <role> --permissions-boundary arn:aws:iam::<ACCOUNT_ID>:policy/<PREFIX>-terraform-boundary-<env>`
+   for each `<PREFIX>-<env>-*` role. The apply role cannot change a role's
+   trust policy (`iam:UpdateAssumeRolePolicy` is not granted); a change to
+   one is an administrator's job.
 3. **Plan roles** `<PREFIX>-terraform-plan-<env>`. Trust:
    `bootstrap/iam/plan-<env>-trust.json` (subject
    `repo:wwbp/chatbotlab:environment:plan-<env>`, ref `refs/pull/*/merge`).

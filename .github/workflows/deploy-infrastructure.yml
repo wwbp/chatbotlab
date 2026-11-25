@@ -142,7 +142,6 @@ jobs:
       TF_VAR_github_org_id:               ${{ github.repository_owner_id }}
       TF_VAR_github_repo_id:              ${{ github.repository_id }}
       TF_VAR_create_github_oidc_provider: false
-      TF_VAR_use_permissions_boundary:    true
       # This job runs the pull request's own code, so it is given no real
       # application secrets. The plan therefore always shows the database
       # password and the secret application settings as changed. Ignore those
@@ -276,7 +275,6 @@ jobs:
       TF_VAR_admin_panel_password:        ${{ secrets.ADMIN_PANEL_PASSWORD }}
       TF_VAR_survey_ingest_token:         ${{ secrets.SURVEY_INGEST_TOKEN }}
       TF_VAR_create_github_oidc_provider: false
-      TF_VAR_use_permissions_boundary:    true
 
     steps:
       # ── 1. Fail fast before touching AWS if anything is missing ───────────────

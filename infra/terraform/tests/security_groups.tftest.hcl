@@ -12,6 +12,12 @@ mock_provider "aws" {
       json = "{}"
     }
   }
+  # A real-looking account ID: the IAM roles' permissions boundary ARN embeds it.
+  mock_data "aws_caller_identity" {
+    defaults = {
+      account_id = "123456789012"
+    }
+  }
 }
 
 # main.tf also declares an aliased aws provider for us-east-1 (CloudFront).

@@ -151,11 +151,13 @@
       "Resource": "*"
     },
     {
-      "Sid": "CreateOwnRolesUnderBoundary",
+      "Sid": "ChangeOwnRolesOnlyUnderBoundary",
       "Effect": "Allow",
       "Action": [
         "iam:CreateRole",
-        "iam:PutRolePermissionsBoundary"
+        "iam:DeleteRolePolicy",
+        "iam:PutRolePermissionsBoundary",
+        "iam:PutRolePolicy"
       ],
       "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-staging-*",
       "Condition": {
@@ -169,11 +171,8 @@
       "Effect": "Allow",
       "Action": [
         "iam:DeleteRole",
-        "iam:DeleteRolePolicy",
-        "iam:PutRolePolicy",
         "iam:TagRole",
         "iam:UntagRole",
-        "iam:UpdateAssumeRolePolicy",
         "iam:UpdateRole",
         "iam:UpdateRoleDescription"
       ],
@@ -195,6 +194,9 @@
             "arn:aws:iam::aws:policy/AWSElasticBeanstalkManagedUpdatesCustomerRolePolicy",
             "arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth"
           ]
+        },
+        "StringEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::<ACCOUNT_ID>:policy/<PREFIX>-terraform-boundary-staging"
         }
       }
     },
@@ -244,6 +246,17 @@
         "iam:UntagPolicy"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "DenyAnyOtherBoundary",
+      "Effect": "Deny",
+      "Action": "iam:PutRolePermissionsBoundary",
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::<ACCOUNT_ID>:policy/<PREFIX>-terraform-boundary-staging"
+        }
+      }
     },
     {
       "Sid": "DenyTerraformRoles",
@@ -322,7 +335,9 @@
         "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:configurationtemplate/<PREFIX>-production/*",
         "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-production-*",
         "arn:aws:iam::<ACCOUNT_ID>:instance-profile/<PREFIX>-production-*",
-        "arn:aws:logs:*:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/<PREFIX>-production-*"
+        "arn:aws:logs:*:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/<PREFIX>-production-*",
+        "arn:aws:ssm:*:<ACCOUNT_ID>:parameter/<PREFIX>-production/*",
+        "arn:aws:secretsmanager:*:<ACCOUNT_ID>:secret:<PREFIX>-production/*"
       ]
     },
     {
