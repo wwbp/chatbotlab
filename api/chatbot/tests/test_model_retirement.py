@@ -25,6 +25,8 @@ from chatbot.admin import BotAdminForm
 from chatbot.models import Bot, Model, ModelProvider
 
 ADMIN = "/api/admin/chatbot/bot/"
+# Honest about what we know: some of these models still answer.
+RETIRED = "(not offered for new bots)"
 
 
 @pytest.fixture
@@ -114,8 +116,8 @@ def test_bot_on_a_retired_model_is_offered_it_labelled(models, frozen_bot):
     form = BotAdminForm(instance=frozen_bot)
     assert _offered(form, models) == {"active", "retired"}
     labels = {str(value): label for value, label in form.fields["ai_model"].choices}
-    assert labels[str(models["retired"].pk)].endswith("(retired)")
-    assert not labels[str(models["active"].pk)].endswith("(retired)")
+    assert labels[str(models["retired"].pk)].endswith(RETIRED)
+    assert not labels[str(models["active"].pk)].endswith(RETIRED)
 
 
 def test_saving_a_frozen_bot_keeps_its_retired_model(admin_client, frozen_bot):
@@ -149,14 +151,14 @@ def test_new_bot_cannot_take_a_retired_model(admin_client, models):
 
 def test_change_page_says_the_model_is_retired(admin_client, frozen_bot):
     html = admin_client.get(f"{ADMIN}{frozen_bot.pk}/change/").content.decode()
-    assert "Model retired" in html
+    assert "not offered for new bots" in html
 
 
 def test_bot_list_marks_retired_models(admin_client, models, frozen_bot):
     Bot.objects.create(name="live_bot", prompt="p", ai_model=models["active"])
     html = admin_client.get(ADMIN).content.decode()
-    assert "Retired One (retired)" in html
-    assert "Active One (retired)" not in html
+    assert f"Retired One {RETIRED}" in html
+    assert f"Active One {RETIRED}" not in html
 
 
 def test_bots_api_refuses_a_retired_model(admin_client, models):
@@ -169,3 +171,42 @@ def test_bots_api_refuses_a_retired_model(admin_client, models):
     )
     assert response.status_code == 400
     assert not Bot.objects.filter(name="api_bot").exists()
+
+
+def test_bots_api_refuses_a_model_whose_provider_is_off(admin_client, models):
+    response = admin_client.post(
+        "/api/bots/",
+        data=json.dumps(
+            {"name": "api_bot2", "model_type": "Gone", "model_id": "orphan-1"}
+        ),
+        content_type="application/json",
+    )
+    assert response.status_code == 400
+    assert not Bot.objects.filter(name="api_bot2").exists()
+
+
+def test_history_revert_cannot_move_bot_to_retired_model(
+    admin_client, models, frozen_bot
+):
+    """The revert form's instance is the historical bot, not the current row."""
+    frozen_bot.ai_model = models["active"]
+    frozen_bot.save()
+    old = frozen_bot.history.order_by("history_date", "history_id").first()
+    assert old.ai_model_id == models["retired"].pk
+    response = _form_post(
+        admin_client, f"{ADMIN}{frozen_bot.pk}/history/{old.history_id}/"
+    )
+    assert response.status_code == 200  # redisplayed with an error, not reverted
+    frozen_bot.refresh_from_db()
+    assert frozen_bot.ai_model == models["active"]
+
+
+def test_seeded_bots_never_get_a_retired_model(db):
+    from django.core.management import call_command
+
+    Model.get_or_create_default_models()
+    Model.objects.filter(model_id="gpt-4o-mini").update(is_active=False)
+    assert not Bot.get_default_model().retired
+    call_command("load_bots")  # config.json asks for gpt-4o-mini
+    seeded = Bot.objects.get(name="Helpful Assistant")
+    assert not seeded.ai_model.retired

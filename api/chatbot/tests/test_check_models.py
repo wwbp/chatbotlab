@@ -212,3 +212,36 @@ def test_bedrock_reply_skips_a_leading_reasoning_block():
     with patch.object(engine, "_call_bedrock", return_value=response):
         reply = async_to_sync(kani_reply)(engine, "Be brief.", [], "Say OK.")
     assert reply == "OK"
+
+
+def test_reasoning_only_reply_is_not_silently_empty():
+    """Thinking can use up maxTokens; an empty reply must be an error, not saved."""
+    engine = BedrockEngine(model_id="us.anthropic.claude-opus-5-5")
+    response = {
+        "output": {
+            "message": {
+                "role": "assistant",
+                "content": [{"reasoningContent": {"reasoningText": {"text": ""}}}],
+            }
+        }
+    }
+    with (
+        patch.object(engine, "_call_bedrock", return_value=response),
+        pytest.raises(RuntimeError, match="no text"),
+    ):
+        async_to_sync(kani_reply)(engine, "Be brief.", [], "Say OK.")
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "us.anthropic.claude-sonnet-4-6",
+        "us.anthropic.claude-sonnet-4-20250514-v1:0",
+        "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "anthropic.claude-3-haiku-20240307-v1:0",
+    ],
+)
+def test_older_bedrock_models_keep_their_request(model_id):
+    """Frozen bots on older models must send exactly what they always sent."""
+    config = BedrockEngine(model_id=model_id)._build_inference_config()  # noqa: SLF001
+    assert config == {"maxTokens": 1000, "temperature": 0.7}

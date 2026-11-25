@@ -9,8 +9,8 @@ bot uses, and the command only reports unless told --apply.
 Coverage:
   - deleting a model (or its provider) that a bot uses raises ProtectedError
   - validate_bedrock_models: report-only by default, --delete alone too
-  - --apply deactivates failing models; --apply --delete deletes only models
-    no bot uses, and refuses the rest
+  - --apply deactivates failing models; nothing ever deletes a model
+    (--delete is gone)
   - its probe sends no sampling params (newer Claude models reject them)
 """
 
@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import pytest
 from botocore.exceptions import ClientError
-from django.core.management import call_command
+from django.core.management import CommandError, call_command
 from django.db.models import ProtectedError
 
 from chatbot.models import Bot, Model, ModelProvider
@@ -81,7 +81,7 @@ def test_deleting_its_provider_is_refused_too(bedrock):
     assert Bot.objects.filter(pk=bedrock["bot"].pk).exists()
 
 
-@pytest.mark.parametrize("args", [(), ("--delete",), ("--dry-run",)])
+@pytest.mark.parametrize("args", [(), ("--dry-run",)])
 def test_validate_is_report_only_without_apply(bedrock, args):
     before = _state(bedrock)
     _run(*args)
@@ -93,13 +93,14 @@ def test_validate_apply_deactivates_failing_models(bedrock):
     assert _state(bedrock) == {"ok": True, "used": False, "unused": False}
 
 
-def test_validate_apply_delete_spares_models_bots_use(bedrock, capsys):
-    _run("--apply", "--delete")
-    assert not Model.objects.filter(pk=bedrock["unused"].pk).exists()
-    assert Model.objects.filter(pk=bedrock["used"].pk).exists()
-    bedrock["bot"].refresh_from_db()
-    assert bedrock["bot"].ai_model_id == bedrock["used"].pk
-    assert "refused" in capsys.readouterr().out.lower()
+def test_validate_never_deletes_a_model(bedrock):
+    """No code path deletes a Model: in a Bedrock outage every probe fails."""
+    pks = set(Model.objects.values_list("pk", flat=True))
+    with pytest.raises(CommandError):
+        _run("--apply", "--delete")  # the option is gone, not silently ignored
+    _run("--apply")
+    assert set(Model.objects.values_list("pk", flat=True)) == pks
+    assert _state(bedrock) == {"ok": True, "used": False, "unused": False}
 
 
 def test_validate_probe_sends_no_sampling_params(bedrock):
@@ -107,3 +108,9 @@ def test_validate_probe_sends_no_sampling_params(bedrock):
     config = converse.call_args.kwargs["inferenceConfig"]
     assert "temperature" not in config
     assert "topP" not in config
+
+
+@pytest.mark.django_db
+def test_models_and_migrations_agree():
+    """A model change (e.g. on_delete) without its migration fails here."""
+    call_command("makemigrations", "--check", "--dry-run", verbosity=0)
