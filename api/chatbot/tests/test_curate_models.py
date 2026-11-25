@@ -44,9 +44,7 @@ CURATED = {
 
 def _active():
     return set(
-        Model.objects.filter(is_active=True).values_list(
-            "provider__name", "model_id"
-        )
+        Model.objects.filter(is_active=True).values_list("provider__name", "model_id")
     )
 
 
@@ -69,7 +67,7 @@ def prod_like(db):
         (bedrock, "us.anthropic.claude-sonnet-4-20250514-v1:0", "Old Sonnet 4"),
         (bedrock, "us.anthropic.claude-sonnet-4-6", "Anthropic Claude Sonnet 4.6"),
     ]:
-        Model.objects.get_or_create(
+        Model.objects.update_or_create(
             provider=provider, model_id=model_id, defaults={"display_name": name}
         )
     # Curated models that prod doesn't have yet must be created by the migration.
@@ -126,7 +124,9 @@ def test_nothing_deleted_and_no_bot_changed(prod_like):
     model_pks = set(Model.objects.values_list("pk", flat=True))
     provider_pks = set(ModelProvider.objects.values_list("pk", flat=True))
     bots_before = dict(Bot.objects.values_list("pk", "ai_model_id"))
-    missing = len(CURATED - set(Model.objects.values_list("provider__name", "model_id")))
+    missing = len(
+        CURATED - set(Model.objects.values_list("provider__name", "model_id"))
+    )
 
     curate(global_apps, None)
 

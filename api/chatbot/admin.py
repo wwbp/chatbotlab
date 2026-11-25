@@ -237,7 +237,6 @@ class BotAdminForm(forms.ModelForm):
             # Hide remove avatar option for new bots
             self.fields["remove_avatar"].widget = forms.HiddenInput()
 
-
     def _limit_models_to_active(self):
         """
         Offer only active models — plus the bot's own model, even if retired.
@@ -253,9 +252,7 @@ class BotAdminForm(forms.ModelForm):
         field.queryset = Model.objects.select_related("provider").filter(
             Q(is_active=True, provider__is_active=True) | Q(pk=current)
         )
-        field.label_from_instance = lambda m: (
-            f"{m} (retired)" if m.retired else str(m)
-        )
+        field.label_from_instance = lambda m: f"{m} (retired)" if m.retired else str(m)
         if current and self.instance.ai_model.retired:
             field.help_text = (
                 "Model retired: it is not offered for new bots and may no longer "

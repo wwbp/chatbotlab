@@ -113,9 +113,7 @@ def test_new_bot_is_offered_only_active_models(models):
 def test_bot_on_a_retired_model_is_offered_it_labelled(models, frozen_bot):
     form = BotAdminForm(instance=frozen_bot)
     assert _offered(form, models) == {"active", "retired"}
-    labels = dict(
-        (str(value), label) for value, label in form.fields["ai_model"].choices
-    )
+    labels = {str(value): label for value, label in form.fields["ai_model"].choices}
     assert labels[str(models["retired"].pk)].endswith("(retired)")
     assert not labels[str(models["active"].pk)].endswith("(retired)")
 
@@ -128,9 +126,7 @@ def test_saving_a_frozen_bot_keeps_its_retired_model(admin_client, frozen_bot):
     assert frozen_bot.ai_model.model_id == "retired-1"
 
 
-def test_a_bot_cannot_switch_to_another_retired_model(
-    admin_client, models, frozen_bot
-):
+def test_a_bot_cannot_switch_to_another_retired_model(admin_client, models, frozen_bot):
     response = _change_post(admin_client, frozen_bot, ai_model=models["retired_2"].pk)
     assert response.status_code == 200  # form redisplayed with an error
     assert "ai_model" in response.context["adminform"].form.errors
