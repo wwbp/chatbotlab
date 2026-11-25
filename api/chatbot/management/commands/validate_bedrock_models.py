@@ -11,7 +11,10 @@ logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
-    help = "Validate configured Amazon Bedrock models and deactivate ones with invalid identifiers."
+    help = (
+        "Validate configured Amazon Bedrock models. Report-only unless --apply, "
+        "which deactivates failing models. It never deletes a model."
+    )
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -21,22 +24,22 @@ class Command(BaseCommand):
             help="AWS region for the Bedrock runtime client.",
         )
         parser.add_argument(
+            "--apply",
+            action="store_true",
+            help="Change the database. Without it the command only reports.",
+        )
+        parser.add_argument(
             "--dry-run",
             action="store_true",
             dest="dry_run",
-            help="Only report invalid models without making database changes.",
-        )
-        parser.add_argument(
-            "--delete",
-            action="store_true",
-            dest="delete",
-            help="Delete invalid models instead of only deactivating them.",
+            help="Report only (the default; kept for old invocations).",
         )
 
     def handle(self, *args, **options):
         region = options["region"]
-        dry_run = options["dry_run"]
-        delete_invalid = options["delete"]
+        # Report-only unless explicitly asked: a failed probe can be a transient
+        # outage or missing credentials, not a dead model.
+        dry_run = options["dry_run"] or not options["apply"]
 
         bedrock_models = Model.objects.filter(provider__name="Bedrock").order_by(
             "model_id"
@@ -63,11 +66,9 @@ class Command(BaseCommand):
                 "content": [{"text": "Bedrock connectivity check."}],
             },
         ]
-        inference_config = {
-            "maxTokens": 8,
-            "temperature": 0.1,
-            "topP": 0.9,
-        }
+        # No temperature/topP: newer Claude models reject them, which would
+        # report a working model as invalid.
+        inference_config = {"maxTokens": 8}
 
         for model in bedrock_models:
             try:
@@ -92,7 +93,7 @@ class Command(BaseCommand):
 
         if dry_run:
             self.stdout.write(
-                self.style.WARNING("Dry run enabled, no changes applied.")
+                self.style.WARNING("Report only, no changes applied (use --apply).")
             )
             return
 
@@ -107,13 +108,11 @@ class Command(BaseCommand):
             if not model:
                 continue
 
-            if delete_invalid:
-                model.delete()
-                action = "deleted"
-            else:
-                model.is_active = False
-                model.save(update_fields=["is_active"])
-                action = "deactivated"
+            # Never delete: a probe fails for every model during an outage,
+            # and rows are kept so old studies' records stay intact.
+            model.is_active = False
+            model.save(update_fields=["is_active"])
+            action = "deactivated"
 
             logger.info(
                 "Bedrock model %s (%s) %s after validation failure: %s",

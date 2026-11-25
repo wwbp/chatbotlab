@@ -11,7 +11,6 @@ from kani.engines.anthropic import AnthropicEngine
 from kani.engines.openai import OpenAIEngine
 
 from chatbot.engines.bedrock_engine import BedrockEngine
-from chatbot.models import Model
 from server.engine import initialize_engine
 
 
@@ -88,37 +87,6 @@ class TestEngines:
 
         assert response is not None
         assert len(response) > 0
-
-    @pytest.mark.django_db
-    def test_bedrock_default_models_seed(self):
-        """Ensure Bedrock defaults include Claude models."""
-        Model.get_or_create_default_models()
-
-        bedrock_model_ids = set(
-            Model.objects.filter(provider__name="Bedrock").values_list(
-                "model_id",
-                flat=True,
-            ),
-        )
-
-        expected_ids = {
-            "meta.llama3-8b-instruct-v1:0",
-            "meta.llama3-70b-instruct-v1:0",
-            "anthropic.claude-3-haiku-20240307-v1:0",
-            "anthropic.claude-3-sonnet-20240229-v1:0",
-            "anthropic.claude-3-5-sonnet-20240620-v1:0",
-            "us.anthropic.claude-opus-4-1-20250805-v1:0",
-            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-            "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-            "us.anthropic.claude-opus-4-5-20251101-v1:0",
-            "us.anthropic.claude-opus-4-6-v1",
-            "us.anthropic.claude-sonnet-4-6",
-            "us.anthropic.claude-opus-4-7",
-            "us.anthropic.claude-opus-4-8",
-        }
-
-        for model_id in expected_ids:
-            assert model_id in bedrock_model_ids
 
     def _has_credentials(self, provider):
         """Check if credentials are available for the provider"""

@@ -146,6 +146,20 @@ async def save_chat_to_db(
         traceback.print_exc()
 
 
+async def kani_reply(engine, system_prompt, chat_history, query):
+    """Send one message through kani and return the reply text.
+
+    run_chat_round's LLM call; check_models uses it too, so a model check
+    exercises exactly what a participant's message does.
+    """
+    kani = Kani(engine, system_prompt=system_prompt, chat_history=chat_history)
+    response_text = ""
+    async for msg in kani.full_round(query=query):
+        if hasattr(msg, "text") and isinstance(msg.text, str):
+            response_text += msg.text + " "
+    return response_text.strip()
+
+
 async def run_chat_round(bot_name, conversation_id, participant_id, message):
     """
     Handles one full round of chat interaction: user -> bot response.
@@ -309,16 +323,9 @@ async def run_chat_round(bot_name, conversation_id, participant_id, message):
         response_text = "This is a mock response for load testing."
     else:
         engine = get_or_create_engine_from_model(bot.ai_model, engine_instances)
-        kani = Kani(
-            engine, system_prompt=system_prompt, chat_history=prompt.kani_history()
+        response_text = await kani_reply(
+            engine, system_prompt, prompt.kani_history(), prompt.query
         )
-        response_text = ""
-
-        async for msg in kani.full_round(query=prompt.query):
-            if hasattr(msg, "text") and isinstance(msg.text, str):
-                response_text += msg.text + " "
-
-        response_text = response_text.strip()
 
         # Debug logging for Bedrock engine
         if bot.ai_model.provider.name == "Bedrock":

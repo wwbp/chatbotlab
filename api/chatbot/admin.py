@@ -42,6 +42,7 @@ from .models import (
     Bot,
     Conversation,
     Keystroke,
+    Model,
     ModerationSettings,
     Persona,
     SurveyIngestToken,
@@ -119,6 +120,10 @@ class AvatarImageField(forms.FileField):
         return data
 
 
+# Label for models outside the curated list. Not "dead": some still answer.
+NOT_OFFERED = "(not offered for new bots)"
+
+
 class BotAdminForm(forms.ModelForm):
     """Custom form for Bot admin with avatar upload functionality"""
 
@@ -165,6 +170,7 @@ class BotAdminForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._limit_models_to_active()
         if self.instance and self.instance.pk:
             # Show current avatar if exists
             try:
@@ -234,6 +240,38 @@ class BotAdminForm(forms.ModelForm):
         else:
             # Hide remove avatar option for new bots
             self.fields["remove_avatar"].widget = forms.HiddenInput()
+
+    def _limit_models_to_active(self):
+        """
+        Offer only active models — plus the bot's own model, even if retired.
+
+        Bots on retired models are frozen, not migrated: changing a study bot's
+        model would change the study. So the current model stays selectable
+        (and saving the bot keeps it), but no bot can move *to* a retired one.
+        """
+        field = self.fields.get("ai_model")
+        if field is None:
+            return
+        # The bot's model as saved now, read from the database: on the history
+        # revert view self.instance is an old version, whose model must not
+        # count as "current" (that would let a revert move the bot onto it).
+        current = (
+            Bot.objects.filter(pk=self.instance.pk)
+            .values_list("ai_model_id", flat=True)
+            .first()
+        )
+        field.queryset = Model.objects.select_related("provider").filter(
+            Q(is_active=True, provider__is_active=True) | Q(pk=current)
+        )
+        field.label_from_instance = lambda m: (
+            f"{m} {NOT_OFFERED}" if m.retired else str(m)
+        )
+        if current and Model.objects.get(pk=current).retired:
+            field.help_text = (
+                "This model is not offered for new bots. This bot keeps it so the "
+                "study's record stays as it was. It may no longer answer; check "
+                "with: manage.py check_models --all"
+            )
 
 
 class BaseAdmin(admin.ModelAdmin):
@@ -1126,7 +1164,8 @@ class BotAdmin(FormulaSafeExportMixin, HistoryAdmin):
 
     @admin.display(description="Model", ordering="ai_model__display_name")
     def model_name(self, obj):
-        return f"{obj.ai_model.provider.display_name} {obj.ai_model.display_name}"
+        name = f"{obj.ai_model.provider.display_name} {obj.ai_model.display_name}"
+        return f"{name} {NOT_OFFERED}" if obj.ai_model.retired else name
 
     @admin.display(description="Personas", ordering="n_personas")
     def persona_count(self, obj):

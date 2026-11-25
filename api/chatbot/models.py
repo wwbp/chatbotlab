@@ -175,19 +175,19 @@ class ModelProvider(models.Model):
 
     @classmethod
     def get_or_create_default_providers(cls):
-        """Create default providers if they don't exist"""
+        """Create default providers if they don't exist.
+
+        No Anthropic-direct provider: Claude is offered through Bedrock. Existing
+        installs keep their Anthropic row (inactive) for the bots that use it.
+        """
         providers_data = {
             "OpenAI": {
                 "display_name": "OpenAI",
                 "description": "OpenAI's language models including GPT series",
             },
-            "Anthropic": {
-                "display_name": "Anthropic",
-                "description": "Anthropic's Claude language models",
-            },
             "Bedrock": {
                 "display_name": "Amazon Bedrock",
-                "description": "Amazon Bedrock foundation models including Llama3",
+                "description": "Amazon Bedrock foundation models including Claude",
             },
         }
 
@@ -199,6 +199,59 @@ class ModelProvider(models.Model):
             )
             providers[name] = provider
         return providers
+
+
+# The models offered for new bots, each verified by a real call. Migration 0048
+# applied this list to existing installs (with its own frozen copy); a fresh
+# install gets exactly these. To retire a model, set is_active=False on its
+# row and drop it here; never delete the row (bots keep their model).
+_CLAUDE = ["Chat", "Reasoning", "Code", "Analysis"]
+CURATED_MODELS = {
+    "Bedrock": [
+        {
+            "model_id": "us.anthropic.claude-haiku-5-5",
+            "display_name": "Claude Haiku 5.5",
+            "capabilities": ["Chat", "Basic Reasoning", "Code"],
+        },
+        {
+            "model_id": "us.anthropic.claude-sonnet-4-6",
+            "display_name": "Claude Sonnet 4.6",
+            "capabilities": _CLAUDE,
+        },
+        {
+            "model_id": "us.anthropic.claude-sonnet-5-5",
+            "display_name": "Claude Sonnet 5.5",
+            "capabilities": _CLAUDE,
+        },
+        {
+            "model_id": "us.anthropic.claude-opus-4-7",
+            "display_name": "Claude Opus 4.7",
+            "capabilities": _CLAUDE,
+        },
+        {
+            "model_id": "us.anthropic.claude-opus-5-5",
+            "display_name": "Claude Opus 5.5",
+            "capabilities": _CLAUDE,
+        },
+    ],
+    "OpenAI": [
+        {
+            "model_id": "gpt-4o-mini",
+            "display_name": "GPT-4o Mini",
+            "capabilities": ["Chat", "Vision", "Audio", "Reasoning"],
+        },
+        {
+            "model_id": "gpt-4.1",
+            "display_name": "GPT-4.1",
+            "capabilities": ["Chat", "Reasoning", "Analysis"],
+        },
+        {
+            "model_id": "gpt-5-mini",
+            "display_name": "GPT-5 Mini",
+            "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
+        },
+    ],
+}
 
 
 class Model(models.Model):
@@ -226,182 +279,26 @@ class Model(models.Model):
     def __str__(self):
         return f"{self.provider.display_name} - {self.display_name}"
 
+    @property
+    def retired(self):
+        """Not offered for new bots; bots already on it keep it (frozen)."""
+        return not (self.is_active and self.provider.is_active)
+
     class Meta:
         unique_together = ["provider", "model_id"]
         ordering = ["provider__name", "display_name"]
 
     @classmethod
     def get_or_create_default_models(cls):
-        """Create default models if they don't exist"""
-        # First ensure providers exist
+        """Create the curated models that don't exist yet.
+
+        Runs on every container start (load_bots). It only creates missing rows:
+        it never re-activates a model someone retired, and never touches others.
+        """
         providers = ModelProvider.get_or_create_default_providers()
 
-        models_data = {
-            "OpenAI": [
-                {
-                    "model_id": "gpt-5",
-                    "display_name": "GPT-5",
-                    "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
-                },
-                {
-                    "model_id": "gpt-5-mini",
-                    "display_name": "GPT-5 Mini",
-                    "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
-                },
-                {
-                    "model_id": "gpt-5-nano",
-                    "display_name": "GPT-5 Nano",
-                    "capabilities": ["Chat", "Basic Reasoning", "Code"],
-                },
-                {
-                    "model_id": "gpt-4o",
-                    "display_name": "GPT-4o",
-                    "capabilities": ["Chat", "Vision", "Audio", "Reasoning"],
-                },
-                {
-                    "model_id": "gpt-4o-mini",
-                    "display_name": "GPT-4o Mini",
-                    "capabilities": ["Chat", "Vision", "Audio", "Reasoning"],
-                },
-                {
-                    "model_id": "gpt-4.1",
-                    "display_name": "GPT-4.1",
-                    "capabilities": ["Chat", "Reasoning", "Analysis"],
-                },
-                {
-                    "model_id": "gpt-4.1-mini",
-                    "display_name": "GPT-4.1 Mini",
-                    "capabilities": ["Chat", "Reasoning", "Analysis"],
-                },
-                {
-                    "model_id": "gpt-4.1-nano",
-                    "display_name": "GPT-4.1 Nano",
-                    "capabilities": ["Chat", "Basic Reasoning"],
-                },
-                {
-                    "model_id": "gpt-4-turbo",
-                    "display_name": "GPT-4 Turbo",
-                    "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
-                },
-                {
-                    "model_id": "gpt-4-turbo-preview",
-                    "display_name": "GPT-4 Turbo Preview",
-                    "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
-                },
-                {
-                    "model_id": "gpt-3.5-turbo",
-                    "display_name": "GPT-3.5 Turbo",
-                    "capabilities": ["Chat", "Code", "Analysis"],
-                },
-            ],
-            "Anthropic": [
-                {
-                    "model_id": "claude-opus-4-1-20250805",
-                    "display_name": "Claude Opus 4.1",
-                    "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
-                },
-                {
-                    "model_id": "claude-opus-4-20250514",
-                    "display_name": "Claude Opus 4",
-                    "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
-                },
-                {
-                    "model_id": "claude-sonnet-4-20250514",
-                    "display_name": "Claude Sonnet 4",
-                    "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
-                },
-                {
-                    "model_id": "claude-3-5-haiku-20241022",
-                    "display_name": "Claude 3.5 Haiku",
-                    "capabilities": ["Chat", "Basic Reasoning", "Code"],
-                },
-                {
-                    "model_id": "claude-3-7-sonnet-20250219",
-                    "display_name": "Claude 3.7 Sonnet",
-                    "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
-                },
-                {
-                    "model_id": "claude-3-haiku-20240307",
-                    "display_name": "Claude 3 Haiku",
-                    "capabilities": ["Chat", "Basic Reasoning", "Code"],
-                },
-            ],
-            "Bedrock": [
-                {
-                    "model_id": "meta.llama3-8b-instruct-v1:0",
-                    "display_name": "Meta Llama 3 8B Instruct",
-                    "capabilities": ["Chat", "Basic Reasoning", "Code"],
-                },
-                {
-                    "model_id": "meta.llama3-70b-instruct-v1:0",
-                    "display_name": "Meta Llama 3 70B Instruct",
-                    "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
-                },
-                {
-                    "model_id": "anthropic.claude-3-haiku-20240307-v1:0",
-                    "display_name": "Anthropic Claude 3 Haiku",
-                    "capabilities": ["Chat", "Basic Reasoning"],
-                },
-                {
-                    "model_id": "anthropic.claude-3-sonnet-20240229-v1:0",
-                    "display_name": "Anthropic Claude 3 Sonnet",
-                    "capabilities": ["Chat", "Reasoning", "Code"],
-                },
-                {
-                    "model_id": "anthropic.claude-3-5-sonnet-20240620-v1:0",
-                    "display_name": "Anthropic Claude 3.5 Sonnet",
-                    "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
-                },
-                {
-                    "model_id": "us.anthropic.claude-sonnet-4-20250514-v1:0",
-                    "display_name": "Anthropic Claude Sonnet 4",
-                    "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
-                },
-                {
-                    "model_id": "us.anthropic.claude-opus-4-1-20250805-v1:0",
-                    "display_name": "Anthropic Claude Opus 4.1",
-                    "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
-                },
-                {
-                    "model_id": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-                    "display_name": "Anthropic Claude Sonnet 4.5",
-                    "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
-                },
-                {
-                    "model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-                    "display_name": "Anthropic Claude Haiku 4.5",
-                    "capabilities": ["Chat", "Basic Reasoning", "Code"],
-                },
-                {
-                    "model_id": "us.anthropic.claude-opus-4-5-20251101-v1:0",
-                    "display_name": "Anthropic Claude Opus 4.5",
-                    "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
-                },
-                {
-                    "model_id": "us.anthropic.claude-opus-4-6-v1",
-                    "display_name": "Anthropic Claude Opus 4.6",
-                    "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
-                },
-                {
-                    "model_id": "us.anthropic.claude-sonnet-4-6",
-                    "display_name": "Anthropic Claude Sonnet 4.6",
-                    "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
-                },
-                {
-                    "model_id": "us.anthropic.claude-opus-4-7",
-                    "display_name": "Anthropic Claude Opus 4.7",
-                    "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
-                },
-                {
-                    "model_id": "us.anthropic.claude-opus-4-8",
-                    "display_name": "Anthropic Claude Opus 4.8",
-                    "capabilities": ["Chat", "Reasoning", "Code", "Analysis"],
-                },
-            ],
-        }
-
         created_models = []
-        for provider_name, models_list in models_data.items():
+        for provider_name, models_list in CURATED_MODELS.items():
             provider = providers[provider_name]
             for model_data in models_list:
                 model, created = cls.objects.get_or_create(
@@ -460,7 +357,9 @@ class Bot(models.Model):
     )
     ai_model = models.ForeignKey(
         Model,
-        on_delete=models.CASCADE,
+        # PROTECT: deleting a model must never delete the bots (and the study
+        # configuration) on it. Retire a model with is_active=False instead.
+        on_delete=models.PROTECT,
         related_name="bots",
         null=False,
         blank=False,
@@ -729,14 +628,12 @@ class Bot(models.Model):
         # Ensure default models exist
         Model.get_or_create_default_models()
 
-        # Return the first available model (preferably GPT-4o Mini)
+        # The first offered model (preferably GPT-4o Mini); never a retired one.
+        offered = Model.objects.filter(is_active=True, provider__is_active=True)
         try:
             return (
-                Model.objects.filter(
-                    provider__name="OpenAI",
-                    model_id="gpt-4o-mini",
-                ).first()
-                or Model.objects.first()
+                offered.filter(provider__name="OpenAI", model_id="gpt-4o-mini").first()
+                or offered.first()
             )
         except Exception:
             return None

@@ -99,6 +99,9 @@ class BedrockEngine(BaseEngine):
             "us.anthropic.claude-sonnet-4-6": 200000,
             "us.anthropic.claude-opus-4-7": 200000,
             "us.anthropic.claude-opus-4-8": 200000,
+            "us.anthropic.claude-haiku-5-5": 200000,
+            "us.anthropic.claude-sonnet-5-5": 200000,
+            "us.anthropic.claude-opus-5-5": 200000,
         }
         return context_sizes.get(model_id, 8192)
 
@@ -186,10 +189,16 @@ class BedrockEngine(BaseEngine):
                 conversation,
             )
 
-            # Extract response text and clean it
-            response_text = response["output"]["message"]["content"][0]["text"]
-            # Remove leading/trailing whitespace and newlines
-            response_text = response_text.strip()
+            # Join the text blocks: newer Claude models can put a reasoning
+            # block (no "text" key) before the reply.
+            response_text = "".join(
+                block.get("text", "")
+                for block in response["output"]["message"]["content"]
+            ).strip()
+            if not response_text:
+                # E.g. thinking used up maxTokens. Fail like any other engine
+                # error rather than save an empty reply to the conversation.
+                raise RuntimeError("model returned no text")
 
             # Create response message
             response_message = ChatMessage(
@@ -224,18 +233,27 @@ class BedrockEngine(BaseEngine):
             for event in response["stream"]:
                 if "contentBlockDelta" in event:
                     # Extract text chunk from the delta
-                    text_chunk = event["contentBlockDelta"]["delta"]["text"]
-                    yield text_chunk
+                    # Reasoning deltas carry no "text"; skip them.
+                    text_chunk = event["contentBlockDelta"]["delta"].get("text")
+                    if text_chunk:
+                        yield text_chunk
 
         except Exception as e:
             raise RuntimeError(f"Bedrock streaming API call failed: {e}")
 
-    # Models that do not support temperature/top_p at all
+    # Models that reject temperature/top_p (the 5.5 models reject any
+    # non-default value, so they are sent none)
     _NO_SAMPLING_PARAMS_MODELS = {
         "us.anthropic.claude-opus-4-7",
         "anthropic.claude-opus-4-7",
         "us.anthropic.claude-opus-4-8",
         "anthropic.claude-opus-4-8",
+        "us.anthropic.claude-haiku-5-5",
+        "anthropic.claude-haiku-5-5",
+        "us.anthropic.claude-sonnet-5-5",
+        "anthropic.claude-sonnet-5-5",
+        "us.anthropic.claude-opus-5-5",
+        "anthropic.claude-opus-5-5",
     }
 
     def _build_inference_config(self) -> dict[str, Any]:

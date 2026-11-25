@@ -33,6 +33,8 @@ class Command(BaseCommand):
                         "ai_model": Model.objects.filter(
                             provider__name=bot.get("model_type"),
                             model_id=bot.get("model_id"),
+                            is_active=True,
+                            provider__is_active=True,
                         ).first()
                         or Bot.get_default_model(),
                     },
