@@ -322,20 +322,46 @@ def check_different(src, dst):
 DEFINITION_PRIVILEGES = ("SELECT", "SHOW VIEW", "TRIGGER", "EVENT", "EXECUTE")
 
 
+# "GRANT <privileges> ON *.* TO" or "... ON `db`.* TO" (a database name may
+# be a LIKE pattern). Table, column, routine and proxy grants do not match.
+_GRANT = re.compile(r"(GRANT|REVOKE) (.+?) ON (\*|`(?:[^`]|``)+`)\.\* (?:TO|FROM) ")
+GLOBAL_ONLY = {"PROCESS", "SUPER"}  # ALL on a database does not include them
+
+
+def _like(pattern, name):
+    """SQL LIKE as grants use it: % and _ are wildcards, backslash escapes."""
+    regex = "".join(
+        re.escape(t[1:]) if t[0] == "\\" else {"%": ".*", "_": "."}.get(t, re.escape(t))
+        for t in re.findall(r"\\.|.", pattern, re.DOTALL)
+    )
+    return re.fullmatch(regex, name, re.DOTALL) is not None
+
+
 def missing_privileges(conn, needed):
-    """Privileges in ``needed`` the account holds neither globally nor on the
-    database. Grants made through roles are not seen here: this fails safe."""
-    me = "REPLACE(GRANTEE, CHAR(39), '') = CURRENT_USER()"
-    held = {
-        row[0]
-        for row in query(
-            conn,
-            f"SELECT PRIVILEGE_TYPE FROM information_schema.USER_PRIVILEGES WHERE {me}"
-            " UNION SELECT PRIVILEGE_TYPE FROM information_schema.SCHEMA_PRIVILEGES"
-            f" WHERE {me} AND DATABASE() LIKE TABLE_SCHEMA",
-        )
-    }
-    return [p for p in needed if p not in held]
+    """Privileges in ``needed`` the session holds neither globally nor on the
+    database, directly or through an active role.
+
+    Plain SHOW GRANTS lists the current session's effective grants: the
+    account's own plus those of its active roles (MySQL 8: expanded into the
+    account's lines; MariaDB: the active role's own lines). information_schema
+    shows direct grants only, and misses e.g. the RDS master's
+    rds_superuser_role. A role granted but not active is listed by neither.
+    """
+    held = set()
+    revoked = set()
+    for (line,) in query(conn, "SHOW GRANTS"):
+        m = _GRANT.match(line or "")
+        if not m:
+            continue
+        verb, privileges, scope = m.groups()
+        if scope != "*" and not _like(scope[1:-1].replace("``", "`"), conn.database):
+            continue
+        names = {p.strip() for p in privileges.split(",")}
+        if names & {"ALL", "ALL PRIVILEGES"}:
+            names = set(needed) if scope == "*" else set(needed) - GLOBAL_ONLY
+        # MySQL partial revokes ("REVOKE ... ON `db`.* FROM") take away.
+        (held if verb == "GRANT" else revoked).update(names)
+    return [p for p in needed if p not in held - revoked]
 
 
 def require_definition_privileges(conn):
