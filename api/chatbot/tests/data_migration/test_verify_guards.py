@@ -16,6 +16,7 @@ from .conftest import (
     DST,
     DST_DB,
     DST_PASSWORD,
+    LIMITED_GRANTS,
     SCRIPT,
     SRC,
     SRC_DB,
@@ -23,6 +24,7 @@ from .conftest import (
     admin,
     create_limited_account,
     drop_limited_account,
+    flavour,
     plain_copy,
     shim,
     tool,
@@ -197,6 +199,74 @@ def test_unreadable_routine_bodies_refused(copied, tmp_path):
         drop_limited_account()
     assert result.returncode == 2, result.stdout + result.stderr
     assert "mig_f" in result.stderr
+
+
+# Privileges held through a role, as the RDS master user holds its own
+# (rds_superuser_role): they count only while the role is active.
+ROLE, ROLE_USER = "mig_role", "mig_rl"
+
+
+@pytest.fixture
+def role_account(copied):
+    """Make mig_rl on both servers, with no direct grants and only a role
+    holding ``privileges`` on the database; returns its tool env."""
+
+    def make(privileges, active=True):
+        for server, db, password in (
+            (SRC, SRC_DB, SRC_PASSWORD),
+            (DST, DST_DB, DST_PASSWORD),
+        ):
+            mysql = flavour(server) == "mysql"
+            # What reads the body of a routine one did not define (see
+            # test_unreadable_routine_bodies_refused), held globally.
+            routine_bodies = (
+                f"GRANT SHOW_ROUTINE ON *.* TO {ROLE};"
+                if mysql
+                else f"GRANT SELECT ON mysql.proc TO {ROLE};"
+            )
+            default = "TO" if mysql else "FOR"
+            admin(
+                server,
+                f"DROP USER IF EXISTS '{ROLE_USER}'@'%'; DROP ROLE IF EXISTS {ROLE};"
+                f"CREATE ROLE {ROLE};"
+                f"GRANT {privileges} ON {db}.* TO {ROLE};"
+                f"{routine_bodies}"
+                f"CREATE USER '{ROLE_USER}'@'%' IDENTIFIED BY '{password}';"
+                f"GRANT {ROLE} TO '{ROLE_USER}'@'%';"
+                + (
+                    f"SET DEFAULT ROLE {ROLE} {default} '{ROLE_USER}'@'%';"
+                    if active
+                    else ""
+                ),
+            )
+        return tool_env(MIG_SOURCE_USER=ROLE_USER, MIG_TARGET_USER=ROLE_USER)
+
+    yield make
+    for server in (SRC, DST):
+        admin(
+            server, f"DROP USER IF EXISTS '{ROLE_USER}'@'%'; DROP ROLE IF EXISTS {ROLE}"
+        )
+
+
+def test_privileges_held_through_an_active_role_count(role_account, tmp_path):
+    result = verify(tmp_path, role_account(LIMITED_GRANTS))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_privileges_of_an_inactive_role_do_not_count(role_account, tmp_path):
+    env = role_account(LIMITED_GRANTS, active=False)
+    # A direct SELECT, or the server alone would turn the session away.
+    for server, db in ((SRC, SRC_DB), (DST, DST_DB)):
+        admin(server, f"GRANT SELECT ON {db}.* TO '{ROLE_USER}'@'%'")
+    result = verify(tmp_path, env)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "lacks SHOW VIEW, TRIGGER, EVENT, EXECUTE on" in result.stderr
+
+
+def test_role_missing_a_privilege_is_refused(role_account, tmp_path):
+    result = verify(tmp_path, role_account("SELECT, SHOW VIEW, EVENT, EXECUTE"))
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "lacks TRIGGER on" in result.stderr
 
 
 # ── V5: two different databases, and something to compare ───────────────────

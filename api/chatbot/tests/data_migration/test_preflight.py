@@ -20,6 +20,7 @@ from .conftest import (
     admin,
     create_limited_account,
     drop_limited_account,
+    flavour,
     load_tool,
     read_log,
     reset_target,
@@ -349,6 +350,37 @@ def test_quiesced_check_needs_process_privilege(same_or_newer_target, tmp_path):
     failed = check(report, "source_quiesced")
     assert failed["status"] == "fail"
     assert "grant PROCESS" in failed["detail"]
+
+
+def test_process_held_through_an_active_role_counts(same_or_newer_target, tmp_path):
+    # As the RDS master user holds part of its privileges (rds_superuser_role).
+    default = "TO" if flavour(SRC) == "mysql" else "FOR"
+    admin(
+        SRC,
+        "DROP USER IF EXISTS 'mig_rl'@'%'; DROP ROLE IF EXISTS mig_role;"
+        "CREATE ROLE mig_role;"
+        f"GRANT ALL PRIVILEGES ON {SRC_DB}.* TO mig_role;"
+        "GRANT PROCESS ON *.* TO mig_role;"
+        f"CREATE USER 'mig_rl'@'%' IDENTIFIED BY '{SRC_PASSWORD}';"
+        "GRANT mig_role TO 'mig_rl'@'%';"
+        f"SET DEFAULT ROLE mig_role {default} 'mig_rl'@'%';",
+    )
+    idle = _background_sql("DO SLEEP(6);", SRC_DB)
+    try:
+        result, report = preflight(
+            tmp_path,
+            "--require-quiesced",
+            "--quiesce-seconds",
+            "1",
+            env=tool_env(MIG_SOURCE_USER="mig_rl"),
+        )
+    finally:
+        idle.wait()
+        admin(SRC, "DROP USER IF EXISTS 'mig_rl'@'%'; DROP ROLE IF EXISTS mig_role")
+    # The role's PROCESS lets it see the idle session, so that is the failure.
+    assert result.returncode == 1, result.stdout + result.stderr
+    failed = check(report, "source_quiesced")
+    assert "session(s) connected" in failed["detail"], failed["detail"]
 
 
 def test_utf8_and_utf8mb3_collation_names_are_the_same():
