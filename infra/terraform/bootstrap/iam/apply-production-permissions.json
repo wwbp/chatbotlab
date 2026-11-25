@@ -1,0 +1,121 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListStateBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>"
+    },
+    {
+      "Sid": "CreateStateBucketOnFirstApply",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:PutBucketVersioning",
+        "s3:PutEncryptionConfiguration",
+        "s3:PutBucketPublicAccessBlock"
+      ],
+      "Resource": "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>"
+    },
+    {
+      "Sid": "ReadWriteOwnStateAndLock",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>/<PREFIX>/production/*"
+    },
+    {
+      "Sid": "ManageOwnBuckets",
+      "Effect": "Allow",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::<PREFIX>-production-*",
+        "arn:aws:s3:::<PREFIX>-production-*/*"
+      ]
+    },
+    {
+      "Sid": "ElasticBeanstalkStorageBucket",
+      "Effect": "Allow",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::elasticbeanstalk-*",
+        "arn:aws:s3:::elasticbeanstalk-*/*"
+      ]
+    },
+    {
+      "Sid": "ManageOwnIamNames",
+      "Effect": "Allow",
+      "Action": "iam:*",
+      "Resource": [
+        "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-production-*",
+        "arn:aws:iam::<ACCOUNT_ID>:instance-profile/<PREFIX>-production-*",
+        "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
+      ]
+    },
+    {
+      "Sid": "ServiceLinkedRoles",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/aws-service-role/*"
+    },
+    {
+      "Sid": "ReadIam",
+      "Effect": "Allow",
+      "Action": [
+        "iam:Get*",
+        "iam:List*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ManageStackServices",
+      "Effect": "Allow",
+      "Action": [
+        "acm:*",
+        "autoscaling:*",
+        "cloudformation:*",
+        "cloudfront:*",
+        "cloudwatch:*",
+        "ec2:*",
+        "elasticache:*",
+        "elasticbeanstalk:*",
+        "elasticloadbalancing:*",
+        "logs:*",
+        "rds:*",
+        "s3:ListAllMyBuckets",
+        "sns:*",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyHandBuiltLiveDeployment",
+      "Effect": "Deny",
+      "Action": "*",
+      "Resource": [
+        "arn:aws:elasticbeanstalk:*:*:application/humanlikebot",
+        "arn:aws:elasticbeanstalk:*:*:environment/humanlikebot/*",
+        "arn:aws:elasticbeanstalk:*:*:applicationversion/humanlikebot/*",
+        "arn:aws:rds:*:*:db:awseb-e-*",
+        "arn:aws:rds:*:*:snapshot:awseb-e-*",
+        "arn:aws:cloudfront::*:distribution/E2Q6P4TGU4GOC",
+        "arn:aws:cloudfront::*:distribution/E2XKRGQ6R0OG6W",
+        "arn:aws:s3:::bot.wwbp.org",
+        "arn:aws:s3:::bot.wwbp.org/*",
+        "arn:aws:s3:::dev.bot.wwbp.org",
+        "arn:aws:s3:::dev.bot.wwbp.org/*",
+        "arn:aws:s3:::bot-avatar.wwbp.org",
+        "arn:aws:s3:::bot-avatar.wwbp.org/*",
+        "arn:aws:s3:::dev.bot-avatar.wwbp.org",
+        "arn:aws:s3:::dev.bot-avatar.wwbp.org/*"
+      ]
+    }
+  ]
+}

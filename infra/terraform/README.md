@@ -209,7 +209,7 @@ environment. It has two jobs.
 
 | Job | Starts when | What it does |
 |---|---|---|
-| `plan` | A pull request touches `infra/terraform/**` | Prints `terraform plan` for staging and for production. Read-only. Skips with a notice if its role is not configured |
+| `plan` | A pull request touches `infra/terraform/**`, and a reviewer approves the run in the `plan` GitHub Environment | Prints `terraform plan` for staging and for production. Read-only. Skips with a notice if its role is not configured |
 | `apply` | A person runs the workflow by hand and picks an environment | Runs in the GitHub Environment of that name. `action = plan` (the default) prints the real plan and stops. `action = apply` prints the plan, then applies exactly that plan |
 
 A failed apply leaves everything in place. The workflow never destroys.
@@ -224,40 +224,79 @@ A failed apply leaves everything in place. The workflow never destroys.
 
 ### One-time setup
 
+The Terraform stack shares an AWS account with the hand-built live deployment
+(EB application `humanlikebot`, its `awseb-e-*` RDS instances, the
+`bot.wwbp.org` / `dev.bot.wwbp.org` / `bot-avatar.wwbp.org` /
+`dev.bot-avatar.wwbp.org` buckets and their two CloudFront distributions).
+The roles below are isolated from it by policy: every one carries an explicit
+Deny on those resources, trusts one GitHub Environment on one branch, and
+reaches only its own state file.
+
+The policies are committed in `bootstrap/iam/` and checked by
+`tests/check_workflows.py`. Replace `<ACCOUNT_ID>` and `<PREFIX>` (the value of
+`TF_PROJECT_PREFIX`) before using them, for example:
+
+```bash
+sed -e "s/<ACCOUNT_ID>/$ACCOUNT_ID/g" -e "s/<PREFIX>/$PREFIX/g" \
+  bootstrap/iam/plan-trust.json > /tmp/plan-trust.json
+```
+
 Do these steps in order. Steps 1 to 3 are in AWS, steps 4 to 6 in GitHub.
 
 1. **GitHub OIDC provider.** The AWS account needs the identity provider
    `token.actions.githubusercontent.com` (audience `sts.amazonaws.com`). Check
-   with `aws iam list-open-id-connect-providers`. If it exists, set the
-   repository secret `CREATE_GITHUB_OIDC_PROVIDER` to `false`.
-2. **Plan role** (read-only). Trust: the OIDC provider, audience
-   `sts.amazonaws.com`, subject `repo:<org>/<repo>:pull_request`. Permissions:
-   the AWS managed policy `ReadOnlyAccess`. This role runs code from pull
-   requests and can read the Terraform state, which holds the database
-   password. Give it no write permission.
-3. **Apply role**, one per environment if you can. Trust: the OIDC provider,
-   audience `sts.amazonaws.com`, subject
-   `repo:<org>/<repo>:environment:staging` (or `:environment:production`), so
-   only a run approved for that GitHub Environment can assume it. Permissions:
-   create, change and delete the resource types in this directory (VPC, EC2
-   security groups, RDS, ElastiCache, Elastic Beanstalk and what it drives,
-   S3, CloudFront, ACM, IAM roles and policies), plus read and write on the
-   state bucket, including `s3:DeleteObject` for the lock file
-   `<prefix>/<environment>/terraform.tfstate.tflock`. In practice this is
-   close to administrator access for one account.
-4. **GitHub Environments** `staging` and `production` (Settings →
-   Environments). On `production`, add **Required reviewers** and limit
-   **Deployment branches** to `main` and `staging`. Without required
-   reviewers, anyone who can run workflows can apply to production.
-5. **Environment secrets**, in each Environment: `TF_APPLY_ROLE_ARN`,
-   `DB_PASSWORD`, `ADMIN_PANEL_PASSWORD`, and `OPENAI_API_KEY` and/or
-   `ANTHROPIC_API_KEY`. Optional: `SURVEY_INGEST_TOKEN`.
-6. **Repository secrets**: `TF_PROJECT_PREFIX`, `TF_PLAN_ROLE_ARN`,
-   `CREATE_GITHUB_OIDC_PROVIDER`. `GH_PAT` only if you use
-   `write_deploy_secrets`.
+   with `aws iam list-open-id-connect-providers`. The live deploy roles use it
+   too. Set the repository secret `CREATE_GITHUB_OIDC_PROVIDER`; the workflows
+   stop if it is unset:
+   - `false` when the provider already exists (the case in the WWBP account).
+     Terraform then only refers to it.
+   - `true` only when no provider exists and you want this stack to own it.
+     Destroying that stack later deletes the provider, and with it every
+     GitHub Actions sign-in in the account, the live deploys included.
+2. **Plan role**, named `<PREFIX>-terraform-plan`. Trust:
+   `bootstrap/iam/plan-trust.json` (subject
+   `repo:wwbp/chatbotlab:environment:plan`, ref `refs/pull/*/merge`).
+   Permissions: `bootstrap/iam/plan-permissions.json`: describe/list/get on the
+   stack's services, `s3:GetObject` on the two state files only, no write
+   action, and the live-resource Deny. No AWS managed policy.
+3. **Apply roles**, one per environment: `<PREFIX>-terraform-apply-staging`
+   and `<PREFIX>-terraform-apply-production`. Trust:
+   `bootstrap/iam/apply-<environment>-trust.json` (subject
+   `repo:wwbp/chatbotlab:environment:<environment>`, ref `refs/heads/main` for
+   production and `refs/heads/staging` for staging). Permissions:
+   `bootstrap/iam/apply-<environment>-permissions.json`: the stack's services,
+   IAM only under `<PREFIX>-<environment>-*`, S3 only on its own buckets and on
+   `<prefix>/<environment>/*` in the state bucket (state file and lock), and
+   the live-resource Deny. Known limits: EC2, RDS, ElastiCache, Elastic
+   Beanstalk and CloudFront are not scoped by name, so the staging role could
+   change a production resource other than the denied live ones; both roles
+   share the account's `elasticbeanstalk-*` bucket and the OIDC provider.
+4. **GitHub Environments** (Settings → Environments):
+   - `plan`: **Required reviewers**. Approve a run only after reading the
+     pull request: the plan runs its code.
+   - `staging`: **Required reviewers**; **Deployment branches**: `staging`
+     only (the branch the staging trust policy accepts).
+   - `production`: **Required reviewers**, **Prevent self-review** ticked;
+     **Deployment branches**: `main` only.
+   Without required reviewers, anyone who can run workflows can apply.
+5. **Environment secrets**: in `plan`, `TF_PLAN_ROLE_ARN`. In `staging` and
+   `production`: `TF_APPLY_ROLE_ARN`, `DB_PASSWORD`, `ADMIN_PANEL_PASSWORD`,
+   and `OPENAI_API_KEY` and/or `ANTHROPIC_API_KEY`. Optional:
+   `SURVEY_INGEST_TOKEN`.
+6. **Repository secrets**: `TF_PROJECT_PREFIX`, `CREATE_GITHUB_OIDC_PROVIDER`.
+   `GH_PAT` only if you use `write_deploy_secrets`.
 
-Then run the workflow: environment `staging`, action `apply`. The first apply
-creates the state bucket.
+Then run the workflow from `staging`: environment `staging`, action `apply`.
+The first apply creates the state bucket.
+
+### Secrets in the state file
+
+The Terraform state still holds the database password, the admin password,
+the API keys and the Django secret key. **Anyone who can run a plan can read
+the state, so anyone who can get a plan approved can read those secrets.**
+That includes the code of any pull request a reviewer approves in the `plan`
+Environment. Moving the secrets to Secrets Manager, out of the state, is a
+separate change still to come.
 
 ### What a pull-request plan cannot show
 

@@ -103,7 +103,7 @@ Deployment workflows
 
 The workflow has two jobs. Setup is in ``infra/terraform/README.md``, section "Running Terraform from GitHub Actions".
 
-**plan** runs on each pull request that changes ``infra/terraform/``. It runs ``terraform plan`` for staging and for production with a read-only IAM role. It takes no state lock and gets no application secrets. If the role is not configured, the job skips with a notice.
+**plan** runs on each pull request that changes ``infra/terraform/``, once a reviewer approves the run in the ``plan`` GitHub Environment. It runs ``terraform plan`` for staging and for production with a read-only IAM role that trusts only that Environment. It takes no state lock and gets no application secrets, but the role can read the state, which still holds secrets: approving a plan lets the pull request's code read them. If the role is not configured, the job skips with a notice.
 
 **apply** runs only when a person starts the workflow. The person selects ``environment`` (``staging`` or ``production``) and ``action`` (``plan`` or ``apply``; the default is ``plan``). The job runs in the GitHub Environment with the same name as ``environment``. Required reviewers on that Environment must approve the run before it starts. Steps:
 
@@ -162,7 +162,7 @@ The trust policy on the GitHub Actions IAM role restricts assumption to:
 - OIDC issuer: ``token.actions.githubusercontent.com``
 - Subject: ``repo:{github_org}/{github_repo}:*`` (scoped to the exact fork)
 
-``deploy-infrastructure.yml`` also signs in through OIDC, with two roles that a person creates one time: a read-only role for the plan job and a role for the apply job. ``destroy-infrastructure.yml`` still uses the long-lived ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY``.
+``deploy-infrastructure.yml`` also signs in through OIDC, with roles that a person creates one time from the policies in ``infra/terraform/bootstrap/iam/``: a read-only role for the plan job and one apply role per environment. Each carries an explicit Deny on the hand-built live resources in the same account. ``destroy-infrastructure.yml`` still uses the long-lived ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY``.
 
 
 Application stack

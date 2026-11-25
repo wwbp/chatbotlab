@@ -1,0 +1,22 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+          "token.actions.githubusercontent.com:sub": [
+            "repo:wwbp/chatbotlab:environment:staging",
+            "repo:wwbp@42522115/chatbotlab@882137210:environment:staging"
+          ],
+          "token.actions.githubusercontent.com:ref": "refs/heads/staging"
+        }
+      }
+    }
+  ]
+}
