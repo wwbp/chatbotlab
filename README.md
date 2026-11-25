@@ -59,7 +59,7 @@ Then:
 
 Log into the admin, create a **Bot** (name, prompt, model), and open the chat UI to talk to it.
 
-The admin offers only the models marked active. Bots on a retired model keep it and are labelled "(retired)". To see which models answer, run `docker exec chatbotlab-backend-1 python manage.py check_models` (one tiny real call per active model; `--all` for every model). It changes nothing in the database.
+The admin offers only the models marked active. Bots on any other model keep it and are labelled "(not offered for new bots)". To see which models answer, run `docker exec chatbotlab-backend-1 python manage.py check_models` (one tiny real call per active model; `--all` for every model). It changes nothing in the database.
 
 Migrations run automatically when the backend container starts, so there is no migrate step here. `make superuser` **is** required — the development image does not create one for you.
 

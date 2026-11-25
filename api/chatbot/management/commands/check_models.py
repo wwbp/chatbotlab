@@ -22,7 +22,10 @@ class Command(BaseCommand):
         parser.add_argument(
             "--all",
             action="store_true",
-            help="Also check retired models (their failures don't fail the run).",
+            help=(
+                "Also check models not offered for new bots (their failures "
+                "don't fail the run)."
+            ),
         )
 
     def handle(self, *args, **options):
@@ -51,7 +54,7 @@ class Command(BaseCommand):
                 if not model.retired:
                     failed_active.append(model.model_id)
             ms = round((time.monotonic() - start) * 1000)
-            retired = " (retired)" if model.retired else ""
+            retired = " (not offered)" if model.retired else ""
             line = (
                 f"{model.provider.name:<10} {model.model_id + retired:<52} "
                 f"{status:<4} {ms:>6}ms  {detail}"
