@@ -399,28 +399,12 @@ AWS_PROFILE=test-account bash setup.sh
 # in terraform.tfvars to keep resource names distinct
 ```
 
-### In GitHub Actions (CI testing)
-
-A dedicated workflow at `.github/workflows/test-iac.yml` triggers on the
-`tf-iac` branch and uses `TEST_` prefixed secrets so it never touches the
-existing staging secrets.
-
-After `setup.sh` finishes on the test account, add these GitHub secrets
-(prefix every terraform output name with `TEST_`):
-
-| GitHub secret | Value from `terraform output` |
-|---|---|
-| `TEST_AWS_ACCOUNT_ID` | `github_secret_AWS_ACCOUNT_ID` |
-| `TEST_AWS_ROLE_NAME` | `github_secret_AWS_ROLE_NAME` |
-| `TEST_AWS_S3_BUCKET_NAME_FRONTEND` | `github_secret_AWS_S3_BUCKET_NAME_FRONTEND` |
-| `TEST_AWS_CLOUDFRONT_DISTRIBUTION_ID` | `github_secret_AWS_CLOUDFRONT_DISTRIBUTION_ID` |
-| `TEST_AWS_BACKEND_APPLICATION_NAME` | `github_secret_AWS_BACKEND_APPLICATION_NAME` |
-| `TEST_AWS_BACKEND_ENVIRONMENT_NAME` | `github_secret_AWS_BACKEND_ENVIRONMENT_NAME` |
-| `TEST_REACT_APP_API_URL` | `http://` + `terraform output -raw backend_api_url` + `/api` |
-
-Then push to `tf-iac` to trigger the test workflow.
-
 ### Tear down the test environment
+
+For a stack built by the Deploy Infrastructure workflow, use the **Destroy
+Infrastructure** workflow. It asks for the environment by name, for the typed
+confirmation `destroy <environment>`, and, for production, for
+`allow_production`. For a stack built with `setup.sh`:
 
 ```bash
 AWS_PROFILE=test-account terraform destroy -var-file=terraform.tfvars
@@ -481,7 +465,6 @@ No Terraform involvement. Just push to the appropriate branch:
 ```bash
 git push origin staging     # → staging environment
 git push origin main        # → production environment
-git push origin tf-iac      # → test environment
 ```
 
 GitHub Actions builds, syncs, and deploys automatically.
@@ -551,7 +534,7 @@ terraform apply -var-file=terraform.tfvars   # picks up from where it left off
 
 ---
 
-## Manual deployment (tf-iac / test branch)
+## Manual deployment
 
 After `setup.sh` completes and the infrastructure is up, deploy the app manually:
 
@@ -617,25 +600,6 @@ aws cloudfront create-invalidation \
 ---
 
 ## Pending
-
-### GitHub Actions CI/CD
-
-The IAM OIDC role (`<project-prefix>-staging-github-actions`) and the workflow file
-(`.github/workflows/test-iac.yml`) are in place. What's missing is the `TEST_*`
-GitHub repository secrets. After `setup.sh` finishes on the test account, add:
-
-| GitHub secret | Value |
-|---|---|
-| `TEST_AWS_ACCOUNT_ID` | `terraform output -raw github_secret_AWS_ACCOUNT_ID` |
-| `TEST_AWS_ROLE_NAME` | `terraform output -raw github_secret_AWS_ROLE_NAME` |
-| `TEST_AWS_S3_BUCKET_NAME_FRONTEND` | `terraform output -raw github_secret_AWS_S3_BUCKET_NAME_FRONTEND` |
-| `TEST_AWS_CLOUDFRONT_DISTRIBUTION_ID` | `terraform output -raw github_secret_AWS_CLOUDFRONT_DISTRIBUTION_ID` |
-| `TEST_AWS_BACKEND_APPLICATION_NAME` | `terraform output -raw github_secret_AWS_BACKEND_APPLICATION_NAME` |
-| `TEST_AWS_BACKEND_ENVIRONMENT_NAME` | `terraform output -raw github_secret_AWS_BACKEND_ENVIRONMENT_NAME` |
-| `TEST_REACT_APP_API_URL` | `http://` + `terraform output -raw backend_api_url` + `/api` |
-
-Once secrets are set, push to `tf-iac` to trigger the workflow — it will build and
-deploy both frontend and backend automatically.
 
 ### Performance testing
 
