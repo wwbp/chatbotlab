@@ -174,41 +174,12 @@ jobs:
           SNAPSHOT=$(terraform show -json | jq -r '[.values.root_module.resources[]? | select(.address == "aws_db_instance.main") | .values.final_snapshot_identifier // empty][0] // empty')
           echo "name=$SNAPSHOT" >> "$GITHUB_OUTPUT"
 
-      # ── 7. Disable RDS deletion protection ───────────────────────────────────
-      # Production sets deletion_protection = true (rds.tf), and someone may
-      # have switched it on elsewhere. terraform destroy would then fail on
-      # the database after the buckets had already been emptied, so turn it
-      # off first, wait until the change is applied, and stop on any error
-      # other than "there is no such database".
-      - name: Disable RDS deletion protection
-        env:
-          ENVIRONMENT: ${{ inputs.environment }}
-          PREFIX: ${{ steps.state.outputs.prefix }}
-        run: |
-          RDS_ID="${PREFIX}-${ENVIRONMENT}-database"
-          if ! PROTECTED=$(aws rds describe-db-instances --db-instance-identifier "$RDS_ID" \
-                 --query 'DBInstances[0].DeletionProtection' --output text 2>&1); then
-            if grep -q "DBInstanceNotFound" <<<"$PROTECTED"; then
-              echo "No database $RDS_ID — nothing to unprotect."
-              exit 0
-            fi
-            echo "$PROTECTED"
-            exit 1
-          fi
-          if [[ "$PROTECTED" == "True" ]]; then
-            echo "Disabling deletion protection on $RDS_ID ..."
-            aws rds modify-db-instance --db-instance-identifier "$RDS_ID" \
-              --no-deletion-protection --apply-immediately >/dev/null
-          fi
-          aws rds wait db-instance-available --db-instance-identifier "$RDS_ID"
-          echo "$RDS_ID is available, deletion protection off."
-
-      # ── 8. Back up the data bucket ───────────────────────────────────────────
+      # ── 7. Back up the data bucket ───────────────────────────────────────────
       # The data bucket holds participant uploads (avatars, voice audio).
       # Copy it into the state bucket, which this workflow never deletes,
       # under <prefix>/<environment>/backups/<UTC time>/data/, then compare
       # object count and total size. A mismatch stops the run before anything
-      # is emptied or destroyed. Only current object versions are copied.
+      # is changed. Only current object versions are copied.
       - name: Back up the data bucket
         id: backup
         env:
@@ -239,7 +210,7 @@ jobs:
           aws s3 sync "s3://$DATA" "$BACKUP/" --only-show-errors
           dst=$(totals "$BACKUP/")
           if [[ "$src" != "$dst" ]]; then
-            echo "::error::The backup does not match the data bucket (source: $src; backup: $dst). Nothing was emptied or destroyed."
+            echo "::error::The backup does not match the data bucket (source: $src; backup: $dst). Nothing was changed: deletion protection, buckets and resources are as they were."
             exit 1
           fi
           echo "Backed up $src to $BACKUP/"
@@ -247,6 +218,40 @@ jobs:
             echo "location=$BACKUP/"
             echo "summary=$src"
           } >> "$GITHUB_OUTPUT"
+
+      # ── 8. Disable RDS deletion protection ───────────────────────────────────
+      # Production sets deletion_protection = true (rds.tf), and someone may
+      # have switched it on elsewhere. terraform destroy would then fail on
+      # the database after the buckets had already been emptied, so turn it
+      # off before emptying them (and only after the backup succeeded), wait
+      # until the change is applied, and stop on any error other than "there
+      # is no such database". If anything later fails, the step after the
+      # destroy turns protection back on.
+      - name: Disable RDS deletion protection
+        id: rds
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          PREFIX: ${{ steps.state.outputs.prefix }}
+        run: |
+          RDS_ID="${PREFIX}-${ENVIRONMENT}-database"
+          if ! PROTECTED=$(aws rds describe-db-instances --db-instance-identifier "$RDS_ID" \
+                 --query 'DBInstances[0].DeletionProtection' --output text 2>&1); then
+            if grep -q "DBInstanceNotFound" <<<"$PROTECTED"; then
+              echo "No database $RDS_ID — nothing to unprotect."
+              exit 0
+            fi
+            echo "$PROTECTED"
+            exit 1
+          fi
+          if [[ "$PROTECTED" == "True" ]]; then
+            echo "Disabling deletion protection on $RDS_ID ..."
+            aws rds modify-db-instance --db-instance-identifier "$RDS_ID" \
+              --no-deletion-protection --apply-immediately >/dev/null
+            # Recorded first, so a failure from here on turns it back on.
+            echo "unprotected=true" >> "$GITHUB_OUTPUT"
+          fi
+          aws rds wait db-instance-available --db-instance-identifier "$RDS_ID"
+          echo "$RDS_ID is available, deletion protection off."
 
       # ── 9. Empty S3 buckets ───────────────────────────────────────────────────
       # Terraform cannot delete a non-empty S3 bucket, so both the frontend and
@@ -323,7 +328,29 @@ jobs:
         run: |
           terraform destroy -auto-approve -input=false -var-file="environments/${ENVIRONMENT}.tfvars"
 
-      # ── 11. Summary ───────────────────────────────────────────────────────────
+      # ── 11. Put deletion protection back if the run failed after removing it
+      - name: Re-enable RDS deletion protection
+        if: failure() && steps.rds.outputs.unprotected == 'true'
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          PREFIX: ${{ steps.state.outputs.prefix }}
+        run: |
+          RDS_ID="${PREFIX}-${ENVIRONMENT}-database"
+          if aws rds modify-db-instance --db-instance-identifier "$RDS_ID" \
+               --deletion-protection --apply-immediately >/dev/null; then
+            msg="Deletion protection on $RDS_ID was turned back on."
+          else
+            msg="Could not turn deletion protection back on for $RDS_ID (the database may already be gone). Check it in the AWS console."
+            echo "::error::$msg"
+          fi
+          {
+            echo "## Destroy did not complete"
+            echo ""
+            echo "This run turned off RDS deletion protection and then failed. $msg"
+            echo "The data bucket backup, if this run made one, is in the state bucket under <prefix>/${ENVIRONMENT}/backups/."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 12. Summary ───────────────────────────────────────────────────────────
       - name: Write summary
         if: success()
         env:
