@@ -628,14 +628,12 @@ class Bot(models.Model):
         # Ensure default models exist
         Model.get_or_create_default_models()
 
-        # Return the first available model (preferably GPT-4o Mini)
+        # The first offered model (preferably GPT-4o Mini); never a retired one.
+        offered = Model.objects.filter(is_active=True, provider__is_active=True)
         try:
             return (
-                Model.objects.filter(
-                    provider__name="OpenAI",
-                    model_id="gpt-4o-mini",
-                ).first()
-                or Model.objects.first()
+                offered.filter(provider__name="OpenAI", model_id="gpt-4o-mini").first()
+                or offered.first()
             )
         except Exception:
             return None
