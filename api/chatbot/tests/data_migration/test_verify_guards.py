@@ -25,6 +25,7 @@ from .conftest import (
     create_limited_account,
     drop_limited_account,
     flavour,
+    load_tool,
     plain_copy,
     shim,
     tool,
@@ -448,3 +449,42 @@ def test_line_separator_in_a_definition_is_not_a_row_break(copied, tmp_path):
         s("DROP VIEW IF EXISTS mig_v")
         t("DROP VIEW IF EXISTS mig_v")
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_grant_lines_are_read_fail_closed(monkeypatch):
+    dbcopy = load_tool()
+    conn = dbcopy.Conn("source", "h", "1", "u", "", "mig_src", "")
+
+    def held(*lines, needed=("SELECT", "TRIGGER", "PROCESS")):
+        monkeypatch.setattr(dbcopy, "query", lambda _c, _s: [[x] for x in lines])
+        return [p for p in needed if p not in dbcopy.missing_privileges(conn, needed)]
+
+    assert held("GRANT PROCESS ON *.* TO `u`@`%`") == ["PROCESS"]
+    # ALL on a database does not include the global-only PROCESS.
+    assert held("GRANT ALL PRIVILEGES ON `mig_src`.* TO `u`@`%`") == [
+        "SELECT",
+        "TRIGGER",
+    ]
+    assert held("GRANT ALL PRIVILEGES ON *.* TO `u`@`%`") == [
+        "SELECT",
+        "TRIGGER",
+        "PROCESS",
+    ]
+    # Database names are LIKE patterns; an escaped _ is literal.
+    assert held("GRANT SELECT ON `mig%`.* TO `r`") == ["SELECT"]
+    assert held("GRANT SELECT ON `mig\\_src`.* TO `r`") == ["SELECT"]
+    assert held("GRANT SELECT ON `mig\\_sr`.* TO `r`") == []
+    assert held("GRANT SELECT ON `other`.* TO `r`") == []
+    # Table, column and routine grants are not database-wide.
+    assert held("GRANT SELECT ON `mig_src`.`t` TO `u`@`%`") == []
+    assert (
+        held("GRANT EXECUTE ON PROCEDURE `mig_src`.`p` TO `u`@`%`", needed=("EXECUTE",))
+        == []
+    )
+    assert (
+        held(
+            "GRANT SELECT ON *.* TO `u`@`%`",
+            "REVOKE SELECT ON `mig_src`.* FROM `u`@`%`",
+        )
+        == []
+    )
