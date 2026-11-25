@@ -35,9 +35,14 @@ run "roles_always_carry_the_boundary" {
   command = plan
 
   assert {
+    # Attribute by attribute: iterating over whole role objects drags
+    # sensitive marks into the failure message and crashes newer Terraform.
     condition = alltrue([
-      for role in [aws_iam_role.eb_instance_role, aws_iam_role.eb_service_role, aws_iam_role.github_actions_deployment] :
-      role.permissions_boundary == "arn:aws:iam::123456789012:policy/chatbotlab-terraform-boundary-staging"
+      for arn in [
+        aws_iam_role.eb_instance_role.permissions_boundary,
+        aws_iam_role.eb_service_role.permissions_boundary,
+        aws_iam_role.github_actions_deployment.permissions_boundary,
+      ] : arn == "arn:aws:iam::123456789012:policy/chatbotlab-terraform-boundary-staging"
     ])
     error_message = "Every IAM role must carry the chatbotlab-terraform-boundary-staging permissions boundary."
   }
