@@ -145,11 +145,12 @@ What the script does:
 3. Runs `terraform init` pointing at that state bucket
 4. Shows you the full plan — review it before confirming
 5. Applies the plan
-6. Prints 9 GitHub secrets to configure
+6. Prints the 6 deploy secrets of the environment it built
 
 ### Step 4 — Configure GitHub Actions secrets
 
-After `setup.sh` finishes, it prints output like:
+After `setup.sh` finishes, it prints the secrets for the environment named in
+`terraform.tfvars`, and only those. Staging:
 
 ```
 AWS_ACCOUNT_ID                                    123456789012
@@ -158,14 +159,22 @@ AWS_S3_BUCKET_NAME_FRONTEND                       <project-prefix>-staging-front
 ...
 ```
 
+Production prints the names `production.yml` reads instead
+(`AWS_PROD_ACCOUNT_ID`, `AWS_PROD_ROLE_NAME`, `AWS_S3_PROD_BUCKET_NAME_FRONTEND`, ...).
+
 Go to `https://github.com/<org>/<repo>/settings/secrets/actions` and add each
-value as a repository secret using the exact name shown.
+value as a repository secret using the exact name shown. Never copy a value
+from one environment's stack into the other environment's secret names:
+`staging.yml` empties the bucket named in `AWS_S3_BUCKET_NAME_FRONTEND` before
+each deploy, so pointing it at production's bucket wipes the live frontend.
 
 You can re-print these values at any time:
 ```bash
 cd terraform
 terraform output
 ```
+The output names (`github_secret_AWS_...`) are not the secret names for
+production; use the `AWS_PROD_*` names above.
 
 ### Step 5 — First application deployment
 

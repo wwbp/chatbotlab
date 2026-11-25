@@ -4,13 +4,17 @@ on:
   push:
     branches:
       - main
-  # Deploy Infrastructure triggers this with `gh workflow run` once the AWS
-  # resources exist, so the first app deploy needs no second manual click.
+  # Manual run, for the first app deploy onto newly built infrastructure.
   workflow_dispatch:
 
 permissions:
   id-token: write
   contents: read
+
+# Secrets: production reads its own names (AWS_PROD_*, AWS_S3_PROD_*). The
+# account, role and EB application were once shared with staging.yml under
+# AWS_ACCOUNT_ID, AWS_ROLE_NAME and AWS_BACKEND_APPLICATION_NAME; those remain
+# as a fallback, so nothing changes until the AWS_PROD_* secrets are set.
 
 jobs:
   # ── Run the full CI suite first ──────────────────────────────────────────────
@@ -63,7 +67,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_ROLE_NAME }}
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_PROD_ACCOUNT_ID || secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_PROD_ROLE_NAME || secrets.AWS_ROLE_NAME }}
           aws-region: us-east-1
 
       - name: Sync S3 bucket
@@ -87,7 +91,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_ROLE_NAME }}
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_PROD_ACCOUNT_ID || secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_PROD_ROLE_NAME || secrets.AWS_ROLE_NAME }}
           aws-region: us-east-1
 
       - name: Install AWS Elastic Beanstalk CLI
@@ -97,7 +101,7 @@ jobs:
       - name: Deploy Django to Elastic Beanstalk
         run: |
           cd api
-          eb init -p docker ${{ secrets.AWS_BACKEND_APPLICATION_NAME }} --region us-east-1
+          eb init -p docker ${{ secrets.AWS_PROD_BACKEND_APPLICATION_NAME || secrets.AWS_BACKEND_APPLICATION_NAME }} --region us-east-1
           eb use ${{ secrets.AWS_PROD_BACKEND_ENVIRONMENT_NAME }}
           eb deploy --timeout 30
 
