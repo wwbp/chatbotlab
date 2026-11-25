@@ -206,6 +206,13 @@ check(
     "deploy-infrastructure.yml: the deploy job needs 'environment: ${{ inputs.environment }}'",
 )
 
+# A missing secret must stop the run before it touches AWS.
+check(
+    re.search(r"\n {10}(if \[\[ \$fail -eq 1 \]\]; then exit 1; fi|\[\[ \$fail -eq 1 \]\] && exit 1)\n",
+              block(deploy, r"name: Check required secrets")),
+    "deploy-infrastructure.yml: 'Check required secrets' must exit 1 when a required secret is missing",
+)
+
 # While production.yml still falls back to the shared names, writing staging's
 # secrets would repoint production. The preflight must stop that run.
 preflight = block(block(deploy, r"name: Check required secrets"), r'if \[\[ "\$ENVIRONMENT" == "staging" \]\]; then')
