@@ -911,8 +911,8 @@ for name, policy in policies.items():
         ):
             check(allows(policy, action, arn) == expected,
                   f"{fname}.json: {action} on {arn} must be {'allowed' if expected else 'refused'}")
-        check(not allows(policy, "s3:GetObject", sample_arns(environment)["state"]),
-              f"{fname}.json: roles the stack creates must not read the Terraform state")
+        check(denies(policy, "s3:GetObject", sample_arns(environment)["state"]),
+              f"{fname}.json: must explicitly deny the Terraform state to the roles the stack creates")
         for action in ("iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy", "iam:CreatePolicyVersion",
                        "iam:CreateUser", "iam:CreateAccessKey"):
             check(not allows(policy, action, "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-x"),
