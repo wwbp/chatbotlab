@@ -591,18 +591,20 @@ OIDC_ARN = f"arn:aws:iam::<ACCOUNT_ID>:oidc-provider/{OIDC}"
 STATE_BUCKET = "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>"
 EB_BUCKET = "arn:aws:s3:::elasticbeanstalk-us-east-1-<ACCOUNT_ID>"
 LIVE_EB_ENVIRONMENTS = {"humanlikebot-env", "humanlike-bot-development-env"}
-LIVE_RESOURCES = {
-    "arn:aws:elasticbeanstalk:*:*:application/humanlikebot",
-    "arn:aws:elasticbeanstalk:*:*:environment/humanlikebot/*",
-    "arn:aws:elasticbeanstalk:*:*:applicationversion/humanlikebot/*",
-    "arn:aws:rds:*:*:db:awseb-e-*",
-    "arn:aws:rds:*:*:snapshot:awseb-e-*",
-    "arn:aws:cloudfront::*:distribution/E2Q6P4TGU4GOC",
-    "arn:aws:cloudfront::*:distribution/E2XKRGQ6R0OG6W",
-    "arn:aws:s3:::elasticbeanstalk-*/humanlikebot/*",
+# One ARN of each live resource, as AWS would see it in a request.
+LIVE_SAMPLES = [
+    "arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:application/humanlikebot",
+    "arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:environment/humanlikebot/humanlikebot-env",
+    "arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:environment/humanlikebot/humanlike-bot-development-env",
+    "arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:applicationversion/humanlikebot/app-1",
+    "arn:aws:rds:us-east-1:<ACCOUNT_ID>:db:awseb-e-abc123-stack-awsebrdsdatabase-xyz",
+    "arn:aws:rds:us-east-1:<ACCOUNT_ID>:snapshot:awseb-e-abc123-snapshot",
+    "arn:aws:cloudfront::<ACCOUNT_ID>:distribution/E2Q6P4TGU4GOC",
+    "arn:aws:cloudfront::<ACCOUNT_ID>:distribution/E2XKRGQ6R0OG6W",
+    f"{EB_BUCKET}/humanlikebot/app-1.zip",
     *(f"arn:aws:s3:::{b}{suffix}" for b in ("bot.wwbp.org", "dev.bot.wwbp.org", "bot-avatar.wwbp.org",
-                                            "dev.bot-avatar.wwbp.org") for suffix in ("", "/*")),
-}
+                                            "dev.bot-avatar.wwbp.org") for suffix in ("", "/index.html")),
+]
 OIDC_WRITES = [
     "iam:CreateOpenIDConnectProvider", "iam:DeleteOpenIDConnectProvider",
     "iam:UpdateOpenIDConnectProviderThumbprint", "iam:AddClientIDToOpenIDConnectProvider",
@@ -631,6 +633,9 @@ ROLES = {
     "plan-staging": ("staging", "plan-staging", ("StringLike", "refs/pull/*/merge")),
     **{f"apply-{e}": (e, e, ("StringEquals", BRANCH[e])) for e in ENVIRONMENTS},
 }
+
+
+ROLE_PARTS = {"plan": ("permissions",), "apply": ("permissions", "abac", "guardrails")}
 
 
 def boundary_arn(env_name):
@@ -705,6 +710,112 @@ BOUNDARY_KEYED = {"iam:CreateRole", "iam:PutRolePermissionsBoundary", "iam:Attac
 BOUNDARY_WILDCARDS_ON_ANY_RESOURCE = {"ec2:*", "autoscaling:*", "elasticloadbalancing:*", "cloudformation:*"}
 
 
+# --- Tag scoping (ABAC) rules for statements on Resource "*" ------------------
+# A negated tag condition passes for an untagged resource, and the hand-built
+# live resources carry no Environment/Project tags: conditions must name the
+# own environment positively. aws:RequestTag says nothing about WHICH existing
+# resource is acted on, so it is enough only for actions that create one;
+# tagging actions could pull a live resource into the environment, so they
+# need both, plus a limit on the tag keys.
+TAGGING_ACTIONS = {
+    "ec2:CreateTags", "elasticloadbalancing:AddTags", "autoscaling:CreateOrUpdateTags", "cloudfront:TagResource",
+    "acm:AddTagsToCertificate", "cloudformation:TagResource", "cloudwatch:TagResource",
+}
+# Tag-on-create: the service authorises the tagging call for a resource that
+# does not exist yet, and names the creating call in this key.
+CREATE_ACTION_KEYS = {"ec2:CreateTags": "ec2:CreateAction", "elasticloadbalancing:AddTags": "elasticloadbalancing:CreateAction"}
+# The stack's own tag keys, plus those Elastic Beanstalk and CloudFormation
+# add to what they create (patterns, for ForAllValues:StringLike).
+ALLOWED_TAG_KEYS = {"Environment", "ManagedBy", "Name", "Project", "Purpose", "Tier",
+                    "elasticbeanstalk:*", "aws:cloudformation:*"}
+CREATING_VERB = re.compile(r"(Create|Run|Allocate|Request|Import)")
+
+
+def own_tags(cond, kind, environment, operators=("StringEquals",)):
+    return any(cond.get(op, {}).get(f"aws:{kind}/Environment") == environment
+               and cond.get(op, {}).get(f"aws:{kind}/Project") == "<PREFIX>" for op in operators)
+
+
+def tag_keys_limited(cond):
+    keys = [k for op in ("ForAllValues:StringEquals", "ForAllValues:StringLike")
+            for k in as_list(cond.get(op, {}).get("aws:TagKeys", []))]
+    return bool(keys) and set(keys) <= ALLOWED_TAG_KEYS
+
+
+def tag_scope_problems(st, environment):
+    """Why an Allow statement on Resource "*" is not scoped to its own
+    environment's tags (empty when it is)."""
+    if st.get("Effect") != "Allow":
+        return []
+    cond = st.get("Condition", {})
+    problems = [f"negated condition {op} fails open on untagged resources" for op in cond if "Not" in op]
+    if "*" not in as_list(st.get("Resource", [])):
+        return problems
+    resource_tag = own_tags(cond, "ResourceTag", environment)
+    request_tag = own_tags(cond, "RequestTag", environment) and tag_keys_limited(cond)
+    for action in as_list(st.get("Action", [])):
+        service, _, verb = action.partition(":")
+        if service not in TAG_SCOPED_SERVICES or action in UNTAGGABLE_ACTIONS:
+            continue
+        if re.match(r"(Describe|Get|List)[A-Za-z]*\*?$", verb) and "*" != verb:
+            continue
+        covered_tagging = [t for t in TAGGING_ACTIONS if fnmatchcase(t, action)]
+        if covered_tagging:
+            tag_on_create = all(CREATE_ACTION_KEYS.get(t) and any(CREATE_ACTION_KEYS[t] in c for c in cond.values())
+                                for t in covered_tagging)
+            both = resource_tag and own_tags(cond, "RequestTag", environment, ("StringEquals", "StringEqualsIfExists")) \
+                and tag_keys_limited(cond)
+            if not (both or (tag_on_create and request_tag)):
+                problems.append(f"'{action}' can tag ({', '.join(sorted(covered_tagging))}): needs aws:ResourceTag "
+                                f"and aws:RequestTag Environment = {environment}, Project = <PREFIX>, and aws:TagKeys "
+                                f"(or, for tag-on-create, the CreateAction key with aws:RequestTag and aws:TagKeys)")
+        elif "*" not in verb and CREATING_VERB.match(verb):
+            if not (request_tag or resource_tag):
+                problems.append(f"'{action}' creates: needs aws:RequestTag Environment = {environment}, "
+                                f"Project = <PREFIX> and aws:TagKeys")
+        elif not resource_tag:
+            problems.append(f"'{action}' on '*' needs aws:ResourceTag Environment = {environment} and Project = <PREFIX>")
+    return problems
+
+
+# The validator itself: statements that must be refused, and ones it must pass.
+_tags = lambda kind, op="StringEquals": {op: {f"aws:{kind}/Environment": "staging", f"aws:{kind}/Project": "<PREFIX>"}}
+_keys = {"ForAllValues:StringEquals": {"aws:TagKeys": ["Environment", "Project"]}}
+for label, st, ok in (
+    ("terminate scoped by RequestTag only", {"Effect": "Allow", "Action": "ec2:TerminateInstances", "Resource": "*",
+                                              "Condition": {**_tags("RequestTag"), **_keys}}, False),
+    ("ec2:* scoped by RequestTag only", {"Effect": "Allow", "Action": "ec2:*", "Resource": "*",
+                                         "Condition": {**_tags("RequestTag"), **_keys}}, False),
+    ("ec2:* scoped by ResourceTag (covers CreateTags)", {"Effect": "Allow", "Action": "ec2:*", "Resource": "*",
+                                                         "Condition": _tags("ResourceTag")}, False),
+    ("ec2:Create* by RequestTag (covers CreateTags)", {"Effect": "Allow", "Action": "ec2:Create*", "Resource": "*",
+                                                       "Condition": {**_tags("RequestTag"), **_keys}}, False),
+    ("CreateTags by ResourceTag only", {"Effect": "Allow", "Action": "ec2:CreateTags", "Resource": "*",
+                                        "Condition": _tags("ResourceTag")}, False),
+    ("CreateTags without TagKeys", {"Effect": "Allow", "Action": "ec2:CreateTags", "Resource": "*",
+                                    "Condition": {"StringEquals": {**_tags("ResourceTag")["StringEquals"],
+                                                                   **_tags("RequestTag")["StringEquals"]}}}, False),
+    ("RunInstances without TagKeys", {"Effect": "Allow", "Action": "ec2:RunInstances", "Resource": "*",
+                                      "Condition": _tags("RequestTag")}, False),
+    ("negated tag condition", {"Effect": "Allow", "Action": "ec2:Delete*", "Resource": "*",
+                               "Condition": {"StringNotEquals": {"aws:ResourceTag/Environment": "production"}}}, False),
+    ("other environment's tags", {"Effect": "Allow", "Action": "ec2:Delete*", "Resource": "*",
+                                  "Condition": {"StringEquals": {"aws:ResourceTag/Environment": "production",
+                                                                 "aws:ResourceTag/Project": "<PREFIX>"}}}, False),
+    ("RunInstances with RequestTag and TagKeys", {"Effect": "Allow", "Action": "ec2:RunInstances", "Resource": "*",
+                                                  "Condition": {**_tags("RequestTag"), **_keys}}, True),
+    ("ec2:Delete* by ResourceTag", {"Effect": "Allow", "Action": "ec2:Delete*", "Resource": "*",
+                                    "Condition": _tags("ResourceTag")}, True),
+    ("tag-on-create", {"Effect": "Allow", "Action": "ec2:CreateTags", "Resource": "*",
+                       "Condition": {"StringEquals": {**_tags("RequestTag")["StringEquals"],
+                                                      "ec2:CreateAction": ["RunInstances"]}, **_keys}}, True),
+    ("retag own resource", {"Effect": "Allow", "Action": "ec2:CreateTags", "Resource": "*",
+                            "Condition": {**_tags("ResourceTag"), **_tags("RequestTag", "StringEqualsIfExists"), **_keys}}, True),
+):
+    check(bool(tag_scope_problems(st, "staging")) != ok,
+          f"tag_scope_problems: fixture '{label}' should be {'accepted' if ok else 'refused'}")
+
+
 def is_service_wide_write(action):
     service, _, verb = action.partition(":")
     return action == "*" or (verb.endswith("*") and not re.match(r"(Describe|Get|List|Check)", verb))
@@ -740,15 +851,34 @@ for role, (environment, gh_environment, (ref_operator, ref)) in ROLES.items():
         as_list(condition.get(ref_operator, {}).get(f"{OIDC}:ref", [])) == [ref],
         f"{role}-trust.json: needs {ref_operator} {OIDC}:ref = {ref}",
     )
-    policies[role] = load_policy(f"{role}-permissions")
+    # A role's permissions may be split over several managed policies
+    # (<role>-permissions.json, <role>-abac.json, <role>-guardrails.json); the
+    # checks below look at all of them together.
+    parts = [load_policy(f"{role}-{part}") for part in ROLE_PARTS[role.split("-")[0]]]
+    policies[role] = {"Statement": [st for part in parts for st in part["Statement"]]}
 
 for env_name in ENVIRONMENTS:
     policies[f"boundary-{env_name}"] = load_policy(f"boundary-{env_name}")
 check(
-    not (set(p.stem for p in IAM.glob("*.json")) - {f"{r}-{k}" for r in ROLES for k in ("trust", "permissions")}
+    not (set(p.stem for p in IAM.glob("*.json"))
+         - {f"{r}-{k}" for r in ROLES for k in ("trust", *ROLE_PARTS[r.split("-")[0]])}
          - {f"boundary-{e}" for e in ENVIRONMENTS}) if IAM.exists() else True,
     "bootstrap/iam/: holds a policy file this check does not know about",
 )
+
+# IAM size limits (characters without whitespace), with the placeholders
+# replaced by long real values: a policy that fits only with short ones fails
+# at setup time.
+def iam_size(path):
+    text = json.dumps(json.loads(path.read_text()), separators=(",", ":"))
+    return len(text.replace("<PREFIX>", "x" * 24).replace("<SES_FROM_DOMAIN>", "x" * 30))
+
+
+for path in sorted(IAM.glob("*.json")) if IAM.exists() else []:
+    # Trust policy: 2048. Everything else is a customer managed policy: 6144.
+    limit = 2048 if path.stem.endswith("-trust") else 6144
+    check(iam_size(path) <= limit,
+          f"bootstrap/iam/{path.name}: {iam_size(path)} characters with a 24-character prefix; the IAM limit is {limit}")
 
 live_statements = {}
 for name, policy in policies.items():
@@ -765,34 +895,14 @@ for name, policy in policies.items():
             continue
         for action in as_list(st.get("Action", [])):
             check(action not in ("*", "iam:*"), f"{fname}.json: '{action}' is never allowed")
-            # A write on every resource must name its own environment
-            # positively: a negated tag condition passes for an untagged
-            # resource, and the hand-built live resources carry no such tags.
-            service, _, verb = action.partition(":")
-            on_any = "*" in as_list(st.get("Resource", []))
-            if on_any and (is_service_wide_write(action) or (
-                    service in TAG_SCOPED_SERVICES and not re.match(r"(Describe|Get|List|Check)", verb)
-                    and action not in UNTAGGABLE_ACTIONS)):
-                eq = st.get("Condition", {}).get("StringEquals", {})
-                check(
-                    any(eq.get(f"aws:{kind}/Environment") == environment and eq.get(f"aws:{kind}/Project") == "<PREFIX>"
-                        for kind in ("ResourceTag", "RequestTag")),
-                    f"{fname}.json: '{action}' on '*' needs StringEquals aws:ResourceTag (or aws:RequestTag) "
-                    f"Environment = {environment} and Project = <PREFIX>",
-                )
-        for operator in st.get("Condition", {}):
-            check("Not" not in operator,
-                  f"{fname}.json: Allow with a negated condition ({operator}) fails open on untagged resources")
+        for problem in tag_scope_problems(st, environment):
+            check(False, f"{fname}.json: {problem}")
 
     # Live deployment: denied by name, and by tag where EB names resources
     # unpredictably (instances, security groups, load balancers, Auto Scaling
     # groups, the awseb-e-* CloudFormation stacks).
-    denied = {r for st in policy["Statement"] if st.get("Effect") == "Deny" and as_list(st.get("Action")) == ["*"]
-              and "Condition" not in st for r in as_list(st.get("Resource", []))}
-    check(
-        LIVE_RESOURCES <= denied,
-        f"{fname}.json: must deny everything on the live resources; missing {sorted(LIVE_RESOURCES - denied)}",
-    )
+    missing = sorted(arn for arn in LIVE_SAMPLES if not denies(policy, "*", arn))
+    check(not missing, f"{fname}.json: must deny everything on the live resources; missing {missing}")
     tag_denies = [
         st for st in policy["Statement"]
         if st.get("Effect") == "Deny" and as_list(st.get("Action")) == ["*"] and as_list(st.get("Resource")) == ["*"]
@@ -812,15 +922,24 @@ for name, policy in policies.items():
               f"{fname}.json: no statement may allow {action} on the OIDC provider (even if a Deny overrides it)")
         check(denies(policy, action, OIDC_ARN), f"{fname}.json: must explicitly deny {action}")
 
-    # The other environment: denied by name and by tag.
-    for what, arn in sample_arns(other).items():
-        check(denies(policy, "s3:GetObject", arn), f"{fname}.json: must deny the {other} {what} ({arn})")
-    check(
-        any(st.get("Effect") == "Deny" and as_list(st.get("Action")) == ["*"]
-            and as_list(st.get("Condition", {}).get("StringEquals", {}).get("aws:ResourceTag/Environment", [])) == [other]
-            for st in policy["Statement"]),
-        f"{fname}.json: must deny everything tagged Environment={other}",
-    )
+    # The other environment: the Terraform roles are denied it by name and by
+    # tag. The boundary (size-limited to 6144 characters) instead allows
+    # nothing that names it: every Allow there is scoped to its own names or
+    # its own Environment tag.
+    if kind == "boundary":
+        for what, arn in sample_arns(other).items():
+            named = [r for st in policy["Statement"] if st.get("Effect") == "Allow"
+                     for r in as_list(st.get("Resource", [])) if r != "*" and fnmatchcase(arn, r)]
+            check(not named, f"{fname}.json: an Allow reaches the {other} {what} ({arn}) through {named}")
+    else:
+        for what, arn in sample_arns(other).items():
+            check(denies(policy, "s3:GetObject", arn), f"{fname}.json: must deny the {other} {what} ({arn})")
+        check(
+            any(st.get("Effect") == "Deny" and as_list(st.get("Action")) == ["*"]
+                and as_list(st.get("Condition", {}).get("StringEquals", {}).get("aws:ResourceTag/Environment", [])) == [other]
+                for st in policy["Statement"]),
+            f"{fname}.json: must deny everything tagged Environment={other}",
+        )
 
     if kind in ("plan", "apply"):
         check(not allows(policy, "s3:GetObject", "arn:aws:s3:::someone-elses-bucket/key"),
