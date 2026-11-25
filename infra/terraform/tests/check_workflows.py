@@ -26,6 +26,21 @@ def uncommented(path):
     return "\n".join(line for line in lines if not line.lstrip().startswith("#"))
 
 
+def block(text, header):
+    """The line matching `header` plus every following line indented deeper
+    (blank lines included): a YAML step or job, or a shell if/case body."""
+    match = re.search(rf"^( *)(?:- )?{header}.*$", text, re.M)
+    if not match:
+        return ""
+    indent = len(match.group(1))
+    lines = [match.group(0)]
+    for line in text[match.end() + 1 :].splitlines():
+        if line.strip() and len(line) - len(line.lstrip()) <= indent:
+            break
+        lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
 deploy = uncommented(WORKFLOWS / "deploy-infrastructure.yml")
 
 # A failed or repeated apply must leave every resource in place. The workflow
@@ -159,9 +174,54 @@ check(
     not any("PROD" in name for name in aws_secrets(staging_yml)),
     "staging.yml reads a production secret",
 )
-without_fallbacks = re.sub(r"\|\|\s*secrets\.AWS_\w+", "", production_yml)
+# Only these three may fall back, each to its own old shared name. Any other
+# fallback (e.g. the production EB environment or bucket to staging's) would
+# deploy production onto the staging stack whenever the PROD secret is unset.
+ALLOWED_FALLBACKS = {
+    (f"AWS_PROD_{x}", f"AWS_{x}") for x in ("ACCOUNT_ID", "ROLE_NAME", "BACKEND_APPLICATION_NAME")
+}
+fallbacks = set()
+for name, text in all_workflows.items():
+    for m in re.finditer(r"\|\|\s*secrets\.(\w+)", text):
+        before = re.search(r"secrets\.(\w+)\s*$", text[: m.start()])
+        pair = (before.group(1) if before else "<not a secret>", m.group(1))
+        check(
+            name == "production.yml" and pair in ALLOWED_FALLBACKS,
+            f"{name}: secret fallback '{pair[0]} || {pair[1]}' is not allowed; only "
+            f"production.yml may use secrets.AWS_PROD_X || secrets.AWS_X for "
+            f"X in ACCOUNT_ID, ROLE_NAME, BACKEND_APPLICATION_NAME",
+        )
+        fallbacks.add(pair)
+without_fallbacks = production_yml
+for prod, old in ALLOWED_FALLBACKS:
+    without_fallbacks = re.sub(rf"(secrets\.{prod})\s*\|\|\s*secrets\.{old}\b", r"\1", without_fallbacks)
 shared = {name for name in aws_secrets(without_fallbacks) if "PROD" not in name}
 check(not shared, f"production.yml reads secrets that staging.yml owns: {sorted(shared)}")
+
+# The run must belong to the chosen GitHub Environment, so that
+# environment's protection rules (reviewers, branches) apply to it.
+deploy_job = block(deploy, r"deploy:")
+check(
+    re.search(r"\n    environment: \$\{\{ inputs\.environment \}\}\n", deploy_job),
+    "deploy-infrastructure.yml: the deploy job needs 'environment: ${{ inputs.environment }}'",
+)
+
+# While production.yml still falls back to the shared names, writing staging's
+# secrets would repoint production. The preflight must stop that run.
+preflight = block(block(deploy, r"name: Check required secrets"), r'if \[\[ "\$ENVIRONMENT" == "staging" \]\]; then')
+check(preflight, "deploy-infrastructure.yml: no staging preflight ('if [[ \"$ENVIRONMENT\" == \"staging\" ]]')")
+loop = re.search(r"for name in ([\w ]+); do", preflight)
+checked = set(loop.group(1).split()) if loop else set()
+check(
+    checked == {prod for prod, _ in fallbacks} and checked,
+    f"deploy-infrastructure.yml: the staging preflight must check exactly the AWS_PROD_* "
+    f"names production.yml falls back from; checks {sorted(checked)}",
+)
+check(
+    'if ! grep -qx "$name"' in preflight and "fail=1" in preflight
+    and re.search(r"if \[\[ \$fail -eq 1 \]\]; then exit 1; fi", preflight),
+    "deploy-infrastructure.yml: the staging preflight must fail (exit 1) when an AWS_PROD_* secret is missing",
+)
 
 check(
     re.search(r"\n      write_deploy_secrets:\n(?:        .*\n)*?        default: false", deploy),
@@ -176,8 +236,12 @@ step = re.search(r"- name: Write deployment secrets\n(?:        .*\n|\n)+", depl
 check(step, "deploy-infrastructure.yml: 'Write deployment secrets' step not found")
 step = step.group(0) if step else ""
 check(
-    re.search(r"\n        if: [^\n]*inputs\.write_deploy_secrets", step),
-    "deploy-infrastructure.yml: secrets may be written only when write_deploy_secrets is set",
+    re.search(r"\n        if: (inputs\.write_deploy_secrets|\$\{\{ *inputs\.write_deploy_secrets *\}\}) *\n", step),
+    "deploy-infrastructure.yml: the secrets step's if: must be exactly inputs.write_deploy_secrets",
+)
+check(
+    "\n          ENVIRONMENT: ${{ inputs.environment }}\n" in step,
+    "deploy-infrastructure.yml: the secrets step must take ENVIRONMENT from inputs.environment",
 )
 check(
     len(re.findall(r"\bset_secret\s+AWS_", deploy)) == len(re.findall(r"\bset_secret\s+AWS_", step)),
@@ -203,6 +267,45 @@ check(
     f"building production must write exactly the AWS_*PROD* secrets production.yml reads; "
     f"difference: {sorted(written['production'] ^ production_reads)}",
 )
+
+# setup.sh tells a person which secret to set to which output. It must give the
+# same (secret, output) pairs as the workflow, and only the built environment's:
+# one list for both once led to staging's bucket secret naming production's.
+def pairs(text, call):
+    found = {}
+    for env_name in ("staging", "production"):
+        body = block(text, rf"{env_name}\)")
+        found[env_name] = set(re.findall(rf'\b{call}\s+(\w+)\s+"?\$?\(?(?:out\s+)?(\w+)', body))
+    return found
+
+
+setup_pairs = pairs(setup_sh, "show")
+workflow_pairs = pairs(step, "set_secret")
+for env_name in ("staging", "production"):
+    check(
+        setup_pairs[env_name] and setup_pairs[env_name] == workflow_pairs[env_name],
+        f"setup.sh must print the same {env_name} (secret, output) pairs as the workflow writes; "
+        f"difference: {sorted(setup_pairs[env_name] ^ workflow_pairs[env_name])}",
+    )
+check(
+    len(re.findall(r"\bshow\s+AWS_", setup_sh)) == sum(len(p) for p in setup_pairs.values()),
+    "setup.sh: a secret is printed outside the staging/production branches",
+)
+check(
+    re.search(r'case "\$ENVIRONMENT" in', setup_sh),
+    "setup.sh: must choose the secret names by $ENVIRONMENT",
+)
+# An output description that names a staging secret without saying so invites
+# setting it from a production stack.
+outputs_tf = (TERRAFORM / "outputs.tf").read_text()
+for description in re.findall(r'description\s*=\s*"([^"]*)"', outputs_tf):
+    for secret in aws_secrets(staging_yml):
+        for m in re.finditer(rf"\b{secret}\b", description):
+            check(
+                description[m.end():].startswith(" for staging"),
+                f"outputs.tf: description names staging's {secret} without ' for staging': '{description}'",
+            )
+
 # Building infrastructure must not also start an application deploy.
 check(
     "gh workflow run" not in deploy,
