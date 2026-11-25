@@ -1122,13 +1122,87 @@ for needle, why in (
     ('"$ENVIRONMENT" != "staging" && "$ENVIRONMENT" != "production"', "reject any environment other than staging or production"),
     ('"$CONFIRM_DESTROY" != "destroy $ENVIRONMENT"', "require the typed confirmation 'destroy <environment>'"),
     ('"$ENVIRONMENT" == "production" && "$ALLOW_PRODUCTION" != "true"', "refuse production unless allow_production is set"),
+    ('"$CONFIRM_DATA" != "destroy data"', "require the typed confirmation 'destroy data'"),
 ):
     check(needle in validate_job, f"destroy validate job: must {why}")
+    # ...and each refusal must count: the if-block sets fail=1.
+    check("fail=1" in block(validate_job, re.escape(f"if [[ {needle} ]]; then")),
+          f"destroy validate job: the check that must {why} does not set fail=1")
 check(
     re.search(r"\n    needs: \[?validate\]?\n", "\n" + destroy_job),
     "destroy job: must depend on the validate job",
 )
 check("role-to-assume" in destroy_job, "destroy job: must sign in through an OIDC role")
+
+# --- Destroy: the gates must be able to stop the run ---------------------------
+
+check(
+    re.search(r"\n          if \[\[ \$fail -eq 1 \]\]; then exit 1; fi\n", validate_job),
+    "destroy validate job: must exit 1 when any check failed",
+)
+check("continue-on-error" not in destroy, "destroy-infrastructure.yml: no step or job may continue on error")
+check(
+    not re.search(r"\n    if:", "\n" + destroy_job),
+    "destroy job: must have no job-level if: (always() or !cancelled() would run it after a failed validation)",
+)
+check("configure-aws-credentials" not in validate_job, "destroy validate job: must not configure AWS credentials")
+check("\npermissions: {}\n" in destroy, "destroy-infrastructure.yml: top-level permissions must be empty")
+for job_name, job in {"deploy apply": apply_job, "destroy": destroy_job}.items():
+    check(
+        "\n    concurrency:\n      group: terraform-${{ inputs.environment }}\n" in "\n" + job,
+        f"{job_name} job: concurrency group must be terraform-${{{{ inputs.environment }}}} (shared, so apply and destroy never overlap)",
+    )
+destroy_steps = steps_of(destroy_job)
+destroy_titles = [st.splitlines()[0] for st in destroy_steps]
+
+
+def destroy_step(prefix):
+    return next((st for st in destroy_steps if st.startswith(f"name: {prefix}")), "")
+
+
+tf_destroy = destroy_step("Destroy infrastructure")
+check(
+    re.search(r'terraform destroy [^\n]*-var-file="environments/\$\{ENVIRONMENT\}\.tfvars"', tf_destroy)
+    and "\n          ENVIRONMENT:                        ${{ inputs.environment }}\n" in tf_destroy,
+    "destroy job: terraform destroy must read environments/${ENVIRONMENT}.tfvars, with ENVIRONMENT from inputs.environment",
+)
+# Values reach shell scripts through env:, never pasted into the script.
+for st in destroy_steps:
+    run = st.split("\n        run: |\n", 1)[1] if "\n        run: |\n" in st else ""
+    check("${{" not in run, f"destroy job, step '{st.splitlines()[0]}': pass ${{{{ }}}} values through env:, not inline in run:")
+
+# Deletion protection: errors must show, and the change must finish before
+# anything is deleted.
+rds = destroy_step("Disable RDS deletion protection")
+check(rds, "destroy job: no 'Disable RDS deletion protection' step")
+check(
+    "|| true" not in rds and "2>/dev/null" not in rds,
+    "destroy job: the RDS step must not hide errors (|| true, 2>/dev/null)",
+)
+check("aws rds wait db-instance-available" in rds, "destroy job: must wait for the RDS change to finish")
+check("DBInstanceNotFound" in rds, "destroy job: only DBInstanceNotFound may mean 'no database'")
+
+# The data bucket is backed up, and the backup verified, before anything is
+# emptied; and that happens only after the database step succeeded.
+backup = destroy_step("Back up the data bucket")
+order = [destroy_titles.index(t) if t in destroy_titles else -1 for t in (
+    "name: Disable RDS deletion protection", "name: Back up the data bucket", "name: Empty S3 buckets",
+    "name: Destroy infrastructure")]
+check(-1 not in order and order == sorted(order),
+      f"destroy job: order must be RDS protection, back up, empty, destroy; got {destroy_titles}")
+check(
+    re.search(r'BACKUP="s3://\$\{STATE_BUCKET\}/\$\{PREFIX\}/\$\{ENVIRONMENT\}/backups/', backup),
+    "destroy job: the backup must go to <state bucket>/<prefix>/<environment>/backups/<date>/",
+)
+check(
+    "Total Objects" in backup and "Total Size" in backup
+    and re.search(r'if \[\[ "\$src" != "\$dst" \]\]; then\n(?:.*\n)*?\s+exit 1\n', backup),
+    "destroy job: the backup step must compare object count and total size and exit 1 on a mismatch",
+)
+summary = destroy_step("Write summary")
+check("BACKUP" in summary and "SNAPSHOT" in summary, "destroy job: the summary must name the data backup and the RDS final snapshot")
+check("OIDC provider" not in summary or "kept" in summary,
+      "destroy job: the summary must not claim the shared GitHub OIDC provider was deleted")
 
 # --- Stale files and statements ----------------------------------------------
 
