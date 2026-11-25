@@ -793,8 +793,13 @@ for name, policy in policies.items():
         f"{fname}.json: must deny everything tagged Environment={other}",
     )
 
+    if kind in ("plan", "apply"):
+        check(not allows(policy, "s3:GetObject", "arn:aws:s3:::someone-elses-bucket/key"),
+              f"{fname}.json: must not read objects in buckets that are not its own")
     if kind == "plan":
         own = sample_arns(environment)
+        check(not allows(policy, "s3:GetObject", own["object"]),
+              f"{fname}.json: must not read application data (only its state file)")
         check(allows(policy, "s3:GetObject", own["state"]), f"{fname}.json: must read its own state file")
         for st in policy["Statement"]:
             if st.get("Effect") != "Allow":
