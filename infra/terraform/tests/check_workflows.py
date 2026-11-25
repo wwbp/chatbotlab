@@ -616,11 +616,19 @@ EB_MANAGED_POLICIES = {
     "arn:aws:iam::aws:policy/AdministratorAccess-AWSElasticBeanstalk",
 }
 ENVIRONMENTS = ("staging", "production")
+# Services whose resources Elastic Beanstalk names itself, so the Terraform
+# roles reach them by tag (Environment / Project), not by name.
+TAG_SCOPED_SERVICES = {"ec2", "autoscaling", "elasticloadbalancing", "cloudformation", "cloudfront", "acm", "cloudwatch"}
+# Calls with no resource to tag: nothing narrower than "*" exists.
+UNTAGGABLE_ACTIONS = {"cloudwatch:PutMetricData"}
 OTHER = {"staging": "production", "production": "staging"}
 BRANCH = {"staging": "refs/heads/staging", "production": "refs/heads/main"}
 # role -> (environment it serves, GitHub Environment it trusts, ref condition)
 ROLES = {
-    **{f"plan-{e}": (e, f"plan-{e}", ("StringLike", "refs/pull/*/merge")) for e in ENVIRONMENTS},
+    # Pull requests plan staging only: until secrets leave the state, no
+    # pull-request code may run with a role that reads production's state.
+    # Production is planned by the apply job (action = plan), from main.
+    "plan-staging": ("staging", "plan-staging", ("StringLike", "refs/pull/*/merge")),
     **{f"apply-{e}": (e, e, ("StringEquals", BRANCH[e])) for e in ENVIRONMENTS},
 }
 
@@ -757,17 +765,24 @@ for name, policy in policies.items():
             continue
         for action in as_list(st.get("Action", [])):
             check(action not in ("*", "iam:*"), f"{fname}.json: '{action}' is never allowed")
-            # A service-wide write on every resource must at least exclude the
-            # other environment's and the live environments' resources.
-            if is_service_wide_write(action) and "*" in as_list(st.get("Resource", [])):
-                cond = st.get("Condition", {}).get("StringNotEquals", {})
+            # A write on every resource must name its own environment
+            # positively: a negated tag condition passes for an untagged
+            # resource, and the hand-built live resources carry no such tags.
+            service, _, verb = action.partition(":")
+            on_any = "*" in as_list(st.get("Resource", []))
+            if on_any and (is_service_wide_write(action) or (
+                    service in TAG_SCOPED_SERVICES and not re.match(r"(Describe|Get|List|Check)", verb)
+                    and action not in UNTAGGABLE_ACTIONS)):
+                eq = st.get("Condition", {}).get("StringEquals", {})
                 check(
-                    as_list(cond.get("aws:ResourceTag/Environment", [])) == [other]
-                    and set(as_list(cond.get("aws:ResourceTag/elasticbeanstalk:environment-name", [])))
-                    == LIVE_EB_ENVIRONMENTS,
-                    f"{fname}.json: '{action}' on '*' needs StringNotEquals aws:ResourceTag/Environment = {other} "
-                    f"and aws:ResourceTag/elasticbeanstalk:environment-name = the live environments",
+                    any(eq.get(f"aws:{kind}/Environment") == environment and eq.get(f"aws:{kind}/Project") == "<PREFIX>"
+                        for kind in ("ResourceTag", "RequestTag")),
+                    f"{fname}.json: '{action}' on '*' needs StringEquals aws:ResourceTag (or aws:RequestTag) "
+                    f"Environment = {environment} and Project = <PREFIX>",
                 )
+        for operator in st.get("Condition", {}):
+            check("Not" not in operator,
+                  f"{fname}.json: Allow with a negated condition ({operator}) fails open on untagged resources")
 
     # Live deployment: denied by name, and by tag where EB names resources
     # unpredictably (instances, security groups, load balancers, Auto Scaling
@@ -926,6 +941,16 @@ check(len({json.dumps(v) for v in live_statements.values()}) == 1 and all(len(v)
 check(
     "\n    environment: plan-${{ matrix.environment }}\n" in "\n" + plan_job,
     "plan job: must run in the 'plan-<environment>' GitHub Environment (required reviewers approve each run)",
+)
+check(
+    re.search(r"\n      matrix:\n        environment: \[staging\]\n", plan_job) and "production" not in plan_job,
+    "plan job: pull requests plan staging only; no pull-request code may get a role that reads production state",
+)
+readme_text = (TERRAFORM / "README.md").read_text()
+check(
+    re.search(r"`plan-staging`[^\n]*\n?[^\n]*\*\*Required reviewers\*\*[^.]*\*\*Prevent self-review\*\*", readme_text)
+    and "plan-production" not in readme_text,
+    "README.md: plan-staging needs required reviewers with Prevent self-review; there is no plan-production",
 )
 # The boundary is mandatory: no switch turns it off.
 for name, text in {**all_workflows, "variables.tf": (TERRAFORM / "variables.tf").read_text()}.items():
