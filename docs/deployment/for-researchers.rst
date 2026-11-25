@@ -110,6 +110,9 @@ You need at least one of the following.
 
 **Anthropic (Claude models), optional:**
 
+New bots get Claude through Amazon Bedrock, so you only need this key for
+older bots that use an Anthropic-direct model.
+
 1. Go to `console.anthropic.com <https://console.anthropic.com>`_ and sign in or create an account
 2. Click **API Keys** in the left sidebar → **Create Key**
 3. Copy the key → ``ANTHROPIC_API_KEY``

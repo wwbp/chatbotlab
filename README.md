@@ -59,6 +59,8 @@ Then:
 
 Log into the admin, create a **Bot** (name, prompt, model), and open the chat UI to talk to it.
 
+The admin offers only the models marked active. Bots on a retired model keep it and are labelled "(retired)". To see which models answer, run `docker exec chatbotlab-backend-1 python manage.py check_models` (one tiny real call per active model; `--all` for every model). It changes nothing in the database.
+
 Migrations run automatically when the backend container starts, so there is no migrate step here. `make superuser` **is** required — the development image does not create one for you.
 
 ### Working without API keys or cost
@@ -188,7 +190,7 @@ All configuration is environment variables, loaded from `api/.env` and `web/.env
 | `MYSQL_*` | Credentials the MariaDB container is created with — must agree with `DATABASE_*` |
 | `REDIS_URL` | Conversation history cache |
 | `OPENAI_API_KEY` | LLM replies **and moderation** — moderation silently no-ops without it |
-| `ANTHROPIC_API_KEY` | Optional, for Anthropic-backed bots |
+| `ANTHROPIC_API_KEY` | Optional, only for older bots on Anthropic-direct models. New bots get Claude through Bedrock (`AWS_*`) |
 | `AWS_*` | S3 for avatars and voice recordings; required in production |
 | `MOCK_LLM` | `true` skips all LLM **and moderation** calls and returns canned replies |
 | `DJANGO_SUPERUSER_*` | Used by `make superuser`; on Elastic Beanstalk the entrypoint creates the user on first boot |
