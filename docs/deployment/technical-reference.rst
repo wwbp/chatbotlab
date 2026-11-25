@@ -77,7 +77,7 @@ resources is ``{PROJECT_PREFIX}-production``, where ``{PROJECT_PREFIX}`` is the 
      - PriceClass_100 (US/Canada/Europe), OAC for S3 origin
    * - ACM certificate
      - ``aws_acm_certificate``
-     - Only when ``DOMAIN_NAME`` is set; must be in ``us-east-1``
+     - Only when ``domain_name`` is set in ``environments/{environment}.tfvars``; must be in ``us-east-1``
    * - IAM role (EB instance)
      - ``aws_iam_role``
      - Allows EC2 to read S3, write CloudWatch logs
@@ -98,22 +98,28 @@ resources is ``{PROJECT_PREFIX}-production``, where ``{PROJECT_PREFIX}`` is the 
 Deployment workflows
 ---------------------
 
-``deploy-infrastructure.yml`` (manual trigger only)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``deploy-infrastructure.yml`` (plan on pull requests, apply by hand)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Runs ``terraform apply`` against the remote S3 state backend. Steps:
+The workflow has two jobs. Setup is in ``infra/terraform/README.md``, section "Running Terraform from GitHub Actions".
 
-1. **Check required secrets**. Validates presence and GH_PAT write access before touching AWS.
-2. **Bootstrap state bucket**. Creates ``{PROJECT_PREFIX}-tfstate-{ACCOUNT_ID}`` if absent (idempotent).
-3. **Terraform init**. Points to the state file of the environment selected in the ``environment`` input. A second run on the same environment stops with a lock error.
-4. **ACM certificate** (custom domain only). Targeted apply, so the validation CNAME can be printed before the full apply blocks waiting for DNS.
-5. **Print DNS validation record** (custom domain only). Written to the workflow Summary.
-6. **``terraform apply``**. Full infrastructure apply.
-7. **Write deployment secrets** (only when the ``write_deploy_secrets`` input is ticked). Uses ``GH_PAT`` to write the deploy secrets of the selected environment with ``gh secret set``. Staging gets the names ``staging.yml`` reads (``AWS_ROLE_NAME``, ``AWS_S3_BUCKET_NAME_FRONTEND``, etc.). Production gets the names ``production.yml`` reads (``AWS_PROD_ROLE_NAME``, ``AWS_S3_PROD_BUCKET_NAME_FRONTEND``, etc.). The two lists share no name. The workflow does not start an application deploy. Writing staging's names first requires the three ``AWS_PROD_*`` secrets production falls back from to exist; otherwise the run stops.
+**plan** runs on each pull request that changes ``infra/terraform/``, once a reviewer approves the run in the ``plan-staging`` GitHub Environment. It runs ``terraform plan`` for staging only, with a read-only IAM role that trusts only that Environment and reads only staging's state file. Production is planned by the apply job (``action = plan``), from ``main``. It takes no state lock and gets no application secrets, but the role can read the state, which still holds secrets: approving a plan lets the pull request's code read staging's secrets until they move to Secrets Manager (a separate, later change). If the role is not configured, the job skips with a notice.
+
+**apply** runs only when a person starts the workflow. The person selects ``environment`` (``staging`` or ``production``) and ``action`` (``plan`` or ``apply``; the default is ``plan``). The job runs in the GitHub Environment with the same name as ``environment``. Required reviewers on that Environment must approve the run before it starts. Steps:
+
+1. **Check required secrets**. Runs before the job touches AWS.
+2. **AWS credentials**. Assumes the role in ``TF_APPLY_ROLE_ARN`` through GitHub OIDC. The workflow uses no long-lived keys.
+3. **State bucket**. Finds ``{PROJECT_PREFIX}-tfstate-{ACCOUNT_ID}``. Creates it on a first apply.
+4. **Terraform init**. Points to the state file of the selected environment. A second run on the same environment waits for the first (concurrency group ``terraform-<environment>``); a run started outside this workflow stops with a lock error.
+5. **ACM certificate** (apply with a custom domain only). Targeted apply, so the validation CNAME can be printed before the full apply blocks waiting for DNS. It runs before the plan in step 6 and is not part of it; it touches only the certificate.
+6. **Plan**. Reads ``environments/{environment}.tfvars`` and prints the plan. With ``action = plan`` the job stops here.
+7. **Check the plan for deletions** (apply only). If the plan deletes or replaces any resource, the run stops unless ``allow_destroy`` was ticked.
+8. **Apply**. Applies the plan saved in step 6.
+9. **Write deployment secrets** (only when the ``write_deploy_secrets`` input is ticked). Uses ``GH_PAT`` to write the deploy secrets of the selected environment with ``gh secret set``. Staging gets the names ``staging.yml`` reads (``AWS_ROLE_NAME``, ``AWS_S3_BUCKET_NAME_FRONTEND``, etc.). Production gets the names ``production.yml`` reads (``AWS_PROD_ROLE_NAME``, ``AWS_S3_PROD_BUCKET_NAME_FRONTEND``, etc.). The two lists share no name. The workflow does not start an application deploy. Writing staging's names first requires the three ``AWS_PROD_*`` secrets production falls back from to exist; otherwise the run stops.
 
    **Before ticking it for production**, write down the values production deploys use today (account ID, role, frontend bucket, CloudFront distribution, EB application and environment; read them from the AWS console, since GitHub never shows a secret's value once set). Overwriting the ``AWS_PROD_*`` secrets is the cutover, and those notes are the only way back.
-8. **Report failure**. If any step fails, the workflow writes a notice to the Summary and changes nothing. It does not destroy, delete or import resources.
-9. **Summary**. Writes the chatbot URL and admin panel URL to the workflow Summary.
+10. **Report failure**. If any step fails, the workflow writes a notice to the Summary and changes nothing. It does not destroy, delete or import resources.
+11. **Summary**. Writes the chatbot URL and admin panel URL to the workflow Summary.
 
 ``production.yml`` (triggers on push to ``main`` or ``workflow_dispatch``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -157,7 +163,7 @@ The trust policy on the GitHub Actions IAM role restricts assumption to:
 - OIDC issuer: ``token.actions.githubusercontent.com``
 - Subject: ``repo:{github_org}/{github_repo}:*`` (scoped to the exact fork)
 
-The long-lived ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY`` are only used by ``deploy-infrastructure.yml`` during the bootstrapping step. Once the IAM role and OIDC provider exist, the production deploy workflow uses ``role-to-assume`` with no stored keys.
+``deploy-infrastructure.yml`` also signs in through OIDC, with roles that a person creates one time from the policies in ``infra/terraform/bootstrap/iam/``: a read-only plan role for staging, and per environment an apply role and a permissions boundary for the roles the stack creates. The Terraform roles carry an explicit Deny on the hand-built live resources in the same account, on the other environment's resources and on the GitHub OIDC provider. ``destroy-infrastructure.yml`` still uses the long-lived ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY``.
 
 
 Application stack
@@ -262,7 +268,7 @@ If ``terraform apply`` fails, the resources it already created stay in AWS and i
 
 Each AWS account can have exactly one OIDC provider for ``token.actions.githubusercontent.com``. If your account already has one (from another project), Terraform's attempt to create a second one will fail.
 
-**Fix:** Set the GitHub secret ``CREATE_GITHUB_OIDC_PROVIDER`` to ``false``. The workflow passes this to ``TF_VAR_create_github_oidc_provider``, which skips the OIDC provider resource and instead imports the existing one.
+**Fix:** The workflows always pass ``TF_VAR_create_github_oidc_provider=false``: Terraform refers to the existing provider and never owns it, so destroying a stack cannot delete it. Create the provider once, by hand, if the account has none (``infra/terraform/README.md``, "One-time setup", step 1). The Terraform roles cannot change it.
 
 To check whether your account already has a GitHub OIDC provider:
 

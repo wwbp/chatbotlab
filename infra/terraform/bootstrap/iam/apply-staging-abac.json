@@ -1,0 +1,242 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CreateTagged",
+      "Effect": "Allow",
+      "Action": [
+        "acm:RequestCertificate",
+        "autoscaling:CreateAutoScalingGroup",
+        "cloudformation:CreateStack",
+        "cloudfront:CreateDistribution",
+        "cloudfront:CreateDistributionWithTags",
+        "ec2:AllocateAddress",
+        "ec2:CreateInternetGateway",
+        "ec2:CreateLaunchTemplate",
+        "ec2:CreateNetworkInterface",
+        "ec2:CreateRouteTable",
+        "ec2:CreateSecurityGroup",
+        "ec2:CreateSubnet",
+        "ec2:CreateVolume",
+        "ec2:CreateVpc",
+        "ec2:RunInstances",
+        "elasticloadbalancing:CreateListener",
+        "elasticloadbalancing:CreateLoadBalancer",
+        "elasticloadbalancing:CreateRule",
+        "elasticloadbalancing:CreateTargetGroup"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Environment": "staging",
+          "aws:RequestTag/Project": "<PREFIX>"
+        },
+        "ForAllValues:StringLike": {
+          "aws:TagKeys": [
+            "Environment",
+            "ManagedBy",
+            "Name",
+            "Project",
+            "Purpose",
+            "Tier",
+            "aws:cloudformation:*",
+            "elasticbeanstalk:*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ManageOwnByTag",
+      "Effect": "Allow",
+      "Action": [
+        "acm:DeleteCertificate",
+        "acm:RemoveTagsFromCertificate",
+        "acm:RenewCertificate",
+        "acm:UpdateCertificateOptions",
+        "autoscaling:Attach*",
+        "autoscaling:Complete*",
+        "autoscaling:Delete*",
+        "autoscaling:Detach*",
+        "autoscaling:Put*",
+        "autoscaling:Resume*",
+        "autoscaling:Set*",
+        "autoscaling:Suspend*",
+        "autoscaling:Terminate*",
+        "autoscaling:Update*",
+        "cloudformation:CancelUpdateStack",
+        "cloudformation:ContinueUpdateRollback",
+        "cloudformation:Delete*",
+        "cloudformation:SignalResource",
+        "cloudformation:Update*",
+        "cloudfront:CreateInvalidation",
+        "cloudfront:DeleteDistribution",
+        "cloudfront:UntagResource",
+        "cloudfront:UpdateDistribution",
+        "ec2:Associate*",
+        "ec2:Attach*",
+        "ec2:Authorize*",
+        "ec2:CreateLaunchTemplateVersion",
+        "ec2:CreateRoute",
+        "ec2:Delete*",
+        "ec2:Detach*",
+        "ec2:Disassociate*",
+        "ec2:Modify*",
+        "ec2:Reboot*",
+        "ec2:Replace*",
+        "ec2:Revoke*",
+        "ec2:Start*",
+        "ec2:Stop*",
+        "ec2:Terminate*",
+        "elasticloadbalancing:AddListenerCertificates",
+        "elasticloadbalancing:Delete*",
+        "elasticloadbalancing:Deregister*",
+        "elasticloadbalancing:Modify*",
+        "elasticloadbalancing:Register*",
+        "elasticloadbalancing:Remove*",
+        "elasticloadbalancing:Set*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Environment": "staging",
+          "aws:ResourceTag/Project": "<PREFIX>"
+        }
+      }
+    },
+    {
+      "Sid": "RetagOwn",
+      "Effect": "Allow",
+      "Action": [
+        "acm:AddTagsToCertificate",
+        "autoscaling:CreateOrUpdateTags",
+        "cloudformation:TagResource",
+        "cloudfront:TagResource",
+        "ec2:CreateTags",
+        "elasticloadbalancing:AddTags"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Environment": "staging",
+          "aws:ResourceTag/Project": "<PREFIX>"
+        },
+        "StringEqualsIfExists": {
+          "aws:RequestTag/Environment": "staging",
+          "aws:RequestTag/Project": "<PREFIX>"
+        },
+        "ForAllValues:StringLike": {
+          "aws:TagKeys": [
+            "Environment",
+            "ManagedBy",
+            "Name",
+            "Project",
+            "Purpose",
+            "Tier",
+            "aws:cloudformation:*",
+            "elasticbeanstalk:*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "TagOnCreateEc2",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Environment": "staging",
+          "aws:RequestTag/Project": "<PREFIX>"
+        },
+        "StringLike": {
+          "ec2:CreateAction": [
+            "AllocateAddress",
+            "Create*",
+            "RunInstances"
+          ]
+        },
+        "ForAllValues:StringLike": {
+          "aws:TagKeys": [
+            "Environment",
+            "ManagedBy",
+            "Name",
+            "Project",
+            "Purpose",
+            "Tier",
+            "aws:cloudformation:*",
+            "elasticbeanstalk:*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "TagOnCreateElb",
+      "Effect": "Allow",
+      "Action": "elasticloadbalancing:AddTags",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Environment": "staging",
+          "aws:RequestTag/Project": "<PREFIX>"
+        },
+        "StringLike": {
+          "elasticloadbalancing:CreateAction": "Create*"
+        },
+        "ForAllValues:StringLike": {
+          "aws:TagKeys": [
+            "Environment",
+            "ManagedBy",
+            "Name",
+            "Project",
+            "Purpose",
+            "Tier",
+            "aws:cloudformation:*",
+            "elasticbeanstalk:*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "RunInstancesInputs",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateLaunchTemplateVersion",
+        "ec2:RunInstances"
+      ],
+      "Resource": [
+        "arn:aws:ec2:*::image/*",
+        "arn:aws:ec2:*::snapshot/*",
+        "arn:aws:ec2:*:<ACCOUNT_ID>:subnet/*",
+        "arn:aws:ec2:*:<ACCOUNT_ID>:security-group/*",
+        "arn:aws:ec2:*:<ACCOUNT_ID>:network-interface/*",
+        "arn:aws:ec2:*:<ACCOUNT_ID>:volume/*",
+        "arn:aws:ec2:*:<ACCOUNT_ID>:launch-template/*"
+      ]
+    },
+    {
+      "Sid": "OwnCloudFrontFunctions",
+      "Effect": "Allow",
+      "Action": [
+        "cloudfront:CreateFunction",
+        "cloudfront:DeleteFunction",
+        "cloudfront:DescribeFunction",
+        "cloudfront:GetFunction",
+        "cloudfront:PublishFunction",
+        "cloudfront:TestFunction",
+        "cloudfront:UpdateFunction"
+      ],
+      "Resource": "arn:aws:cloudfront::<ACCOUNT_ID>:function/<PREFIX>-staging-*"
+    },
+    {
+      "Sid": "CloudFrontOriginAccessControls",
+      "Effect": "Allow",
+      "Action": [
+        "cloudfront:CreateOriginAccessControl",
+        "cloudfront:DeleteOriginAccessControl",
+        "cloudfront:GetOriginAccessControl",
+        "cloudfront:UpdateOriginAccessControl"
+      ],
+      "Resource": "arn:aws:cloudfront::<ACCOUNT_ID>:origin-access-control/*"
+    }
+  ]
+}

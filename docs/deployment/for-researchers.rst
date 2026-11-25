@@ -1,6 +1,13 @@
 Deplopyment Guide for Researchers
 =================================
 
+.. warning::
+   This guide is out of date. It describes the Deploy Infrastructure workflow
+   before it changed. The workflow no longer uses an IAM user with access keys
+   or the ``DOMAIN_NAME`` secret, and it does not start the first application
+   deploy. Until this guide is rewritten, use the section "Running Terraform
+   from GitHub Actions" in ``infra/terraform/README.md``.
+
 This guide walks you through deploying ChatbotLab to AWS so your participants can access the chatbot from any browser. No programming experience is required. The entire process takes about 30 minutes of your time (plus ~20 minutes of automated setup), and you only have to do it once.
 
 **What you get:** a private, fully functional chatbot system at a URL you can share with study participants, with an admin panel where you configure the chatbot's personality, system prompt, and behavior.
@@ -220,24 +227,16 @@ Add each of the following secrets one at a time:
    * - ``DOMAIN_NAME``
      - Your domain (e.g. ``chatbot.mylab.org``)
      - No
-   * - ``CREATE_GITHUB_OIDC_PROVIDER``
-     - ``false``, only if your AWS account already connects to GitHub Actions
-     - No
 
 .. note::
 
-   **Only if your AWS account is not brand new.** An AWS account can hold a
-   single GitHub Actions identity provider, and some accounts already have one
-   from earlier work. If yours does, add ``CREATE_GITHUB_OIDC_PROVIDER`` set to
-   ``false`` — the deployment will then use the existing provider instead of
-   managing it, so tearing this deployment down later cannot remove something
-   your other projects depend on.
-
-   Check with::
+   **The GitHub Actions identity provider.** An AWS account holds a single
+   identity provider for GitHub Actions, and other projects in the account
+   may depend on it. The workflows never create, change or delete it; they
+   use the one that exists. If your account has none yet, create it once by
+   hand (``infra/terraform/README.md``, "One-time setup", step 1). Check with::
 
      aws iam list-open-id-connect-providers
-
-   An empty list means you can skip this secret entirely.
 
 .. important::
 

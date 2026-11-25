@@ -1,0 +1,206 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListStateBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketLocation",
+        "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>"
+    },
+    {
+      "Sid": "CreateStateBucketOnFirstApply",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:PutBucketVersioning",
+        "s3:PutEncryptionConfiguration"
+      ],
+      "Resource": "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>"
+    },
+    {
+      "Sid": "ReadWriteOwnStateAndLock",
+      "Effect": "Allow",
+      "Action": [
+        "s3:DeleteObject",
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>/<PREFIX>/staging/*"
+    },
+    {
+      "Sid": "ManageOwnBuckets",
+      "Effect": "Allow",
+      "Action": "s3:*",
+      "Resource": "arn:aws:s3:::<PREFIX>-staging-*"
+    },
+    {
+      "Sid": "ElasticBeanstalkBucketLevel",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketPolicy",
+        "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::elasticbeanstalk-*-<ACCOUNT_ID>"
+    },
+    {
+      "Sid": "ElasticBeanstalkOwnApplicationKeys",
+      "Effect": "Allow",
+      "Action": [
+        "s3:DeleteObject",
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::elasticbeanstalk-*/<PREFIX>-staging/*"
+    },
+    {
+      "Sid": "ManageOwnDatabase",
+      "Effect": "Allow",
+      "Action": "rds:*",
+      "Resource": [
+        "arn:aws:rds:*:<ACCOUNT_ID>:*:<PREFIX>-staging-*",
+        "arn:aws:rds:*:<ACCOUNT_ID>:og:default:*"
+      ]
+    },
+    {
+      "Sid": "ManageOwnCache",
+      "Effect": "Allow",
+      "Action": "elasticache:*",
+      "Resource": "arn:aws:elasticache:*:<ACCOUNT_ID>:serverlesscache:<PREFIX>-staging-*"
+    },
+    {
+      "Sid": "ManageOwnElasticBeanstalk",
+      "Effect": "Allow",
+      "Action": "elasticbeanstalk:*",
+      "Resource": [
+        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:*/<PREFIX>-staging",
+        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:*/<PREFIX>-staging/*",
+        "arn:aws:elasticbeanstalk:*::solutionstack/*",
+        "arn:aws:elasticbeanstalk:*::platform/*"
+      ]
+    },
+    {
+      "Sid": "ManageOwnLogGroups",
+      "Effect": "Allow",
+      "Action": "logs:*",
+      "Resource": "arn:aws:logs:*:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/<PREFIX>-staging-*"
+    },
+    {
+      "Sid": "ReadEverythingElse",
+      "Effect": "Allow",
+      "Action": [
+        "acm:Describe*",
+        "acm:List*",
+        "autoscaling:Describe*",
+        "cloudformation:Describe*",
+        "cloudformation:Get*",
+        "cloudformation:List*",
+        "cloudfront:Describe*",
+        "cloudfront:Get*",
+        "cloudfront:List*",
+        "ec2:Describe*",
+        "elasticache:Describe*",
+        "elasticache:ListTagsForResource",
+        "elasticbeanstalk:Describe*",
+        "elasticbeanstalk:List*",
+        "elasticloadbalancing:Describe*",
+        "iam:Get*",
+        "iam:List*",
+        "logs:Describe*",
+        "rds:Describe*",
+        "rds:ListTagsForResource",
+        "s3:ListAllMyBuckets",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ChangeOwnRolesOnlyUnderBoundary",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRolePolicy",
+        "iam:PutRolePermissionsBoundary",
+        "iam:PutRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-staging-*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::<ACCOUNT_ID>:policy/<PREFIX>-terraform-boundary-staging"
+        }
+      }
+    },
+    {
+      "Sid": "ManageOwnRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:DeleteRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-staging-*"
+    },
+    {
+      "Sid": "AttachOnlyElasticBeanstalkManagedPolicies",
+      "Effect": "Allow",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-staging-*",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": [
+            "arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier",
+            "arn:aws:iam::aws:policy/AdministratorAccess-AWSElasticBeanstalk",
+            "arn:aws:iam::aws:policy/AWSElasticBeanstalkManagedUpdatesCustomerRolePolicy",
+            "arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth"
+          ]
+        },
+        "StringEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::<ACCOUNT_ID>:policy/<PREFIX>-terraform-boundary-staging"
+        }
+      }
+    },
+    {
+      "Sid": "ManageOwnInstanceProfiles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:AddRoleToInstanceProfile",
+        "iam:CreateInstanceProfile",
+        "iam:DeleteInstanceProfile",
+        "iam:RemoveRoleFromInstanceProfile",
+        "iam:TagInstanceProfile",
+        "iam:UntagInstanceProfile"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:instance-profile/<PREFIX>-staging-*"
+    },
+    {
+      "Sid": "PassOwnRolesToElasticBeanstalkAndEc2",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-staging-*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": [
+            "ec2.amazonaws.com",
+            "elasticbeanstalk.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ServiceLinkedRoles",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/aws-service-role/*"
+    }
+  ]
+}

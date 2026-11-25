@@ -1,0 +1,102 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyBoundaryTampering",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicy",
+        "iam:DeletePolicyVersion",
+        "iam:DeleteRolePermissionsBoundary",
+        "iam:SetDefaultPolicyVersion",
+        "iam:TagPolicy",
+        "iam:UntagPolicy"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyAnyOtherBoundary",
+      "Effect": "Deny",
+      "Action": "iam:PutRolePermissionsBoundary",
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::<ACCOUNT_ID>:policy/<PREFIX>-terraform-boundary-staging"
+        }
+      }
+    },
+    {
+      "Sid": "DenyTerraformRoles",
+      "Effect": "Deny",
+      "Action": "*",
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-terraform-*"
+    },
+    {
+      "Sid": "DenyHandBuiltLiveDeployment",
+      "Effect": "Deny",
+      "Action": "*",
+      "Resource": [
+        "arn:aws:elasticbeanstalk:*:*:*/humanlikebot",
+        "arn:aws:elasticbeanstalk:*:*:*/humanlikebot/*",
+        "arn:aws:rds:*:*:*:awseb-e-*",
+        "arn:aws:cloudfront::*:distribution/E2Q6P4TGU4GOC",
+        "arn:aws:cloudfront::*:distribution/E2XKRGQ6R0OG6W",
+        "arn:aws:s3:::elasticbeanstalk-*/humanlikebot/*",
+        "arn:aws:s3:::bot.wwbp.org*",
+        "arn:aws:s3:::dev.bot.wwbp.org*",
+        "arn:aws:s3:::bot-avatar.wwbp.org*",
+        "arn:aws:s3:::dev.bot-avatar.wwbp.org*"
+      ]
+    },
+    {
+      "Sid": "DenyHandBuiltLiveEnvironmentResources",
+      "Effect": "Deny",
+      "Action": "*",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/elasticbeanstalk:environment-name": [
+            "humanlike-bot-development-env",
+            "humanlikebot-env"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyOidcProviderChanges",
+      "Effect": "Deny",
+      "Action": "iam:*OpenIDConnectProvider*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyOtherProductionNames",
+      "Effect": "Deny",
+      "Action": "*",
+      "Resource": [
+        "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>/<PREFIX>/production/*",
+        "arn:aws:s3:::<PREFIX>-production-*",
+        "arn:aws:s3:::elasticbeanstalk-*/<PREFIX>-production/*",
+        "arn:aws:rds:*:*:*:<PREFIX>-production-*",
+        "arn:aws:elasticache:*:*:*:<PREFIX>-production-*",
+        "arn:aws:elasticbeanstalk:*:*:*/<PREFIX>-production",
+        "arn:aws:elasticbeanstalk:*:*:*/<PREFIX>-production/*",
+        "arn:aws:iam::*:*/<PREFIX>-production-*",
+        "arn:aws:logs:*:*:log-group:/aws/elasticbeanstalk/<PREFIX>-production-*",
+        "arn:aws:ssm:*:*:parameter/<PREFIX>-production/*",
+        "arn:aws:secretsmanager:*:*:secret:<PREFIX>-production/*"
+      ]
+    },
+    {
+      "Sid": "DenyOtherProductionTags",
+      "Effect": "Deny",
+      "Action": "*",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Environment": "production"
+        }
+      }
+    }
+  ]
+}

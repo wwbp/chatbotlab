@@ -57,6 +57,10 @@ provider "aws" {
 provider "aws" {
   alias  = "us_east_1"
   region = "us-east-1"
+
+  default_tags {
+    tags = local.common_tags
+  }
 }
 
 # I use this data source to look up the current AWS account ID at plan time.
