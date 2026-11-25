@@ -268,6 +268,7 @@ def test_role_missing_a_privilege_is_refused(role_account, tmp_path):
     result = verify(tmp_path, role_account("SELECT, SHOW VIEW, EVENT, EXECUTE"))
     assert result.returncode == 2, result.stdout + result.stderr
     assert "lacks TRIGGER on" in result.stderr
+    assert "(directly or through an active role)" in result.stderr
 
 
 # ── V5: two different databases, and something to compare ───────────────────

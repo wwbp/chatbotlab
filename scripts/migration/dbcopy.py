@@ -325,7 +325,9 @@ DEFINITION_PRIVILEGES = ("SELECT", "SHOW VIEW", "TRIGGER", "EVENT", "EXECUTE")
 # "GRANT <privileges> ON *.* TO" or "... ON `db`.* TO". The privilege list is
 # bare words only, so a table, column, routine or proxy grant never matches,
 # even when an object name contains " ON *.* TO ".
-_GRANT = re.compile(r"(GRANT|REVOKE) ([A-Z0-9_, ]+) ON (\*|`(?:[^`]|``)+`)\.\* (?:TO|FROM) ")
+_GRANT = re.compile(
+    r"(GRANT|REVOKE) ([A-Z0-9_, ]+) ON (\*|`(?:[^`]|``)+`)\.\* (?:TO|FROM) "
+)
 GLOBAL_ONLY = {"PROCESS", "SUPER"}  # ALL on a database does not include them
 
 
@@ -355,9 +357,9 @@ def missing_privileges(conn, needed):
     rds_superuser_role. A role granted but not active is listed by neither.
     """
     # MySQL with partial_revokes=ON takes % and _ in grants literally.
-    wildcards = conn.flavour == "mariadb" or query(
-        conn, "SELECT @@partial_revokes"
-    )[0][0] in ("0", "OFF")
+    wildcards = True
+    if conn.flavour == "mysql":
+        wildcards = query(conn, "SELECT @@partial_revokes")[0][0] in ("0", "OFF")
     held = set()
     revoked = set()
     for (line,) in query(conn, "SHOW GRANTS"):
@@ -380,7 +382,8 @@ def require_definition_privileges(conn):
     missing = missing_privileges(conn, DEFINITION_PRIVILEGES)
     if missing:
         raise Refuse(
-            f"{conn.role}: the account lacks {', '.join(missing)} on {conn.database}; "
+            f"{conn.role}: the account lacks {', '.join(missing)} on {conn.database} "
+            "(directly or through an active role); "
             "without them triggers, events, routines or view definitions are "
             "invisible and would compare as equal. Grant "
             f"{', '.join(DEFINITION_PRIVILEGES)} on the database.",
@@ -1100,7 +1103,8 @@ def step_preflight(args):
     missing = missing_privileges(src, DEFINITION_PRIVILEGES)
     if missing:
         problem = (
-            f"the source account lacks {', '.join(missing)} on the whole database; "
+            f"the source account lacks {', '.join(missing)} on the whole database "
+            "(directly or through an active role); "
             "tables, views, triggers, events or routines it cannot see would "
             "silently be left out of the dump"
         )
