@@ -1082,7 +1082,10 @@ check(
 readme = (TERRAFORM / "README.md").read_text()
 check("ReadOnlyAccess" not in readme, "README.md: the plan role must not get ReadOnlyAccess")
 check(":pull_request" not in readme, "README.md: no role may trust the pull_request subject")
-check("Prevent self-review" in readme, "README.md: production needs 'Prevent self-review'")
+check(
+    re.search(r"- `production`: \*\*Required reviewers\*\*, \*\*Prevent self-review\*\* ticked", readme),
+    "README.md: production needs required reviewers with 'Prevent self-review'",
+)
 check(
     not re.search(r"Deployment branches\*\*[^.]*`staging`[^.]*production|production[^.]*Deployment branches\*\*[^.]*`staging`", readme),
     "README.md: production may deploy only from main",
