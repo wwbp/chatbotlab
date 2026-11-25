@@ -322,17 +322,24 @@ def check_different(src, dst):
 DEFINITION_PRIVILEGES = ("SELECT", "SHOW VIEW", "TRIGGER", "EVENT", "EXECUTE")
 
 
-# "GRANT <privileges> ON *.* TO" or "... ON `db`.* TO" (a database name may
-# be a LIKE pattern). Table, column, routine and proxy grants do not match.
-_GRANT = re.compile(r"(GRANT|REVOKE) (.+?) ON (\*|`(?:[^`]|``)+`)\.\* (?:TO|FROM) ")
+# "GRANT <privileges> ON *.* TO" or "... ON `db`.* TO". The privilege list is
+# bare words only, so a table, column, routine or proxy grant never matches,
+# even when an object name contains " ON *.* TO ".
+_GRANT = re.compile(r"(GRANT|REVOKE) ([A-Z0-9_, ]+) ON (\*|`(?:[^`]|``)+`)\.\* (?:TO|FROM) ")
 GLOBAL_ONLY = {"PROCESS", "SUPER"}  # ALL on a database does not include them
 
 
-def _like(pattern, name):
-    """SQL LIKE as grants use it: % and _ are wildcards, backslash escapes."""
+def _db_matches(pattern, name, wildcards):
+    """Whether a grant's database pattern covers ``name``. With ``wildcards``
+    it is SQL LIKE (% and _, backslash escapes); without (MySQL with
+    partial_revokes=ON) only the escapes are undone. A lone trailing
+    backslash matches nothing."""
+    tokens = re.findall(r"\\.|.", pattern, re.DOTALL)
+    if tokens and tokens[-1] == "\\":
+        return False
+    wild = {"%": ".*", "_": "."} if wildcards else {}
     regex = "".join(
-        re.escape(t[1:]) if t[0] == "\\" else {"%": ".*", "_": "."}.get(t, re.escape(t))
-        for t in re.findall(r"\\.|.", pattern, re.DOTALL)
+        re.escape(t[1:]) if t[0] == "\\" else wild.get(t, re.escape(t)) for t in tokens
     )
     return re.fullmatch(regex, name, re.DOTALL) is not None
 
@@ -347,6 +354,10 @@ def missing_privileges(conn, needed):
     shows direct grants only, and misses e.g. the RDS master's
     rds_superuser_role. A role granted but not active is listed by neither.
     """
+    # MySQL with partial_revokes=ON takes % and _ in grants literally.
+    wildcards = conn.flavour == "mariadb" or query(
+        conn, "SELECT @@partial_revokes"
+    )[0][0] in ("0", "OFF")
     held = set()
     revoked = set()
     for (line,) in query(conn, "SHOW GRANTS"):
@@ -354,7 +365,8 @@ def missing_privileges(conn, needed):
         if not m:
             continue
         verb, privileges, scope = m.groups()
-        if scope != "*" and not _like(scope[1:-1].replace("``", "`"), conn.database):
+        pattern = scope[1:-1].replace("``", "`")
+        if scope != "*" and not _db_matches(pattern, conn.database, wildcards):
             continue
         names = {p.strip() for p in privileges.split(",")}
         if names & {"ALL", "ALL PRIVILEGES"}:
