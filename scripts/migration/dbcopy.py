@@ -424,8 +424,11 @@ def _tables(conn, columns, order=""):
     one), TABLES.AUTO_INCREMENT shows the persisted counter, which is the last
     value used (one below the next), or NULL if none was ever used, whatever
     information_schema_stats_expiry says. Opening it (any SELECT, even
-    LIMIT 0) loads the real counter, the one the next INSERT gets. Same
-    session, so nothing can evict it between. MariaDB opens tables to answer
+    LIMIT 0) loads the real counter, the one the next INSERT gets, into the
+    server-wide InnoDB dictionary cache (any session's open would do, and
+    eviction from it is server-wide too), so each table is opened
+    immediately before the read, in the same statement batch. An error
+    opening a table is the read's error. MariaDB opens tables to answer
     anyway. Nothing is computed: the value read is the server's own.
     """
     names = query(
