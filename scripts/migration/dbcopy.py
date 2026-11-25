@@ -947,7 +947,7 @@ def quiesced_problem(src, seconds):
     watch. This is a sample, not a proof: stop the app first. The proof is
     verify, which fails if the source changed after the dump.
     """
-    if missing_privileges(src, ["PROCESS"]) and missing_privileges(src, ["SUPER"]):
+    if missing_privileges(src, ["PROCESS"]):
         return (
             "the source account cannot see other sessions (they would all look "
             "absent); grant PROCESS on *.* to it"
@@ -1307,9 +1307,10 @@ def _names(objects):
 
 
 def _other_sessions(conn):
-    """Other sessions using this database. Without PROCESS they are invisible,
-    so that refuses rather than reporting none."""
-    if missing_privileges(conn, ["PROCESS"]) and missing_privileges(conn, ["SUPER"]):
+    """Other sessions using this database. Without PROCESS they are invisible
+    (SUPER alone does not show them), so that refuses rather than reporting
+    none."""
+    if missing_privileges(conn, ["PROCESS"]):
         raise Refuse(
             f"the {conn.role} account cannot see other sessions; grant PROCESS on *.*"
         )
