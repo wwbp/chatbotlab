@@ -1200,9 +1200,18 @@ check(
     "destroy job: the backup step must compare object count and total size and exit 1 on a mismatch",
 )
 summary = destroy_step("Write summary")
-check("BACKUP" in summary and "SNAPSHOT" in summary, "destroy job: the summary must name the data backup and the RDS final snapshot")
-check("OIDC provider" not in summary or "kept" in summary,
-      "destroy job: the summary must not claim the shared GitHub OIDC provider was deleted")
+check(
+    "BACKUP: ${{ steps.backup.outputs.location }}" in summary and "SNAPSHOT: ${{ steps.snapshot.outputs.name }}" in summary
+    and '"$BACKUP"' in summary and '"$SNAPSHOT"' in summary,
+    "destroy job: the summary must name the data backup and the RDS final snapshot",
+)
+check(
+    "final_snapshot_identifier" in destroy_step("Read the RDS final snapshot name"),
+    "destroy job: the final snapshot name must be read from the state before destroy",
+)
+for line in summary.splitlines():
+    check("OIDC provider" not in line or "kept" in line,
+          f"destroy job: the summary must not claim the shared GitHub OIDC provider was deleted: '{line.strip()}'")
 
 # --- Stale files and statements ----------------------------------------------
 
