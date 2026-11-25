@@ -13,8 +13,7 @@ logger = logging.getLogger(__name__)
 class Command(BaseCommand):
     help = (
         "Validate configured Amazon Bedrock models. Report-only unless --apply, "
-        "which deactivates failing models (or, with --delete, deletes the ones "
-        "no bot uses)."
+        "which deactivates failing models. It never deletes a model."
     )
 
     def add_arguments(self, parser):
@@ -35,22 +34,12 @@ class Command(BaseCommand):
             dest="dry_run",
             help="Report only (the default; kept for old invocations).",
         )
-        parser.add_argument(
-            "--delete",
-            action="store_true",
-            dest="delete",
-            help=(
-                "With --apply, delete invalid models instead of deactivating "
-                "them. Refused for any model a bot uses."
-            ),
-        )
 
     def handle(self, *args, **options):
         region = options["region"]
         # Report-only unless explicitly asked: a failed probe can be a transient
         # outage or missing credentials, not a dead model.
         dry_run = options["dry_run"] or not options["apply"]
-        delete_invalid = options["delete"]
 
         bedrock_models = Model.objects.filter(provider__name="Bedrock").order_by(
             "model_id"
@@ -119,21 +108,11 @@ class Command(BaseCommand):
             if not model:
                 continue
 
-            n_bots = model.bots.count()
-            if delete_invalid and n_bots:
-                self.stdout.write(
-                    self.style.ERROR(
-                        f"Refused to delete {model_identifier}: {n_bots} bot(s) use it."
-                        " Deactivated instead.",
-                    ),
-                )
-            if delete_invalid and not n_bots:
-                model.delete()
-                action = "deleted"
-            else:
-                model.is_active = False
-                model.save(update_fields=["is_active"])
-                action = "deactivated"
+            # Never delete: a probe fails for every model during an outage,
+            # and rows are kept so old studies' records stay intact.
+            model.is_active = False
+            model.save(update_fields=["is_active"])
+            action = "deactivated"
 
             logger.info(
                 "Bedrock model %s (%s) %s after validation failure: %s",
