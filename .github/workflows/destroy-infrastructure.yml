@@ -110,7 +110,7 @@ jobs:
           # Stop before anything is emptied if this environment has no state:
           # with nothing in state Terraform would destroy nothing, but the
           # bucket-emptying step below would still have deleted its files.
-          if ! aws s3api head-object --bucket "$BUCKET" --key "${TF_PROJECT_PREFIX}/${ENVIRONMENT}/terraform.tfstate" >/dev/null 2>&1; then
+          if ! aws s3api head-object --bucket "$BUCKET" --key "${TF_PROJECT_PREFIX}/${ENVIRONMENT}/terraform.tfstate" >/dev/null; then
             echo "::error::No Terraform state for '$ENVIRONMENT' in the state bucket — nothing here was built by Terraform under that name."
             exit 1
           fi
@@ -227,7 +227,7 @@ jobs:
           TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}
           TF_VAR_admin_panel_password:        ${{ secrets.ADMIN_PANEL_PASSWORD }}
           TF_VAR_domain_name:                 ${{ secrets.DOMAIN_NAME }}
-          TF_VAR_create_github_oidc_provider: ${{ secrets.CREATE_GITHUB_OIDC_PROVIDER || 'true' }}
+          TF_VAR_create_github_oidc_provider: false
         run: |
           terraform destroy -auto-approve -input=false
 

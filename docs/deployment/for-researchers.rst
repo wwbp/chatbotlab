@@ -224,24 +224,16 @@ Add each of the following secrets one at a time:
    * - ``DOMAIN_NAME``
      - Your domain (e.g. ``chatbot.mylab.org``)
      - No
-   * - ``CREATE_GITHUB_OIDC_PROVIDER``
-     - ``false``, only if your AWS account already connects to GitHub Actions
-     - No
 
 .. note::
 
-   **Only if your AWS account is not brand new.** An AWS account can hold a
-   single GitHub Actions identity provider, and some accounts already have one
-   from earlier work. If yours does, add ``CREATE_GITHUB_OIDC_PROVIDER`` set to
-   ``false`` — the deployment will then use the existing provider instead of
-   managing it, so tearing this deployment down later cannot remove something
-   your other projects depend on.
-
-   Check with::
+   **The GitHub Actions identity provider.** An AWS account holds a single
+   identity provider for GitHub Actions, and other projects in the account
+   may depend on it. The workflows never create, change or delete it; they
+   use the one that exists. If your account has none yet, create it once by
+   hand (``infra/terraform/README.md``, "One-time setup", step 1). Check with::
 
      aws iam list-open-id-connect-providers
-
-   An empty list means you can skip this secret entirely.
 
 .. important::
 

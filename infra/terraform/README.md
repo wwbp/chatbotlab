@@ -246,13 +246,15 @@ Do these steps in order. Steps 1 to 3 are in AWS, steps 4 to 6 in GitHub.
 1. **GitHub OIDC provider.** The AWS account needs the identity provider
    `token.actions.githubusercontent.com` (audience `sts.amazonaws.com`). Check
    with `aws iam list-open-id-connect-providers`. The live deploy roles use it
-   too. Set the repository secret `CREATE_GITHUB_OIDC_PROVIDER`; the workflows
-   stop if it is unset:
-   - `false` when the provider already exists (the case in the WWBP account).
-     Terraform then only refers to it.
-   - `true` only when no provider exists and you want this stack to own it.
-     Destroying that stack later deletes the provider, and with it every
-     GitHub Actions sign-in in the account, the live deploys included.
+   too, so it is created once, by hand, and no Terraform stack owns it: the
+   workflows always pass `create_github_oidc_provider = false`, and the
+   Terraform roles can only read it. If it is missing, create it with
+   `aws iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com`.
+   If an existing state already owns the provider (an older stack built with
+   `create_github_oidc_provider = true`), its next plan shows the provider as
+   deleted and the deletion check stops the run: move it out of that state
+   with `terraform state rm aws_iam_openid_connect_provider.github_actions[0]`
+   (by hand, with admin credentials) first.
 2. **Plan role**, named `<PREFIX>-terraform-plan`. Trust:
    `bootstrap/iam/plan-trust.json` (subject
    `repo:wwbp/chatbotlab:environment:plan`, ref `refs/pull/*/merge`).
@@ -283,8 +285,8 @@ Do these steps in order. Steps 1 to 3 are in AWS, steps 4 to 6 in GitHub.
    `production`: `TF_APPLY_ROLE_ARN`, `DB_PASSWORD`, `ADMIN_PANEL_PASSWORD`,
    and `OPENAI_API_KEY` and/or `ANTHROPIC_API_KEY`. Optional:
    `SURVEY_INGEST_TOKEN`.
-6. **Repository secrets**: `TF_PROJECT_PREFIX`, `CREATE_GITHUB_OIDC_PROVIDER`.
-   `GH_PAT` only if you use `write_deploy_secrets`.
+6. **Repository secrets**: `TF_PROJECT_PREFIX`. `GH_PAT` only if you use
+   `write_deploy_secrets`.
 
 Then run the workflow from `staging`: environment `staging`, action `apply`.
 The first apply creates the state bucket.

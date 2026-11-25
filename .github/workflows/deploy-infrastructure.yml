@@ -36,6 +36,9 @@ name: Deploy Infrastructure
 # A failed apply leaves everything in place. Nothing here destroys or deletes.
 #
 # AWS access is by GitHub OIDC only (short-lived credentials, no stored keys).
+# The account's GitHub OIDC provider is created once, by hand, and shared with
+# the live deploys. Terraform only refers to it (create_github_oidc_provider =
+# false); the roles here cannot change it.
 #
 # Settings
 #   infra/terraform/environments/<environment>.tfvars
@@ -46,11 +49,6 @@ name: Deploy Infrastructure
 #     TF_PROJECT_PREFIX     Name prefix for every AWS resource (var.project_name).
 #                           No default: a wrong value points Terraform at the
 #                           wrong state.
-#     CREATE_GITHUB_OIDC_PROVIDER
-#                           "false" when the account already has the GitHub
-#                           OIDC provider — it must have one for this workflow
-#                           to sign in, so set "false" unless this stack's
-#                           state already owns the provider.
 #     GH_PAT                Token that can write repository secrets. Needed
 #                           only when write_deploy_secrets is ticked.
 #
@@ -94,6 +92,13 @@ on:
         options:
           - plan
           - apply
+      # Off unless asked. A plan that deletes or replaces any resource stops
+      # the run before it applies.
+      allow_destroy:
+        description: 'With apply: allow a plan that deletes or replaces resources'
+        required: false
+        default: false
+        type: boolean
       # Off unless asked. The deploy secrets decide where staging.yml and
       # production.yml send the application, so writing them is a cutover step,
       # not part of building infrastructure.
@@ -135,7 +140,7 @@ jobs:
       TF_VAR_github_repo:                 ${{ github.event.repository.name }}
       TF_VAR_github_org_id:               ${{ github.repository_owner_id }}
       TF_VAR_github_repo_id:              ${{ github.repository_id }}
-      TF_VAR_create_github_oidc_provider: ${{ secrets.CREATE_GITHUB_OIDC_PROVIDER || 'true' }}
+      TF_VAR_create_github_oidc_provider: false
       # This job runs the pull request's own code, so it is given no real
       # application secrets. The plan therefore always shows the database
       # password and the secret application settings as changed. Ignore those
@@ -187,12 +192,19 @@ jobs:
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           BUCKET="${TF_PROJECT_PREFIX}-tfstate-${ACCOUNT_ID}"
-          if aws s3api head-object --bucket "$BUCKET" --key "${TF_PROJECT_PREFIX}/${ENVIRONMENT}/terraform.tfstate" >/dev/null 2>&1; then
+          # Any error here (no bucket, access denied) fails the job: a
+          # skipped plan would hide what the pull request changes.
+          aws s3api head-bucket --bucket "$BUCKET"
+          if err=$(aws s3api head-object --bucket "$BUCKET" --key "${TF_PROJECT_PREFIX}/${ENVIRONMENT}/terraform.tfstate" 2>&1 >/dev/null); then
             echo "found=true" >> "$GITHUB_OUTPUT"
             echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::Terraform plan skipped for ${ENVIRONMENT}: no state file yet (the environment has not been built, or the plan role cannot read the state bucket)."
+          elif grep -q "(404)" <<<"$err"; then
+            echo "::notice::Terraform plan skipped for ${ENVIRONMENT}: no state file yet (the environment has not been built)."
             echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$err"
+            echo "::error::Cannot read the ${ENVIRONMENT} state file. Check the plan role's permissions (bootstrap/iam/plan-permissions.json)."
+            exit 1
           fi
 
       - name: Initialise Terraform
@@ -261,7 +273,7 @@ jobs:
       TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}
       TF_VAR_admin_panel_password:        ${{ secrets.ADMIN_PANEL_PASSWORD }}
       TF_VAR_survey_ingest_token:         ${{ secrets.SURVEY_INGEST_TOKEN }}
-      TF_VAR_create_github_oidc_provider: ${{ secrets.CREATE_GITHUB_OIDC_PROVIDER || 'true' }}
+      TF_VAR_create_github_oidc_provider: false
 
     steps:
       # ── 1. Fail fast before touching AWS if anything is missing ───────────────
@@ -391,7 +403,10 @@ jobs:
           # stack was always "production". Starting again from an empty
           # per-environment state would try to build a second copy on top of
           # it, so stop until the old state file has been moved.
-          if aws s3api head-object --bucket "$BUCKET" --key "${TF_PROJECT_PREFIX}/terraform.tfstate" >/dev/null 2>&1; then
+          # Listing needs only s3:ListBucket, and an error fails the step
+          # instead of reading as "no old state".
+          legacy=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "${TF_PROJECT_PREFIX}/terraform.tfstate" --query 'KeyCount' --output text)
+          if [[ "$legacy" != "0" ]]; then
             echo "::error::Old state file found at s3://<state bucket>/<prefix>/terraform.tfstate. It describes a production stack. Move it to <prefix>/production/terraform.tfstate (aws s3 mv), then run this workflow again."
             exit 1
           fi
@@ -415,6 +430,8 @@ jobs:
 
       # ── 7. Custom domain: create the ACM cert first so we can print the     ───
       #       DNS validation record before the full apply waits for it          ───
+      # This targeted apply runs before the plan below and is not part of it.
+      # It touches only the certificate.
       - name: Read the custom domain from the environment's settings
         id: domain
         working-directory: infra/terraform
@@ -464,7 +481,29 @@ jobs:
             echo "The full plan is in this job's log, step **Plan**."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # ── 10. Apply exactly the plan printed above ──────────────────────────────
+      # ── 10. Stop before applying a plan that deletes or replaces anything ────
+      # A replacement (delete + create) of the database or a bucket loses its
+      # data. Such a plan applies only when the person starting the run ticked
+      # allow_destroy after reading it.
+      - name: Check the plan for deletions
+        if: inputs.action == 'apply'
+        working-directory: infra/terraform
+        env:
+          ALLOW_DESTROY: ${{ inputs.allow_destroy }}
+        run: |
+          terraform show -json tfplan > tfplan.json
+          deletes=$(jq -r '.resource_changes[]? | select(.change.actions | index("delete")) | "\(.change.actions | join("+")) \(.address)"' tfplan.json)
+          if [[ -n "$deletes" ]]; then
+            echo "This plan deletes or replaces:"
+            echo "$deletes"
+            if [[ "$ALLOW_DESTROY" != "true" ]]; then
+              echo "::error::The plan deletes or replaces resources (listed above). Nothing was applied. If that is intended, run again with allow_destroy ticked."
+              exit 1
+            fi
+            echo "::warning::allow_destroy is ticked: applying a plan that deletes or replaces resources."
+          fi
+
+      # ── 11. Apply exactly the plan printed above ──────────────────────────────
       - name: Apply infrastructure
         if: inputs.action == 'apply'
         working-directory: infra/terraform
