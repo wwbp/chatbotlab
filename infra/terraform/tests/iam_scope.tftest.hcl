@@ -31,12 +31,8 @@ variables {
   domain_name          = "chat.example.org"
 }
 
-run "roles_carry_the_boundary_when_asked" {
+run "roles_always_carry_the_boundary" {
   command = plan
-
-  variables {
-    use_permissions_boundary = true
-  }
 
   assert {
     condition = alltrue([
@@ -44,15 +40,6 @@ run "roles_carry_the_boundary_when_asked" {
       role.permissions_boundary == "arn:aws:iam::123456789012:policy/chatbotlab-terraform-boundary-staging"
     ])
     error_message = "Every IAM role must carry the chatbotlab-terraform-boundary-staging permissions boundary."
-  }
-}
-
-run "no_boundary_by_default" {
-  command = plan
-
-  assert {
-    condition     = aws_iam_role.eb_instance_role.permissions_boundary == null
-    error_message = "Without use_permissions_boundary, roles carry no boundary (local setup.sh runs)."
   }
 }
 

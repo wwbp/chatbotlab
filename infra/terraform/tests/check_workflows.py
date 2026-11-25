@@ -680,7 +680,21 @@ def sample_arns(env_name):
         "eb-app": f"arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:application/{p}",
         "eb-env": f"arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:environment/{p}/{p}-env",
         "role": f"arn:aws:iam::<ACCOUNT_ID>:role/{p}-eb-instance-role",
+        "param": f"arn:aws:ssm:us-east-1:<ACCOUNT_ID>:parameter/{p}/DJANGO_SECRET_KEY",
+        "secret": f"arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:{p}/database-AbCdEf",
     }
+
+
+# IAM actions that accept the iam:PermissionsBoundary condition key: every one
+# of them must require this environment's boundary.
+BOUNDARY_KEYED = {"iam:CreateRole", "iam:PutRolePermissionsBoundary", "iam:AttachRolePolicy",
+                  "iam:DetachRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy"}
+# Service-wide actions a boundary may allow on every resource, and why: the EB
+# service role's managed updates and `eb deploy` drive these on resources EB
+# names itself (awseb-e-*), so they cannot be scoped by name; the
+# Environment / live-tag conditions still exclude the other environment and
+# the live deployment.
+BOUNDARY_WILDCARDS_ON_ANY_RESOURCE = {"ec2:*", "autoscaling:*", "elasticloadbalancing:*", "cloudformation:*"}
 
 
 def is_service_wide_write(action):
@@ -847,9 +861,11 @@ for name, policy in policies.items():
                         f"{fname}.json: {action} may act only on <PREFIX>-{environment}-* roles and instance profiles, not '{resource}'",
                     )
                 cond = st.get("Condition", {})
-                if action in ("iam:CreateRole", "iam:PutRolePermissionsBoundary"):
+                if action in BOUNDARY_KEYED:
                     check(cond.get("StringEquals", {}).get("iam:PermissionsBoundary") == boundary_arn(environment),
                           f"{fname}.json: {action} needs iam:PermissionsBoundary = {boundary_arn(environment)}")
+                check(action != "iam:UpdateAssumeRolePolicy",
+                      f"{fname}.json: iam:UpdateAssumeRolePolicy could make a role assumable by anyone; not allowed")
                 if action in ("iam:AttachRolePolicy", "iam:DetachRolePolicy"):
                     arns = set(as_list(cond.get("ArnEquals", {}).get("iam:PolicyARN", [])))
                     check(arns and arns <= EB_MANAGED_POLICIES,
@@ -859,6 +875,12 @@ for name, policy in policies.items():
                     check(services and services <= {"elasticbeanstalk.amazonaws.com", "ec2.amazonaws.com"},
                           f"{fname}.json: iam:PassRole needs iam:PassedToService = EB / EC2")
         check(allows(policy, "iam:CreateRole", own["role"]), f"{fname}.json: must be able to create its own roles")
+        check(
+            any(st.get("Effect") == "Deny" and "iam:PutRolePermissionsBoundary" in as_list(st.get("Action"))
+                and st.get("Condition", {}).get("StringNotEquals", {}).get("iam:PermissionsBoundary") == boundary_arn(environment)
+                for st in policy["Statement"]),
+            f"{fname}.json: must deny iam:PutRolePermissionsBoundary to any boundary but {boundary_arn(environment)}",
+        )
         for action in ("iam:DeleteRolePermissionsBoundary", "iam:CreatePolicyVersion", "iam:DeletePolicy",
                        "iam:SetDefaultPolicyVersion"):
             check(denies(policy, action, boundary_arn(environment)) or denies(policy, action, own["role"]),
@@ -868,6 +890,27 @@ for name, policy in policies.items():
             check(not allows(policy, "iam:PutRolePolicy", f"arn:aws:iam::<ACCOUNT_ID>:{target}"),
                   f"{fname}.json: must not change {target}")
     else:  # boundary: the most any role the stack creates can ever do
+        own = sample_arns(environment)
+        for st in policy["Statement"]:
+            if st.get("Effect") != "Allow":
+                continue
+            for action in as_list(st.get("Action", [])):
+                check(not action.startswith(("sns:", "sqs:")), f"{fname}.json: the stack uses no SNS/SQS; '{action}'")
+                if action.endswith(":*") and "*" in as_list(st.get("Resource", [])):
+                    check(action in BOUNDARY_WILDCARDS_ON_ANY_RESOURCE,
+                          f"{fname}.json: '{action}' on '*' is wider than the stack's roles need")
+        for action, arn, expected in (
+            ("ssm:GetParameter", own["param"], True),
+            ("ssm:GetParameter", "arn:aws:ssm:us-east-1:<ACCOUNT_ID>:parameter/someone-else/x", False),
+            ("ses:SendEmail", "arn:aws:ses:us-east-1:<ACCOUNT_ID>:identity/<SES_FROM_DOMAIN>", True),
+            ("ses:SendEmail", "arn:aws:ses:us-east-1:<ACCOUNT_ID>:identity/someone-else.org", False),
+            ("s3:GetObject", own["object"], True),
+            ("s3:PutObject", own["eb-version"], True),
+            ("s3:GetObject", "arn:aws:s3:::someone-elses-bucket/key", False),
+            ("s3:PutObject", f"{EB_BUCKET}/someone-else/app.zip", False),
+        ):
+            check(allows(policy, action, arn) == expected,
+                  f"{fname}.json: {action} on {arn} must be {'allowed' if expected else 'refused'}")
         check(not allows(policy, "s3:GetObject", sample_arns(environment)["state"]),
               f"{fname}.json: roles the stack creates must not read the Terraform state")
         for action in ("iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy", "iam:CreatePolicyVersion",
@@ -884,13 +927,13 @@ check(
     "\n    environment: plan-${{ matrix.environment }}\n" in "\n" + plan_job,
     "plan job: must run in the 'plan-<environment>' GitHub Environment (required reviewers approve each run)",
 )
-# Roles Terraform creates carry the boundary the apply role requires.
-for name, text in {"deploy-infrastructure.yml": deploy}.items():
-    for job_name, job in jobs_of(text).items():
-        check(
-            re.search(r"\n      TF_VAR_use_permissions_boundary: *'?true'?\n", job),
-            f"{name}: job '{job_name}' must set TF_VAR_use_permissions_boundary: true",
-        )
+# The boundary is mandatory: no switch turns it off.
+for name, text in {**all_workflows, "variables.tf": (TERRAFORM / "variables.tf").read_text()}.items():
+    check("use_permissions_boundary" not in text, f"{name}: the permissions boundary must not be optional")
+check(
+    "put-role-permissions-boundary" in (TERRAFORM / "README.md").read_text(),
+    "README.md: must say to attach the boundary to existing stack roles before granting the apply policy",
+)
 
 readme = (TERRAFORM / "README.md").read_text()
 check("ReadOnlyAccess" not in readme, "README.md: the plan role must not get ReadOnlyAccess")
