@@ -209,7 +209,7 @@ environment. It has two jobs.
 
 | Job | Starts when | What it does |
 |---|---|---|
-| `plan` | A pull request touches `infra/terraform/**`, and a reviewer approves the run in the `plan-staging` / `plan-production` GitHub Environment | Prints `terraform plan` for staging and for production. Read-only. Skips with a notice if its role is not configured |
+| `plan` | A pull request touches `infra/terraform/**`, and a reviewer approves the run in the `plan-staging` GitHub Environment | Prints `terraform plan` for staging only (production is planned by `apply` with `action = plan`, from `main`). Read-only. Skips with a notice if its role is not configured |
 | `apply` | A person runs the workflow by hand and picks an environment | Runs in the GitHub Environment of that name. `action = plan` (the default) prints the real plan and stops. `action = apply` prints the plan, then applies exactly that plan |
 
 A failed apply leaves everything in place. The workflow never destroys.
@@ -286,39 +286,52 @@ steps 5 to 7 in GitHub. Everything happens per environment `<env>` =
    for each `<PREFIX>-<env>-*` role. The apply role cannot change a role's
    trust policy (`iam:UpdateAssumeRolePolicy` is not granted); a change to
    one is an administrator's job.
-3. **Plan roles** `<PREFIX>-terraform-plan-<env>`. Trust:
-   `bootstrap/iam/plan-<env>-trust.json` (subject
-   `repo:wwbp/chatbotlab:environment:plan-<env>`, ref `refs/pull/*/merge`).
-   Permissions, as an inline policy: `bootstrap/iam/plan-<env>-permissions.json`:
-   describe/list/get only, `s3:GetObject` on its own state file only. No AWS
-   managed policy.
+3. **Plan role** `<PREFIX>-terraform-plan-staging`, staging only. Trust:
+   `bootstrap/iam/plan-staging-trust.json` (subject
+   `repo:wwbp/chatbotlab:environment:plan-staging`, ref `refs/pull/*/merge`).
+   Permissions: `bootstrap/iam/plan-staging-permissions.json` as a customer
+   managed policy: describe/list/get only, `s3:GetObject` on staging's state
+   file only. There is deliberately no production plan role: until secrets
+   leave the state, no pull-request code may run with a role that reads
+   production's state. Production is planned by the apply job
+   (`action = plan`), which runs only from `main` in the `production`
+   Environment.
 4. **Apply roles** `<PREFIX>-terraform-apply-<env>`. Trust:
    `bootstrap/iam/apply-<env>-trust.json` (subject
    `repo:wwbp/chatbotlab:environment:<env>`, ref `refs/heads/main` for
    production; `refs/heads/staging` for staging, so staging is built from the
-   branch that `staging.yml` deploys). Permissions, as an inline policy (it is
-   larger than a managed policy may be):
-   `bootstrap/iam/apply-<env>-permissions.json`. RDS, ElastiCache, Elastic
+   branch that `staging.yml` deploys). Permissions: three customer managed
+   policies (one would exceed IAM's 6144-character limit),
+   `bootstrap/iam/apply-<env>-permissions.json`, `-abac.json` and
+   `-guardrails.json` (the explicit Denies). RDS, ElastiCache, Elastic
    Beanstalk, log groups and S3 only under `<PREFIX>-<env>` names; in the
    shared `elasticbeanstalk-*` bucket only the `<PREFIX>-<env>/` keys; named
    IAM actions only on `<PREFIX>-<env>-*` roles and instance profiles,
-   attaching only the Elastic Beanstalk managed policies. Known limits: EC2,
-   load balancing, Auto Scaling, CloudFormation, CloudWatch, CloudFront and
-   ACM are allowed on any resource not tagged with the other environment or a
-   live EB environment, because Elastic Beanstalk creates those resources
-   under names and tags it chooses. Verify the first apply in a test account:
+   attaching only the Elastic Beanstalk managed policies. EC2, load
+   balancing, Auto Scaling, CloudFormation, CloudFront and ACM (resources
+   Elastic Beanstalk names itself) by tag, positively: creating calls must
+   carry `Environment=<env>` and `Project=<PREFIX>` (and only known tag keys);
+   every other call needs those tags on the resource; tagging an existing
+   resource needs both. Untagged resources, such as the hand-built live ones,
+   are out of reach. This depends on Elastic Beanstalk and CloudFormation
+   passing the environment's tags to what they create: if the first apply
+   fails with AccessDenied on an EC2/ELB/Auto Scaling call, that is where to
+   look (it fails closed). Verify the first apply in a test account:
    Elastic Beanstalk may need more of its bucket (`resources/`) than these
    policies give.
 5. **GitHub Environments** (Settings → Environments):
-   - `plan-staging` and `plan-production`: **Required reviewers**. Approve a
-     run only after reading the pull request: the plan runs its code.
+   - `plan-staging`: **Required reviewers**, **Prevent self-review** ticked.
+     Approve a run only after reading the pull request: the plan runs its
+     code with a role that reads staging's state (and so its secrets). The
+     first pull-request runs created this Environment, and an unused one
+     for a production plan, with no rules: add the reviewers here, and
+     delete the production plan Environment.
    - `staging`: **Required reviewers**; **Deployment branches**: `staging`
      only (the branch the staging trust policy accepts).
    - `production`: **Required reviewers**, **Prevent self-review** ticked;
      **Deployment branches**: `main` only.
    Without required reviewers, anyone who can run workflows can apply.
-6. **Environment secrets**: in `plan-<env>`, `TF_PLAN_ROLE_ARN` (that
-   environment's plan role). In `staging` and `production`:
+6. **Environment secrets**: in `plan-staging`, `TF_PLAN_ROLE_ARN`. In `staging` and `production`:
    `TF_APPLY_ROLE_ARN`, `DB_PASSWORD`, `ADMIN_PANEL_PASSWORD`, and
    `OPENAI_API_KEY` and/or `ANTHROPIC_API_KEY`. Optional:
    `SURVEY_INGEST_TOKEN`.
@@ -333,7 +346,8 @@ The first apply creates the state bucket.
 The Terraform state still holds the database password, the admin password,
 the API keys and the Django secret key. **Anyone who can run a plan for an
 environment can read that environment's state, and so its secrets.** That
-includes the code of any pull request a reviewer approves in `plan-<env>`.
+includes the code of any pull request a reviewer approves in `plan-staging`
+(staging's secrets only; pull requests never get a production role).
 Moving the secrets out of the state into Secrets Manager is the next,
 separate change (decided by the owner); until it lands, treat approving a
 plan like handing over that environment's secrets.

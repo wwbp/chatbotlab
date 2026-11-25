@@ -20,9 +20,11 @@ name: Deploy Infrastructure
 #
 # Two jobs:
 #
-#   plan   Runs on every pull request that touches infra/terraform/**, once
-#          for staging and once for production, after a reviewer approves it
-#          in the plan-<environment> GitHub Environment. Read-only: it
+#   plan   Runs on every pull request that touches infra/terraform/**, for
+#          staging only, after a reviewer approves it in the plan-staging
+#          GitHub Environment. (Until secrets leave the state, no pull-request
+#          code gets a role that can read production's state: production is
+#          planned by the apply job with action = plan, from main.) Read-only: it
 #          assumes a role that cannot change AWS, takes no state lock, and is
 #          given no real application secrets. It skips with a notice when the role is not
 #          configured (and on pull requests from forks, which get no secrets).
@@ -132,7 +134,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: [staging, production]
+        # Staging only: see the header.
+        environment: [staging]
     env:
       ENVIRONMENT:                        ${{ matrix.environment }}
       TF_VAR_project_name:                ${{ secrets.TF_PROJECT_PREFIX }}
@@ -160,7 +163,7 @@ jobs:
           TF_PROJECT_PREFIX: ${{ secrets.TF_PROJECT_PREFIX }}
         run: |
           if [[ -z "$TF_PLAN_ROLE_ARN" || -z "$TF_PROJECT_PREFIX" ]]; then
-            echo "::notice::Terraform plan skipped: the TF_PLAN_ROLE_ARN (plan-<environment> Environment) and TF_PROJECT_PREFIX (repository) secrets are not both set (or this pull request comes from a fork). See infra/terraform/README.md, 'Running Terraform from GitHub Actions'."
+            echo "::notice::Terraform plan skipped: the TF_PLAN_ROLE_ARN (plan-staging Environment) and TF_PROJECT_PREFIX (repository) secrets are not both set (or this pull request comes from a fork). See infra/terraform/README.md, 'Running Terraform from GitHub Actions'."
             echo "configured=false" >> "$GITHUB_OUTPUT"
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
