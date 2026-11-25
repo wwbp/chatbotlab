@@ -322,27 +322,68 @@ def check_different(src, dst):
 DEFINITION_PRIVILEGES = ("SELECT", "SHOW VIEW", "TRIGGER", "EVENT", "EXECUTE")
 
 
+# "GRANT <privileges> ON *.* TO" or "... ON `db`.* TO". The privilege list is
+# bare words only, so a table, column, routine or proxy grant never matches,
+# even when an object name contains " ON *.* TO ".
+_GRANT = re.compile(
+    r"(GRANT|REVOKE) ([A-Z0-9_, ]+) ON (\*|`(?:[^`]|``)+`)\.\* (?:TO|FROM) "
+)
+GLOBAL_ONLY = {"PROCESS", "SUPER"}  # ALL on a database does not include them
+
+
+def _db_matches(pattern, name, wildcards):
+    """Whether a grant's database pattern covers ``name``. With ``wildcards``
+    it is SQL LIKE (% and _, backslash escapes); without (MySQL with
+    partial_revokes=ON) only the escapes are undone. A lone trailing
+    backslash matches nothing."""
+    tokens = re.findall(r"\\.|.", pattern, re.DOTALL)
+    if tokens and tokens[-1] == "\\":
+        return False
+    wild = {"%": ".*", "_": "."} if wildcards else {}
+    regex = "".join(
+        re.escape(t[1:]) if t[0] == "\\" else wild.get(t, re.escape(t)) for t in tokens
+    )
+    return re.fullmatch(regex, name, re.DOTALL) is not None
+
+
 def missing_privileges(conn, needed):
-    """Privileges in ``needed`` the account holds neither globally nor on the
-    database. Grants made through roles are not seen here: this fails safe."""
-    me = "REPLACE(GRANTEE, CHAR(39), '') = CURRENT_USER()"
-    held = {
-        row[0]
-        for row in query(
-            conn,
-            f"SELECT PRIVILEGE_TYPE FROM information_schema.USER_PRIVILEGES WHERE {me}"
-            " UNION SELECT PRIVILEGE_TYPE FROM information_schema.SCHEMA_PRIVILEGES"
-            f" WHERE {me} AND DATABASE() LIKE TABLE_SCHEMA",
-        )
-    }
-    return [p for p in needed if p not in held]
+    """Privileges in ``needed`` the session holds neither globally nor on the
+    database, directly or through an active role.
+
+    Plain SHOW GRANTS lists the current session's effective grants: the
+    account's own plus those of its active roles (MySQL 8: expanded into the
+    account's lines; MariaDB: the active role's own lines). information_schema
+    shows direct grants only, and misses e.g. the RDS master's
+    rds_superuser_role. A role granted but not active is listed by neither.
+    """
+    # MySQL with partial_revokes=ON takes % and _ in grants literally.
+    wildcards = True
+    if conn.flavour == "mysql":
+        wildcards = query(conn, "SELECT @@partial_revokes")[0][0] in ("0", "OFF")
+    held = set()
+    revoked = set()
+    for (line,) in query(conn, "SHOW GRANTS"):
+        m = _GRANT.match(line or "")
+        if not m:
+            continue
+        verb, privileges, scope = m.groups()
+        pattern = scope[1:-1].replace("``", "`")
+        if scope != "*" and not _db_matches(pattern, conn.database, wildcards):
+            continue
+        names = {p.strip() for p in privileges.split(",")}
+        if names & {"ALL", "ALL PRIVILEGES"}:
+            names = set(needed) if scope == "*" else set(needed) - GLOBAL_ONLY
+        # MySQL partial revokes ("REVOKE ... ON `db`.* FROM") take away.
+        (held if verb == "GRANT" else revoked).update(names)
+    return [p for p in needed if p not in held - revoked]
 
 
 def require_definition_privileges(conn):
     missing = missing_privileges(conn, DEFINITION_PRIVILEGES)
     if missing:
         raise Refuse(
-            f"{conn.role}: the account lacks {', '.join(missing)} on {conn.database}; "
+            f"{conn.role}: the account lacks {', '.join(missing)} on {conn.database} "
+            "(directly or through an active role); "
             "without them triggers, events, routines or view definitions are "
             "invisible and would compare as equal. Grant "
             f"{', '.join(DEFINITION_PRIVILEGES)} on the database.",
@@ -909,7 +950,7 @@ def quiesced_problem(src, seconds):
     watch. This is a sample, not a proof: stop the app first. The proof is
     verify, which fails if the source changed after the dump.
     """
-    if missing_privileges(src, ["PROCESS"]) and missing_privileges(src, ["SUPER"]):
+    if missing_privileges(src, ["PROCESS"]):
         return (
             "the source account cannot see other sessions (they would all look "
             "absent); grant PROCESS on *.* to it"
@@ -1062,7 +1103,8 @@ def step_preflight(args):
     missing = missing_privileges(src, DEFINITION_PRIVILEGES)
     if missing:
         problem = (
-            f"the source account lacks {', '.join(missing)} on the whole database; "
+            f"the source account lacks {', '.join(missing)} on the whole database "
+            "(directly or through an active role); "
             "tables, views, triggers, events or routines it cannot see would "
             "silently be left out of the dump"
         )
@@ -1269,9 +1311,10 @@ def _names(objects):
 
 
 def _other_sessions(conn):
-    """Other sessions using this database. Without PROCESS they are invisible,
-    so that refuses rather than reporting none."""
-    if missing_privileges(conn, ["PROCESS"]) and missing_privileges(conn, ["SUPER"]):
+    """Other sessions using this database. Without PROCESS they are invisible
+    (SUPER alone does not show them), so that refuses rather than reporting
+    none."""
+    if missing_privileges(conn, ["PROCESS"]):
         raise Refuse(
             f"the {conn.role} account cannot see other sessions; grant PROCESS on *.*"
         )

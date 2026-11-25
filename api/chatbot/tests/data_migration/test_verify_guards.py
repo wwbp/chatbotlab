@@ -16,6 +16,7 @@ from .conftest import (
     DST,
     DST_DB,
     DST_PASSWORD,
+    LIMITED_GRANTS,
     SCRIPT,
     SRC,
     SRC_DB,
@@ -23,6 +24,8 @@ from .conftest import (
     admin,
     create_limited_account,
     drop_limited_account,
+    flavour,
+    load_tool,
     plain_copy,
     shim,
     tool,
@@ -197,6 +200,75 @@ def test_unreadable_routine_bodies_refused(copied, tmp_path):
         drop_limited_account()
     assert result.returncode == 2, result.stdout + result.stderr
     assert "mig_f" in result.stderr
+
+
+# Privileges held through a role, as the RDS master user holds its own
+# (rds_superuser_role): they count only while the role is active.
+ROLE, ROLE_USER = "mig_role", "mig_rl"
+
+
+@pytest.fixture
+def role_account(copied):
+    """Make mig_rl on both servers, with no direct grants and only a role
+    holding ``privileges`` on the database; returns its tool env."""
+
+    def make(privileges, active=True):
+        for server, db, password in (
+            (SRC, SRC_DB, SRC_PASSWORD),
+            (DST, DST_DB, DST_PASSWORD),
+        ):
+            mysql = flavour(server) == "mysql"
+            # What reads the body of a routine one did not define (see
+            # test_unreadable_routine_bodies_refused), held globally.
+            routine_bodies = (
+                f"GRANT SHOW_ROUTINE ON *.* TO {ROLE};"
+                if mysql
+                else f"GRANT SELECT ON mysql.proc TO {ROLE};"
+            )
+            default = "TO" if mysql else "FOR"
+            admin(
+                server,
+                f"DROP USER IF EXISTS '{ROLE_USER}'@'%'; DROP ROLE IF EXISTS {ROLE};"
+                f"CREATE ROLE {ROLE};"
+                f"GRANT {privileges} ON {db}.* TO {ROLE};"
+                f"{routine_bodies}"
+                f"CREATE USER '{ROLE_USER}'@'%' IDENTIFIED BY '{password}';"
+                f"GRANT {ROLE} TO '{ROLE_USER}'@'%';"
+                + (
+                    f"SET DEFAULT ROLE {ROLE} {default} '{ROLE_USER}'@'%';"
+                    if active
+                    else ""
+                ),
+            )
+        return tool_env(MIG_SOURCE_USER=ROLE_USER, MIG_TARGET_USER=ROLE_USER)
+
+    yield make
+    for server in (SRC, DST):
+        admin(
+            server, f"DROP USER IF EXISTS '{ROLE_USER}'@'%'; DROP ROLE IF EXISTS {ROLE}"
+        )
+
+
+def test_privileges_held_through_an_active_role_count(role_account, tmp_path):
+    result = verify(tmp_path, role_account(LIMITED_GRANTS))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_privileges_of_an_inactive_role_do_not_count(role_account, tmp_path):
+    env = role_account(LIMITED_GRANTS, active=False)
+    # A direct SELECT, or the server alone would turn the session away.
+    for server, db in ((SRC, SRC_DB), (DST, DST_DB)):
+        admin(server, f"GRANT SELECT ON {db}.* TO '{ROLE_USER}'@'%'")
+    result = verify(tmp_path, env)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "lacks SHOW VIEW, TRIGGER, EVENT, EXECUTE on" in result.stderr
+
+
+def test_role_missing_a_privilege_is_refused(role_account, tmp_path):
+    result = verify(tmp_path, role_account("SELECT, SHOW VIEW, EVENT, EXECUTE"))
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "lacks TRIGGER on" in result.stderr
+    assert "(directly or through an active role)" in result.stderr
 
 
 # ── V5: two different databases, and something to compare ───────────────────
@@ -378,3 +450,81 @@ def test_line_separator_in_a_definition_is_not_a_row_break(copied, tmp_path):
         s("DROP VIEW IF EXISTS mig_v")
         t("DROP VIEW IF EXISTS mig_v")
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_grant_lines_are_read_fail_closed(monkeypatch):
+    dbcopy = load_tool()
+    conn = dbcopy.Conn("source", "h", "1", "u", "", "mig_src", "")
+
+    def held(*lines, needed=("SELECT", "TRIGGER", "PROCESS"), partial_revokes="0"):
+        def query(_conn, sql):
+            if "partial_revokes" in sql:
+                return [[partial_revokes]]
+            return [[x] for x in lines]
+
+        monkeypatch.setattr(dbcopy, "query", query)
+        return [p for p in needed if p not in dbcopy.missing_privileges(conn, needed)]
+
+    assert held("GRANT PROCESS ON *.* TO `u`@`%`") == ["PROCESS"]
+    # ALL on a database does not include the global-only PROCESS.
+    assert held("GRANT ALL PRIVILEGES ON `mig_src`.* TO `u`@`%`") == [
+        "SELECT",
+        "TRIGGER",
+    ]
+    assert held("GRANT ALL PRIVILEGES ON *.* TO `u`@`%`") == [
+        "SELECT",
+        "TRIGGER",
+        "PROCESS",
+    ]
+    # Database names are LIKE patterns; an escaped _ is literal.
+    assert held("GRANT SELECT ON `mig%`.* TO `r`") == ["SELECT"]
+    assert held("GRANT SELECT ON `mig\\_src`.* TO `r`") == ["SELECT"]
+    assert held("GRANT SELECT ON `mig\\_sr`.* TO `r`") == []
+    assert held("GRANT SELECT ON `other`.* TO `r`") == []
+    # Table, column and routine grants are not database-wide.
+    assert held("GRANT SELECT ON `mig_src`.`t` TO `u`@`%`") == []
+    assert (
+        held("GRANT EXECUTE ON PROCEDURE `mig_src`.`p` TO `u`@`%`", needed=("EXECUTE",))
+        == []
+    )
+    assert (
+        held(
+            "GRANT SELECT ON *.* TO `u`@`%`",
+            "REVOKE SELECT ON `mig_src`.* FROM `u`@`%`",
+        )
+        == []
+    )
+    # An object name containing " ON *.* TO " must not make a table, column
+    # or routine grant read as global.
+    assert (
+        held("GRANT SELECT, SELECT (`x`) ON `other`.`a ON *.* TO b` TO `u3`@`%`") == []
+    )
+    assert (
+        held(
+            "GRANT EXECUTE, ALTER ROUTINE ON PROCEDURE `other`.`p ON *.* TO q` TO `u`@`%`",
+            needed=("EXECUTE",),
+        )
+        == []
+    )
+    # MySQL with partial_revokes=ON reads database grants literally.
+    assert held("GRANT SELECT ON `mig%`.* TO `r`", partial_revokes="1") == []
+    assert held("GRANT SELECT ON `mig\\_src`.* TO `r`", partial_revokes="1") == [
+        "SELECT"
+    ]
+    # A lone trailing backslash matches nothing.
+    assert held("GRANT SELECT ON `mig_src\\`.* TO `r`") == []
+
+
+def test_an_escaped_underscore_is_not_a_wildcard(monkeypatch):
+    dbcopy = load_tool()
+    conn = dbcopy.Conn("source", "h", "1", "u", "", "migXsrc", "")
+    monkeypatch.setattr(
+        dbcopy,
+        "query",
+        lambda _c, sql: (
+            [["0"]]
+            if "partial_revokes" in sql
+            else [["GRANT SELECT ON `mig\\_src`.* TO `r`"]]
+        ),
+    )
+    assert dbcopy.missing_privileges(conn, ["SELECT"]) == ["SELECT"]
