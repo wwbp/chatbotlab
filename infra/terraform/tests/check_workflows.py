@@ -580,12 +580,17 @@ check(
 # --- IAM roles for Terraform: committed, and checked here ---------------------
 # The Terraform roles live in the same AWS account as the hand-built live
 # deployment. Each role trusts one GitHub Environment on one branch, reaches
-# only its own state, and is explicitly denied the live resources.
+# only its own environment's state and resources, cannot change IAM beyond its
+# own names (and only under a permissions boundary), cannot change the shared
+# GitHub OIDC provider, and is explicitly denied the live resources.
 
 IAM = TERRAFORM / "bootstrap" / "iam"
 REPO_SUBJECTS = ("repo:wwbp/chatbotlab", "repo:wwbp@42522115/chatbotlab@882137210")
 OIDC = "token.actions.githubusercontent.com"
+OIDC_ARN = f"arn:aws:iam::<ACCOUNT_ID>:oidc-provider/{OIDC}"
 STATE_BUCKET = "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>"
+EB_BUCKET = "arn:aws:s3:::elasticbeanstalk-us-east-1-<ACCOUNT_ID>"
+LIVE_EB_ENVIRONMENTS = {"humanlikebot-env", "humanlike-bot-development-env"}
 LIVE_RESOURCES = {
     "arn:aws:elasticbeanstalk:*:*:application/humanlikebot",
     "arn:aws:elasticbeanstalk:*:*:environment/humanlikebot/*",
@@ -594,15 +599,34 @@ LIVE_RESOURCES = {
     "arn:aws:rds:*:*:snapshot:awseb-e-*",
     "arn:aws:cloudfront::*:distribution/E2Q6P4TGU4GOC",
     "arn:aws:cloudfront::*:distribution/E2XKRGQ6R0OG6W",
+    "arn:aws:s3:::elasticbeanstalk-*/humanlikebot/*",
     *(f"arn:aws:s3:::{b}{suffix}" for b in ("bot.wwbp.org", "dev.bot.wwbp.org", "bot-avatar.wwbp.org",
                                             "dev.bot-avatar.wwbp.org") for suffix in ("", "/*")),
 }
-# Which GitHub Environment and branch may assume each role.
-ROLES = {
-    "plan": ("plan", ("StringLike", "refs/pull/*/merge")),
-    "apply-staging": ("staging", ("StringEquals", "refs/heads/staging")),
-    "apply-production": ("production", ("StringEquals", "refs/heads/main")),
+OIDC_WRITES = [
+    "iam:CreateOpenIDConnectProvider", "iam:DeleteOpenIDConnectProvider",
+    "iam:UpdateOpenIDConnectProviderThumbprint", "iam:AddClientIDToOpenIDConnectProvider",
+    "iam:RemoveClientIDFromOpenIDConnectProvider", "iam:TagOpenIDConnectProvider",
+    "iam:UntagOpenIDConnectProvider",
+]
+EB_MANAGED_POLICIES = {
+    "arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier",
+    "arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth",
+    "arn:aws:iam::aws:policy/AWSElasticBeanstalkManagedUpdatesCustomerRolePolicy",
+    "arn:aws:iam::aws:policy/AdministratorAccess-AWSElasticBeanstalk",
 }
+ENVIRONMENTS = ("staging", "production")
+OTHER = {"staging": "production", "production": "staging"}
+BRANCH = {"staging": "refs/heads/staging", "production": "refs/heads/main"}
+# role -> (environment it serves, GitHub Environment it trusts, ref condition)
+ROLES = {
+    **{f"plan-{e}": (e, f"plan-{e}", ("StringLike", "refs/pull/*/merge")) for e in ENVIRONMENTS},
+    **{f"apply-{e}": (e, e, ("StringEquals", BRANCH[e])) for e in ENVIRONMENTS},
+}
+
+
+def boundary_arn(env_name):
+    return f"arn:aws:iam::<ACCOUNT_ID>:policy/<PREFIX>-terraform-boundary-{env_name}"
 
 
 def load_policy(name):
@@ -621,30 +645,61 @@ def as_list(value):
     return value if isinstance(value, list) else [value]
 
 
+def matching(policy, effect, action, resource):
+    """Statements of `effect` whose Action and Resource patterns match (IAM
+    wildcards; conditions not evaluated)."""
+    return [
+        st for st in policy["Statement"]
+        if st.get("Effect") == effect
+        and any(fnmatchcase(action.lower(), a.lower()) for a in as_list(st.get("Action", [])))
+        and any(fnmatchcase(resource, r) for r in as_list(st.get("Resource", [])))
+    ]
+
+
 def allows(policy, action, resource):
-    """True when an Allow statement grants `action` on `resource` (wildcards
-    expanded as IAM does; no Deny considered)."""
-    for st in policy["Statement"]:
-        if st.get("Effect") != "Allow":
-            continue
-        if any(fnmatchcase(action.lower(), a.lower()) for a in as_list(st.get("Action", []))) and any(
-            fnmatchcase(resource, r) for r in as_list(st.get("Resource", []))
-        ):
-            return True
-    return False
+    """True when an Allow statement grants `action` on `resource` and no
+    unconditional Deny refuses it."""
+    denied = any("Condition" not in st for st in matching(policy, "Deny", action, resource))
+    return bool(matching(policy, "Allow", action, resource)) and not denied
 
 
-for role, (environment, (ref_operator, ref)) in ROLES.items():
+def denies(policy, action, resource):
+    return any("Condition" not in st for st in matching(policy, "Deny", action, resource))
+
+
+def sample_arns(env_name):
+    """One ARN per kind of resource the stack of `env_name` owns."""
+    p = f"<PREFIX>-{env_name}"
+    return {
+        "state": f"{STATE_BUCKET}/<PREFIX>/{env_name}/terraform.tfstate",
+        "bucket": f"arn:aws:s3:::{p}-data",
+        "object": f"arn:aws:s3:::{p}-data/avatar/x.png",
+        "eb-version": f"{EB_BUCKET}/{p}/app-1.zip",
+        "rds": f"arn:aws:rds:us-east-1:<ACCOUNT_ID>:db:{p}-database",
+        "cache": f"arn:aws:elasticache:us-east-1:<ACCOUNT_ID>:serverlesscache:{p}-redis",
+        "eb-app": f"arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:application/{p}",
+        "eb-env": f"arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:environment/{p}/{p}-env",
+        "role": f"arn:aws:iam::<ACCOUNT_ID>:role/{p}-eb-instance-role",
+    }
+
+
+def is_service_wide_write(action):
+    service, _, verb = action.partition(":")
+    return action == "*" or (verb.endswith("*") and not re.match(r"(Describe|Get|List|Check)", verb))
+
+
+policies = {}
+for role, (environment, gh_environment, (ref_operator, ref)) in ROLES.items():
     trust = load_policy(f"{role}-trust")
     statements = trust["Statement"]
     check(len(statements) == 1, f"{role}-trust.json: needs exactly one statement")
     st = statements[0] if statements else {}
     condition = st.get("Condition", {})
-    expected_subjects = {f"{repo}:environment:{environment}" for repo in REPO_SUBJECTS}
+    expected_subjects = {f"{repo}:environment:{gh_environment}" for repo in REPO_SUBJECTS}
     check(
         st.get("Effect") == "Allow"
         and st.get("Action") == "sts:AssumeRoleWithWebIdentity"
-        and st.get("Principal") == {"Federated": f"arn:aws:iam::<ACCOUNT_ID>:oidc-provider/{OIDC}"},
+        and st.get("Principal") == {"Federated": OIDC_ARN},
         f"{role}-trust.json: must allow only sts:AssumeRoleWithWebIdentity from the GitHub OIDC provider",
     )
     check(
@@ -663,81 +718,174 @@ for role, (environment, (ref_operator, ref)) in ROLES.items():
         as_list(condition.get(ref_operator, {}).get(f"{OIDC}:ref", [])) == [ref],
         f"{role}-trust.json: needs {ref_operator} {OIDC}:ref = {ref}",
     )
+    policies[role] = load_policy(f"{role}-permissions")
 
-for role, (environment, _) in ROLES.items():
-    policy = load_policy(f"{role}-permissions")
+for env_name in ENVIRONMENTS:
+    policies[f"boundary-{env_name}"] = load_policy(f"boundary-{env_name}")
+check(
+    not (set(p.stem for p in IAM.glob("*.json")) - {f"{r}-{k}" for r in ROLES for k in ("trust", "permissions")}
+         - {f"boundary-{e}" for e in ENVIRONMENTS}) if IAM.exists() else True,
+    "bootstrap/iam/: holds a policy file this check does not know about",
+)
+
+live_statements = {}
+for name, policy in policies.items():
+    environment = name.rsplit("-", 1)[-1]
+    fname = name if name.startswith("boundary") else f"{name}-permissions"
+    other = OTHER[environment]
+    kind = name.split("-", 1)[0]
     for st in policy["Statement"]:
         check(
             not {"NotAction", "NotResource", "NotPrincipal"} & set(st),
-            f"{role}-permissions.json: NotAction/NotResource are too easy to get wrong; list what is allowed",
+            f"{fname}.json: NotAction/NotResource are too easy to get wrong; list what is allowed",
         )
-    denies = [
-        st for st in policy["Statement"]
-        if st.get("Effect") == "Deny" and as_list(st.get("Action")) == ["*"] and "Condition" not in st
-    ]
-    denied = {r for st in denies for r in as_list(st.get("Resource", []))}
+        if st.get("Effect") != "Allow":
+            continue
+        for action in as_list(st.get("Action", [])):
+            check(action not in ("*", "iam:*"), f"{fname}.json: '{action}' is never allowed")
+            # A service-wide write on every resource must at least exclude the
+            # other environment's and the live environments' resources.
+            if is_service_wide_write(action) and "*" in as_list(st.get("Resource", [])):
+                cond = st.get("Condition", {}).get("StringNotEquals", {})
+                check(
+                    as_list(cond.get("aws:ResourceTag/Environment", [])) == [other]
+                    and set(as_list(cond.get("aws:ResourceTag/elasticbeanstalk:environment-name", [])))
+                    == LIVE_EB_ENVIRONMENTS,
+                    f"{fname}.json: '{action}' on '*' needs StringNotEquals aws:ResourceTag/Environment = {other} "
+                    f"and aws:ResourceTag/elasticbeanstalk:environment-name = the live environments",
+                )
+
+    # Live deployment: denied by name, and by tag where EB names resources
+    # unpredictably (instances, security groups, load balancers, Auto Scaling
+    # groups, the awseb-e-* CloudFormation stacks).
+    denied = {r for st in policy["Statement"] if st.get("Effect") == "Deny" and as_list(st.get("Action")) == ["*"]
+              and "Condition" not in st for r in as_list(st.get("Resource", []))}
     check(
         LIVE_RESOURCES <= denied,
-        f"{role}-permissions.json: must deny everything on the live resources; missing {sorted(LIVE_RESOURCES - denied)}",
+        f"{fname}.json: must deny everything on the live resources; missing {sorted(LIVE_RESOURCES - denied)}",
     )
-    # State: each role reads only its own environment's state file (the plan
-    # role reads both, because it plans both).
-    own = ["staging", "production"] if role == "plan" else [environment]
-    for env_name in ("staging", "production", "legacy"):
-        key = f"{STATE_BUCKET}/<PREFIX>/{env_name}/terraform.tfstate"
-        for action in ("s3:GetObject", "s3:PutObject", "s3:DeleteObject"):
-            expected = env_name in own and (action == "s3:GetObject" or role != "plan")
-            check(
-                allows(policy, action, key) == expected,
-                f"{role}-permissions.json: {action} on <PREFIX>/{env_name}/terraform.tfstate must be "
-                f"{'allowed' if expected else 'denied'}",
-            )
+    tag_denies = [
+        st for st in policy["Statement"]
+        if st.get("Effect") == "Deny" and as_list(st.get("Action")) == ["*"] and as_list(st.get("Resource")) == ["*"]
+        and set(as_list(st.get("Condition", {}).get("StringEquals", {})
+                        .get("aws:ResourceTag/elasticbeanstalk:environment-name", []))) == LIVE_EB_ENVIRONMENTS
+    ]
+    check(tag_denies, f"{fname}.json: must deny everything tagged with a live elasticbeanstalk:environment-name")
+    live_statements[name] = sorted(
+        json.dumps(st, sort_keys=True) for st in policy["Statement"]
+        if st.get("Sid") in ("DenyHandBuiltLiveDeployment", "DenyHandBuiltLiveEnvironmentResources",
+                             "DenyOidcProviderChanges")
+    )
+
+    # The shared OIDC provider: readable, never writable.
+    for action in OIDC_WRITES:
+        check(not allows(policy, action, OIDC_ARN), f"{fname}.json: must not allow {action} on the OIDC provider")
+        check(denies(policy, action, OIDC_ARN), f"{fname}.json: must explicitly deny {action}")
+
+    # The other environment: denied by name and by tag.
+    for what, arn in sample_arns(other).items():
+        check(denies(policy, "s3:GetObject", arn), f"{fname}.json: must deny the {other} {what} ({arn})")
     check(
-        not allows(policy, "s3:GetObject", f"{STATE_BUCKET}/<PREFIX>/terraform.tfstate"),
-        f"{role}-permissions.json: must not read the old project-wide state key",
+        any(st.get("Effect") == "Deny" and as_list(st.get("Action")) == ["*"]
+            and as_list(st.get("Condition", {}).get("StringEquals", {}).get("aws:ResourceTag/Environment", [])) == [other]
+            for st in policy["Statement"]),
+        f"{fname}.json: must deny everything tagged Environment={other}",
     )
-    if role == "plan":
-        # Read-only: nothing that creates, changes or deletes.
+
+    if kind == "plan":
+        own = sample_arns(environment)
+        check(allows(policy, "s3:GetObject", own["state"]), f"{fname}.json: must read its own state file")
         for st in policy["Statement"]:
             if st.get("Effect") != "Allow":
                 continue
             for action in as_list(st.get("Action", [])):
-                verb = action.split(":", 1)[-1]
-                check(
-                    re.match(r"(Describe|Get|List|Head)", verb) and action != "*",
-                    f"plan-permissions.json: '{action}' is not read-only",
-                )
+                check(re.match(r"(Describe|Get|List|Head)", action.split(":", 1)[-1]),
+                      f"{fname}.json: '{action}' is not read-only")
             for resource in as_list(st.get("Resource", [])):
                 check(
-                    not (resource.startswith("arn:aws:s3:::") and "/" in resource)
-                    or resource.startswith(f"{STATE_BUCKET}/<PREFIX>/"),
-                    f"plan-permissions.json: may read S3 objects only in the state bucket, found '{resource}'",
+                    not (resource.startswith("arn:aws:s3:::") and "/" in resource) or resource == own["state"],
+                    f"{fname}.json: may read one S3 object, its own state file; found '{resource}'",
                 )
-    else:
-        # No IAM change outside this environment's own names.
-        for target in ("role/<PREFIX>-terraform-apply-production", "role/<PREFIX>-terraform-plan",
-                       "role/aws-elasticbeanstalk-ec2-role", "role/<PREFIX>-other-x"):
-            check(
-                not allows(policy, "iam:PutRolePolicy", f"arn:aws:iam::<ACCOUNT_ID>:{target}"),
-                f"{role}-permissions.json: may change IAM roles only under <PREFIX>-{environment}-, not {target}",
-            )
-        check(
-            allows(policy, "iam:CreateRole", f"arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-{environment}-github-actions"),
-            f"{role}-permissions.json: must be able to manage this environment's own roles",
-        )
-deny_blocks = {
-    role: json.dumps(sorted(json.dumps(st, sort_keys=True) for st in load_policy(f"{role}-permissions")["Statement"]
-                            if st.get("Effect") == "Deny"))
-    for role in ROLES
-}
-check(len(set(deny_blocks.values())) == 1, "bootstrap/iam: every role must carry the same Deny statements")
+    elif kind == "apply":
+        own = sample_arns(environment)
+        for action in ("s3:GetObject", "s3:PutObject", "s3:DeleteObject"):
+            check(allows(policy, action, own["state"]), f"{fname}.json: {action} on its own state must be allowed")
+            check(not allows(policy, action, f"{STATE_BUCKET}/<PREFIX>/terraform.tfstate"),
+                  f"{fname}.json: {action} on the old project-wide state key must not be allowed")
+        # Name-scoped services: its own resources yes, anyone else's no.
+        for action, what in (("rds:DeleteDBInstance", "rds"), ("elasticache:DeleteServerlessCache", "cache"),
+                             ("elasticbeanstalk:TerminateEnvironment", "eb-env"),
+                             ("elasticbeanstalk:DeleteApplication", "eb-app"), ("s3:PutObject", "eb-version"),
+                             ("s3:DeleteBucket", "bucket")):
+            check(allows(policy, action, own[what]), f"{fname}.json: must allow {action} on its own {what}")
+            check(not allows(policy, action, own[what].replace(f"<PREFIX>-{environment}", "someone-else")),
+                  f"{fname}.json: {action} must be limited to <PREFIX>-{environment} names")
+        # The shared Elastic Beanstalk bucket: only this application's keys.
+        for key in ("humanlikebot/app.zip", "resources/environments/e-live/x", f"<PREFIX>-{other}/app.zip"):
+            check(not allows(policy, "s3:PutObject", f"{EB_BUCKET}/{key}"),
+                  f"{fname}.json: must not write '{key}' in the shared elasticbeanstalk bucket")
+        # IAM: only the actions Terraform needs, only on its own names, only
+        # under the boundary, attaching only the EB managed policies.
+        for st in policy["Statement"]:
+            if st.get("Effect") != "Allow":
+                continue
+            actions = as_list(st.get("Action", []))
+            for action in actions:
+                if not action.startswith("iam:") or re.match(r"iam:(Get|List)", action):
+                    continue
+                check("*" not in action, f"{fname}.json: IAM actions must be named, not '{action}'")
+                for resource in as_list(st.get("Resource", [])):
+                    check(
+                        re.fullmatch(rf"arn:aws:iam::<ACCOUNT_ID>:(role|instance-profile)/<PREFIX>-{environment}-\*", resource)
+                        or (action == "iam:CreateServiceLinkedRole" and ":role/aws-service-role/" in resource),
+                        f"{fname}.json: {action} may act only on <PREFIX>-{environment}-* roles and instance profiles, not '{resource}'",
+                    )
+                cond = st.get("Condition", {})
+                if action in ("iam:CreateRole", "iam:PutRolePermissionsBoundary"):
+                    check(cond.get("StringEquals", {}).get("iam:PermissionsBoundary") == boundary_arn(environment),
+                          f"{fname}.json: {action} needs iam:PermissionsBoundary = {boundary_arn(environment)}")
+                if action in ("iam:AttachRolePolicy", "iam:DetachRolePolicy"):
+                    arns = set(as_list(cond.get("ArnEquals", {}).get("iam:PolicyARN", [])))
+                    check(arns and arns <= EB_MANAGED_POLICIES,
+                          f"{fname}.json: {action} must be limited to the EB managed policies, got {sorted(arns)}")
+                if action == "iam:PassRole":
+                    services = set(as_list(cond.get("StringEquals", {}).get("iam:PassedToService", [])))
+                    check(services and services <= {"elasticbeanstalk.amazonaws.com", "ec2.amazonaws.com"},
+                          f"{fname}.json: iam:PassRole needs iam:PassedToService = EB / EC2")
+        check(allows(policy, "iam:CreateRole", own["role"]), f"{fname}.json: must be able to create its own roles")
+        for action in ("iam:DeleteRolePermissionsBoundary", "iam:CreatePolicyVersion", "iam:DeletePolicy",
+                       "iam:SetDefaultPolicyVersion"):
+            check(denies(policy, action, boundary_arn(environment)) or denies(policy, action, own["role"]),
+                  f"{fname}.json: must deny {action} (the boundary must stay in place)")
+        for target in ("role/<PREFIX>-terraform-apply-production", "role/<PREFIX>-terraform-plan-staging",
+                       "role/aws-elasticbeanstalk-ec2-role", f"role/<PREFIX>-{other}-github-actions"):
+            check(not allows(policy, "iam:PutRolePolicy", f"arn:aws:iam::<ACCOUNT_ID>:{target}"),
+                  f"{fname}.json: must not change {target}")
+    else:  # boundary: the most any role the stack creates can ever do
+        check(not allows(policy, "s3:GetObject", sample_arns(environment)["state"]),
+              f"{fname}.json: roles the stack creates must not read the Terraform state")
+        for action in ("iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy", "iam:CreatePolicyVersion",
+                       "iam:CreateUser", "iam:CreateAccessKey"):
+            check(not allows(policy, action, "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-x"),
+                  f"{fname}.json: roles the stack creates must not be able to {action}")
 
-# The pull-request plan runs only after a reviewer approves it in the `plan`
-# GitHub Environment, which is the subject its role trusts.
+check(len({json.dumps(v) for v in live_statements.values()}) == 1 and all(len(v) == 3 for v in live_statements.values()),
+      "bootstrap/iam: every policy must carry the same three live/OIDC Deny statements")
+
+# The pull-request plan runs only after a reviewer approves it in the
+# plan-<environment> GitHub Environment, the subject its role trusts.
 check(
-    "\n    environment: plan\n" in "\n" + plan_job,
-    "plan job: must run in the 'plan' GitHub Environment (required reviewers approve each run)",
+    "\n    environment: plan-${{ matrix.environment }}\n" in "\n" + plan_job,
+    "plan job: must run in the 'plan-<environment>' GitHub Environment (required reviewers approve each run)",
 )
+# Roles Terraform creates carry the boundary the apply role requires.
+for name, text in {"deploy-infrastructure.yml": deploy}.items():
+    for job_name, job in jobs_of(text).items():
+        check(
+            re.search(r"\n      TF_VAR_use_permissions_boundary: *'?true'?\n", job),
+            f"{name}: job '{job_name}' must set TF_VAR_use_permissions_boundary: true",
+        )
+
 readme = (TERRAFORM / "README.md").read_text()
 check("ReadOnlyAccess" not in readme, "README.md: the plan role must not get ReadOnlyAccess")
 check(":pull_request" not in readme, "README.md: no role may trust the pull_request subject")
