@@ -779,7 +779,8 @@ for name, policy in policies.items():
 
     # The shared OIDC provider: readable, never writable.
     for action in OIDC_WRITES:
-        check(not allows(policy, action, OIDC_ARN), f"{fname}.json: must not allow {action} on the OIDC provider")
+        check(not matching(policy, "Allow", action, OIDC_ARN),
+              f"{fname}.json: no statement may allow {action} on the OIDC provider (even if a Deny overrides it)")
         check(denies(policy, action, OIDC_ARN), f"{fname}.json: must explicitly deny {action}")
 
     # The other environment: denied by name and by tag.
