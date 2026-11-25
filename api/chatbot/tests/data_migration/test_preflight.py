@@ -352,6 +352,34 @@ def test_quiesced_check_needs_process_privilege(same_or_newer_target, tmp_path):
     assert "grant PROCESS" in failed["detail"]
 
 
+def test_super_without_process_is_not_enough_to_see_sessions(
+    same_or_newer_target, tmp_path
+):
+    # SUPER alone lists only the account's own session in PROCESSLIST.
+    admin(
+        SRC,
+        "DROP USER IF EXISTS 'mig_super'@'%';"
+        f"CREATE USER 'mig_super'@'%' IDENTIFIED BY '{SRC_PASSWORD}';"
+        f"GRANT ALL PRIVILEGES ON {SRC_DB}.* TO 'mig_super'@'%';"
+        "GRANT SUPER ON *.* TO 'mig_super'@'%'",
+    )
+    idle = _background_sql("DO SLEEP(6);", SRC_DB)
+    try:
+        result, report = preflight(
+            tmp_path,
+            "--require-quiesced",
+            "--quiesce-seconds",
+            "1",
+            env=tool_env(MIG_SOURCE_USER="mig_super"),
+        )
+    finally:
+        idle.wait()
+        admin(SRC, "DROP USER IF EXISTS 'mig_super'@'%'")
+    assert result.returncode == 1, result.stdout + result.stderr
+    failed = check(report, "source_quiesced")
+    assert "grant PROCESS" in failed["detail"], failed["detail"]
+
+
 def test_process_held_through_an_active_role_counts(same_or_newer_target, tmp_path):
     # As the RDS master user holds part of its privileges (rds_superuser_role).
     default = "TO" if flavour(SRC) == "mysql" else "FOR"

@@ -455,8 +455,13 @@ def test_grant_lines_are_read_fail_closed(monkeypatch):
     dbcopy = load_tool()
     conn = dbcopy.Conn("source", "h", "1", "u", "", "mig_src", "")
 
-    def held(*lines, needed=("SELECT", "TRIGGER", "PROCESS")):
-        monkeypatch.setattr(dbcopy, "query", lambda _c, _s: [[x] for x in lines])
+    def held(*lines, needed=("SELECT", "TRIGGER", "PROCESS"), partial_revokes="0"):
+        def query(_conn, sql):
+            if "partial_revokes" in sql:
+                return [[partial_revokes]]
+            return [[x] for x in lines]
+
+        monkeypatch.setattr(dbcopy, "query", query)
         return [p for p in needed if p not in dbcopy.missing_privileges(conn, needed)]
 
     assert held("GRANT PROCESS ON *.* TO `u`@`%`") == ["PROCESS"]
@@ -488,3 +493,37 @@ def test_grant_lines_are_read_fail_closed(monkeypatch):
         )
         == []
     )
+    # An object name containing " ON *.* TO " must not make a table, column
+    # or routine grant read as global.
+    assert (
+        held("GRANT SELECT, SELECT (`x`) ON `other`.`a ON *.* TO b` TO `u3`@`%`") == []
+    )
+    assert (
+        held(
+            "GRANT EXECUTE, ALTER ROUTINE ON PROCEDURE `other`.`p ON *.* TO q` TO `u`@`%`",
+            needed=("EXECUTE",),
+        )
+        == []
+    )
+    # MySQL with partial_revokes=ON reads database grants literally.
+    assert held("GRANT SELECT ON `mig%`.* TO `r`", partial_revokes="1") == []
+    assert held("GRANT SELECT ON `mig\\_src`.* TO `r`", partial_revokes="1") == [
+        "SELECT"
+    ]
+    # A lone trailing backslash matches nothing.
+    assert held("GRANT SELECT ON `mig_src\\`.* TO `r`") == []
+
+
+def test_an_escaped_underscore_is_not_a_wildcard(monkeypatch):
+    dbcopy = load_tool()
+    conn = dbcopy.Conn("source", "h", "1", "u", "", "migXsrc", "")
+    monkeypatch.setattr(
+        dbcopy,
+        "query",
+        lambda _c, sql: (
+            [["0"]]
+            if "partial_revokes" in sql
+            else [["GRANT SELECT ON `mig\\_src`.* TO `r`"]]
+        ),
+    )
+    assert dbcopy.missing_privileges(conn, ["SELECT"]) == ["SELECT"]
