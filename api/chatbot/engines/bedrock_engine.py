@@ -195,6 +195,10 @@ class BedrockEngine(BaseEngine):
                 block.get("text", "")
                 for block in response["output"]["message"]["content"]
             ).strip()
+            if not response_text:
+                # E.g. thinking used up maxTokens. Fail like any other engine
+                # error rather than save an empty reply to the conversation.
+                raise RuntimeError("model returned no text")
 
             # Create response message
             response_message = ChatMessage(
@@ -229,8 +233,10 @@ class BedrockEngine(BaseEngine):
             for event in response["stream"]:
                 if "contentBlockDelta" in event:
                     # Extract text chunk from the delta
-                    text_chunk = event["contentBlockDelta"]["delta"]["text"]
-                    yield text_chunk
+                    # Reasoning deltas carry no "text"; skip them.
+                    text_chunk = event["contentBlockDelta"]["delta"].get("text")
+                    if text_chunk:
+                        yield text_chunk
 
         except Exception as e:
             raise RuntimeError(f"Bedrock streaming API call failed: {e}")
