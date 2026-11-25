@@ -82,8 +82,12 @@ class ListBotsAPIView(View):
             if not name or not model_type or not model_id:
                 return JsonResponse({"error": "Missing required fields."}, status=400)
 
+            # Retired models stay on the bots that have them, never on new ones.
             ai_model = Model.objects.filter(
-                provider__name=model_type, model_id=model_id
+                provider__name=model_type,
+                model_id=model_id,
+                is_active=True,
+                provider__is_active=True,
             ).first()
             if not ai_model:
                 return JsonResponse(

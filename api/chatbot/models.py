@@ -226,6 +226,11 @@ class Model(models.Model):
     def __str__(self):
         return f"{self.provider.display_name} - {self.display_name}"
 
+    @property
+    def retired(self):
+        """Not offered for new bots; bots already on it keep it (frozen)."""
+        return not (self.is_active and self.provider.is_active)
+
     class Meta:
         unique_together = ["provider", "model_id"]
         ordering = ["provider__name", "display_name"]

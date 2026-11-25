@@ -99,13 +99,20 @@ def _form_post(client, url, **changes):
     return client.post(url, data)
 
 
+def _offered(form, models):
+    """Which of the fixture's models the form offers (others may exist)."""
+    return {k for k, m in models.items() if m in _choices(form)}
+
+
 def test_new_bot_is_offered_only_active_models(models):
-    assert _choices(BotAdminForm()) == {models["active"]}
+    form = BotAdminForm()
+    assert _offered(form, models) == {"active"}
+    assert all(not m.retired for m in _choices(form))
 
 
 def test_bot_on_a_retired_model_is_offered_it_labelled(models, frozen_bot):
     form = BotAdminForm(instance=frozen_bot)
-    assert _choices(form) == {models["active"], models["retired"]}
+    assert _offered(form, models) == {"active", "retired"}
     labels = dict(
         (str(value), label) for value, label in form.fields["ai_model"].choices
     )
