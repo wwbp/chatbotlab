@@ -92,6 +92,9 @@ jobs:
   deploy:
     name: Deploy AWS infrastructure
     runs-on: ubuntu-latest
+    # The GitHub Environment of the same name: its protection rules
+    # (reviewers, deployment branches) apply to this run.
+    environment: ${{ inputs.environment }}
     env:
       DOMAIN_NAME: ${{ secrets.DOMAIN_NAME }}
 
