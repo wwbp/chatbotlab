@@ -152,6 +152,9 @@ jobs:
           MIGTEST_TARGET_HOST: 127.0.0.1
           MIGTEST_TARGET_PORT: "3307"
           MIGTEST_ROOT_PASSWORD: ci_root
+          # Let test_verify_cold_start restart a server, as a snapshot restore does.
+          MIGTEST_SOURCE_RESTART: docker restart ${{ job.services.source.id }}
+          MIGTEST_TARGET_RESTART: docker restart ${{ job.services.target.id }}
         run: cd api && pipenv run pytest chatbot/tests/data_migration -v -rs
 
   frontend-lint:

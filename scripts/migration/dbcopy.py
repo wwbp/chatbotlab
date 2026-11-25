@@ -224,7 +224,8 @@ def _spawn(conn, sql, writable=False):
         # year) with the app's own statements queued behind us.
         preamble += "SET SESSION lock_wait_timeout = 10;"
     if conn.version and conn.flavour == "mysql":
-        # MySQL 8 caches information_schema statistics (AUTO_INCREMENT) for a day.
+        # MySQL 8 caches information_schema statistics (AUTO_INCREMENT) for a
+        # day. (A table not yet opened is still stale: see _tables.)
         preamble += "SET SESSION information_schema_stats_expiry = 0;"
     # In --init-command, which the client runs on connecting: nothing on
     # stdin can come before it, and it overrides any init-command in a file.
@@ -407,13 +408,36 @@ def connect_both(args):
 _HERE = "TABLE_SCHEMA = DATABASE()"
 
 
-def _rows(conn, columns, table, where=_HERE, order=""):
+def _rows(conn, columns, table, where=_HERE, order="", before=""):
     names = [c.split(" AS ")[-1].split(".")[-1].lower() for c in columns]
     sql = f"SELECT {', '.join(columns)} FROM information_schema.{table} WHERE {where}"
     return [
         dict(zip(names, row, strict=True))
-        for row in query(conn, sql + (f" ORDER BY {order}" if order else ""))
+        for row in query(conn, before + sql + (f" ORDER BY {order}" if order else ""))
     ]
+
+
+def _tables(conn, columns, order=""):
+    """information_schema.TABLES rows, each base table opened first.
+
+    Until MySQL 8 opens a table after a server start (a snapshot restore is
+    one), TABLES.AUTO_INCREMENT shows the persisted counter, which is the last
+    value used (one below the next), or NULL if none was ever used, whatever
+    information_schema_stats_expiry says. Opening it (any SELECT, even
+    LIMIT 0) loads the real counter, the one the next INSERT gets, into the
+    server-wide InnoDB dictionary cache (any session's open would do, and
+    eviction from it is server-wide too), so each table is opened
+    immediately before the read, in the same statement batch. An error
+    opening a table is the read's error. MariaDB opens tables to answer
+    anyway. Nothing is computed: the value read is the server's own.
+    """
+    names = query(
+        conn,
+        f"SELECT TABLE_NAME FROM information_schema.TABLES WHERE {_HERE} "
+        "AND TABLE_TYPE = 'BASE TABLE'",
+    )
+    opening = "".join(f"SELECT 1 FROM {q(name)} LIMIT 0;" for (name,) in names)
+    return _rows(conn, columns, "TABLES", order=order, before=opening)
 
 
 def read_schema(conn):
@@ -438,7 +462,7 @@ def read_schema(conn):
         "triggers": {},
         "events": {},
     }
-    for row in _rows(
+    for row in _tables(
         conn,
         [
             "TABLE_NAME",
@@ -448,7 +472,6 @@ def read_schema(conn):
             "ROW_FORMAT",
             "AUTO_INCREMENT",
         ],
-        "TABLES",
     ):
         if row["table_type"] == "VIEW":
             continue  # read below, from information_schema.VIEWS
@@ -876,11 +899,10 @@ def server_info(conn):
 
 def table_activity(conn):
     """(everything listed, base tables) with exact row counts on the latter."""
-    listed = _rows(
+    listed = _tables(
         conn,
         ["TABLE_NAME", "TABLE_TYPE", "ENGINE", "AUTO_INCREMENT", "UPDATE_TIME",
          "DATA_LENGTH + INDEX_LENGTH AS bytes"],
-        "TABLES",
         order="TABLE_NAME",
     )  # fmt: skip
     base = [r for r in listed if r["table_type"] == "BASE TABLE"]
