@@ -1183,13 +1183,26 @@ check("aws rds wait db-instance-available" in rds, "destroy job: must wait for t
 check("DBInstanceNotFound" in rds, "destroy job: only DBInstanceNotFound may mean 'no database'")
 
 # The data bucket is backed up, and the backup verified, before anything is
-# emptied; and that happens only after the database step succeeded.
+# changed; deletion protection comes off only after that, and the buckets are
+# emptied only after it is off.
 backup = destroy_step("Back up the data bucket")
 order = [destroy_titles.index(t) if t in destroy_titles else -1 for t in (
-    "name: Disable RDS deletion protection", "name: Back up the data bucket", "name: Empty S3 buckets",
+    "name: Back up the data bucket", "name: Disable RDS deletion protection", "name: Empty S3 buckets",
     "name: Destroy infrastructure")]
 check(-1 not in order and order == sorted(order),
-      f"destroy job: order must be RDS protection, back up, empty, destroy; got {destroy_titles}")
+      f"destroy job: order must be back up, RDS protection off, empty, destroy; got {destroy_titles}")
+# If the run fails after it turned protection off, it turns it back on.
+check(re.search(r"\n        id: rds\n", rds) and 'echo "unprotected=true" >> "$GITHUB_OUTPUT"' in rds,
+      "destroy job: the RDS step (id: rds) must record unprotected=true when it turned protection off")
+reprotect = destroy_step("Re-enable RDS deletion protection")
+check(
+    re.search(r"\n        if: failure\(\) && steps\.rds\.outputs\.unprotected == 'true'\n", reprotect)
+    and "--deletion-protection" in reprotect and "--no-deletion-protection" not in reprotect
+    and destroy_titles.index("name: Re-enable RDS deletion protection") > destroy_titles.index("name: Destroy infrastructure")
+    if reprotect and "name: Destroy infrastructure" in destroy_titles else False,
+    "destroy job: needs a 'Re-enable RDS deletion protection' step after destroy, if: failure() && "
+    "steps.rds.outputs.unprotected == 'true', running modify-db-instance --deletion-protection",
+)
 check(
     re.search(r'BACKUP="s3://\$\{STATE_BUCKET\}/\$\{PREFIX\}/\$\{ENVIRONMENT\}/backups/', backup),
     "destroy job: the backup must go to <state bucket>/<prefix>/<environment>/backups/<date>/",
