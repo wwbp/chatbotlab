@@ -98,7 +98,7 @@ def test_every_active_model_is_called_once_and_reported(capsys):
 
 @pytest.mark.django_db
 def test_a_failing_model_is_reported_and_exits_non_zero(capsys):
-    made, error = _run({"gpt-4.1": FakeEngine(error=RuntimeError("boom\ntrace"))})
+    _, error = _run({"gpt-4.1": FakeEngine(error=RuntimeError("boom\ntrace"))})
     out = capsys.readouterr().out
     assert error is not None
     line = next(line for line in out.splitlines() if "gpt-4.1" in line)
@@ -185,7 +185,7 @@ def test_gpt5_mini_request_carries_no_params_it_rejects():
     [m for m in BEDROCK_CURATED if m != "us.anthropic.claude-sonnet-4-6"],
 )
 def test_bedrock_models_that_reject_sampling_params_get_none(model_id):
-    config = BedrockEngine(model_id=model_id)._build_inference_config()
+    config = BedrockEngine(model_id=model_id)._build_inference_config()  # noqa: SLF001
     assert "temperature" not in config
     assert "topP" not in config
 
