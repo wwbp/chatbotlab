@@ -1107,9 +1107,26 @@ check(
 readme = (TERRAFORM / "README.md").read_text()
 check(":pull_request" not in readme, "README.md: no role may trust the pull_request subject")
 check(
-    re.search(r"- `production`: \*\*Required reviewers\*\*, \*\*Prevent self-review\*\* ticked", readme),
-    "README.md: production needs required reviewers with 'Prevent self-review'",
+    re.search(r"- `production`: \*\*Required reviewers\*\*[^\n]*\*\*Deployment branches\*\*: `main` only", readme)
+    and re.search(r"- `test`: \*\*Required reviewers\*\*", readme),
+    "README.md: the production Environment needs required reviewers and main only; test needs required reviewers",
 )
+# The owner approves their own runs: no document may tell them to switch on
+# "Prevent self-review" (it would lock them out of their own deploys).
+for doc in (TERRAFORM / "README.md", ROOT / "docs" / "deployment" / "technical-reference.rst",
+            ROOT / "docs" / "deployment" / "for-researchers.rst"):
+    for line in doc.read_text().splitlines():
+        check("self-review" not in line.lower() or re.search(r"\b(off|not|unticked)\b", line),
+              f"{doc.name}: must not tell anyone to enable Prevent self-review: '{line.strip()}'")
+# The owner's one-time setup: the account secrets, and what to delete.
+for needle in ("TF_PROD_ACCOUNT_ID", "TF_TEST_ACCOUNT_ID", "`plan-staging`", "`plan-production`",
+               "`TF_PLAN_ROLE_ARN`", "`TF_APPLY_ROLE_ARN`", "bootstrap/iam/apply-test-trust.json"):
+    check(needle in readme, f"README.md: the setup steps must name {needle}")
+check("plan-staging" not in reference and "TF_APPLY_ROLE_ARN" not in reference,
+      "technical-reference.rst: describes the removed pull-request plan or TF_APPLY_ROLE_ARN")
+runbook = (ROOT / "docs" / "deployment" / "data-migration.rst").read_text()
+check("test stack" in runbook and "Follow it for **staging first**" not in runbook,
+      "data-migration.rst: the rehearsal runs on the test stack, not on a Terraform staging stack")
 check(
     not re.search(r"Deployment branches\*\*[^.]*`staging`[^.]*production|production[^.]*Deployment branches\*\*[^.]*`staging`", readme),
     "README.md: production may deploy only from main",
