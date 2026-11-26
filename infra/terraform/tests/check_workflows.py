@@ -1116,7 +1116,10 @@ check(
 )
 check("bootstrap/iam/" in readme, "README.md: setup must point at the committed policies in bootstrap/iam/")
 
-# --- Destroy: manual, one named environment, production needs a second yes ---
+# --- Destroy: manual, one named environment; production needs every yes ----
+# The test stack needs only its typed name and the test Environment's
+# approval. Production needs the typed confirmations, allow_production and
+# main, and is backed up first.
 
 destroy_triggers = destroy.split("\njobs:\n", 1)[0]
 check(
@@ -1143,9 +1146,12 @@ check("\n    environment:" not in "\n" + validate_job, "destroy validate job: mu
 check("role-to-assume" not in validate_job, "destroy validate job: must not sign in to AWS")
 for needle, why in (
     ('"$ENVIRONMENT" != "test" && "$ENVIRONMENT" != "production"', "reject any environment other than test or production"),
-    ('"$CONFIRM_DESTROY" != "destroy $ENVIRONMENT"', "require the typed confirmation 'destroy <environment>'"),
+    ('"$ENVIRONMENT" == "production" && "$CONFIRM_DESTROY" != "destroy production"',
+     "require the typed confirmation 'destroy production' for production"),
     ('"$ENVIRONMENT" == "production" && "$ALLOW_PRODUCTION" != "true"', "refuse production unless allow_production is set"),
-    ('"$CONFIRM_DATA" != "destroy data"', "require the typed confirmation 'destroy data'"),
+    ('"$ENVIRONMENT" == "production" && "$CONFIRM_DATA" != "destroy data"',
+     "require the typed confirmation 'destroy data' for production"),
+    (MAIN_ONLY, "refuse production unless the run is on main"),
 ):
     check(needle in validate_job, f"destroy validate job: must {why}")
     # ...and each refusal must count: the if-block sets fail=1.
@@ -1209,6 +1215,11 @@ check("DBInstanceNotFound" in rds, "destroy job: only DBInstanceNotFound may mea
 # changed; deletion protection comes off only after that, and the buckets are
 # emptied only after it is off.
 backup = destroy_step("Back up the data bucket")
+# Production's data bucket is always backed up; the test stack's never is.
+check(
+    re.search(r"\n        if: (\$\{\{ *)?inputs\.environment == 'production'( *\}\})? *\n", "\n" + backup),
+    "destroy job: the backup step must run exactly when inputs.environment == 'production'",
+)
 order = [destroy_titles.index(t) if t in destroy_titles else -1 for t in (
     "name: Back up the data bucket", "name: Disable RDS deletion protection", "name: Empty S3 buckets",
     "name: Destroy infrastructure")]
@@ -1240,6 +1251,10 @@ check(
     "BACKUP: ${{ steps.backup.outputs.location }}" in summary and "SNAPSHOT: ${{ steps.snapshot.outputs.name }}" in summary
     and '"$BACKUP"' in summary and '"$SNAPSHOT"' in summary,
     "destroy job: the summary must name the data backup and the RDS final snapshot",
+)
+check(
+    "ENVIRONMENT: ${{ inputs.environment }}" in summary and "test stack is destroyed without a backup" in summary,
+    "destroy job: the summary must say plainly that the test stack is destroyed without a backup",
 )
 check(
     "final_snapshot_identifier" in destroy_step("Read the RDS final snapshot name"),
