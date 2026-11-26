@@ -50,8 +50,12 @@ name: Deploy Infrastructure
 #                           <TF_PROJECT_PREFIX>-terraform-apply-<environment>
 #                           in the account of the chosen environment, and
 #                           refuses credentials from any other account.
+#
+#   Environment secrets (Settings → Environments → production)
 #     GH_PAT                Token that can write repository secrets. Needed
-#                           only when write_deploy_secrets is ticked.
+#                           only when write_deploy_secrets is ticked
+#                           (production only). Never a repository secret:
+#                           any workflow run in the repository could read it.
 #
 #   Environment secrets (Settings → Environments → test / production)
 #     DB_PASSWORD           Database password (letters + numbers only).

@@ -327,13 +327,14 @@ In GitHub (**Settings**):
    `DB_PASSWORD`, `ADMIN_PANEL_PASSWORD`, and `OPENAI_API_KEY` and/or
    `ANTHROPIC_API_KEY`. Optional: `SURVEY_INGEST_TOKEN`. The test stack uses
    its own LLM API keys, scoped to it (a separate project or key with a low
-   spending limit), never production's.
+   spending limit), never production's. In `production` only: `GH_PAT`, if
+   you use `write_deploy_secrets` (it can write repository secrets, so keep
+   it out of the repository secrets, where any workflow run could read it).
 6. **Repository secrets**: `TF_PROJECT_PREFIX`, `TF_PROD_ACCOUNT_ID`,
-   `TF_TEST_ACCOUNT_ID`. `GH_PAT` only if you use `write_deploy_secrets`
-   (production only).
+   `TF_TEST_ACCOUNT_ID`.
 7. **Delete what is left of the old setup**: the Environments
    `plan-staging` and `plan-production`, the secrets `TF_PLAN_ROLE_ARN` and
-   `TF_APPLY_ROLE_ARN` (wherever they were set), and, in AWS, the role
+   `TF_APPLY_ROLE_ARN` (wherever they were set), a repository-level `GH_PAT`, and, in AWS, the role
    `<PREFIX>-terraform-plan-staging` and any `<PREFIX>-terraform-apply-staging`
    role or `<PREFIX>-terraform-boundary-staging` policy. Keep the plain
    `AWS_*` repository secrets: `staging.yml` still deploys the hand-built dev

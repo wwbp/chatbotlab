@@ -305,7 +305,7 @@ Django's async (ASGI) request handling uses ``thread_sensitive=True`` for databa
 
 The GitHub Personal Access Token has an expiration date. When it expires, the Deploy Infrastructure workflow will fail at the "Write deployment secrets" step.
 
-**Fix:** generate a new token, update the ``GH_PAT`` secret in GitHub Settings, and re-run the workflow.
+**Fix:** generate a new token, update the ``GH_PAT`` secret of the ``production`` GitHub Environment (an Environment secret, not a repository secret), and re-run the workflow.
 
 **Note:** expiry only affects re-running the infra workflow. Day-to-day application deploys (push to ``main``) use the OIDC IAM role and are not affected by GH_PAT expiry.
 
