@@ -239,6 +239,20 @@ check(
     "fail=1" in block(block(deploy, r"name: Check required secrets"), re.escape(f"if [[ {MAIN_ONLY} ]]; then")),
     f"deploy-infrastructure.yml: 'Check required secrets' must set fail=1 when [[ {MAIN_ONLY} ]]",
 )
+# write_deploy_secrets for test is refused before anything touches AWS.
+check(
+    "fail=1" in block(block(deploy, r"name: Check required secrets"),
+                      re.escape('if [[ "$WRITE_DEPLOY_SECRETS" == "true" && "$ENVIRONMENT" != "production" ]]; then')),
+    "deploy-infrastructure.yml: 'Check required secrets' must set fail=1 for write_deploy_secrets outside production",
+)
+# The old project-wide state key describes a production stack: stop until it
+# has been moved, or an empty per-environment state would build a second copy.
+bootstrap_step = block(deploy, r"- name: Bootstrap Terraform state backend")
+check(
+    'legacy=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "${TF_PROJECT_PREFIX}/terraform.tfstate"' in bootstrap_step
+    and "exit 1" in block(bootstrap_step, re.escape('if [[ "$legacy" != "0" ]]; then')),
+    "deploy-infrastructure.yml: the bootstrap step must exit 1 while the old <prefix>/terraform.tfstate exists",
+)
 choices = re.search(r"\n      environment:\n(?:        .*\n)*?        options:\n((?:          - .*\n)+)", deploy)
 check(
     choices and sorted(re.findall(r"- (\w+)", choices.group(1))) == ["production", "test"],
@@ -375,7 +389,10 @@ def pr_access_problems(name, seen=()):
     return problems
 
 
-pr_workflows = [n for n, t in all_workflows.items() if re.search(r"\bpull_request(_target)?\b", triggers_of(t))]
+# workflow_run and issue_comment count too: both can be set off by a pull
+# request and are tempted to check out its code with the base's secrets.
+pr_workflows = [n for n, t in all_workflows.items()
+                if re.search(r"\b(pull_request(_target)?|workflow_run|issue_comment)\b", triggers_of(t))]
 check("ci.yml" in pr_workflows, "ci.yml must run on pull requests (the offline checks)")
 for name in pr_workflows:
     problems = pr_access_problems(name)
@@ -1292,6 +1309,24 @@ check(
     and re.search(r'if \[\[ "\$src" != "\$dst" \]\]; then\n(?:.*\n)*?\s+exit 1\n', backup),
     "destroy job: the backup step must compare object count and total size and exit 1 on a mismatch",
 )
+# The backup is compared with the source, not the source with itself.
+check(
+    'aws s3 sync "s3://$DATA" "$BACKUP/"' in backup and '\n          src=$(totals "s3://$DATA")\n' in backup
+    and '\n          dst=$(totals "$BACKUP/")\n' in backup,
+    "destroy job: the backup must sync s3://$DATA to $BACKUP/, with src from s3://$DATA and dst from $BACKUP/",
+)
+# No state for this environment: stop before anything is emptied.
+locate_state = destroy_step("Locate Terraform state bucket")
+check(
+    "exit 1" in block(locate_state, re.escape(
+        'if ! aws s3api head-object --bucket "$BUCKET" --key "${TF_PROJECT_PREFIX}/${ENVIRONMENT}/terraform.tfstate" >/dev/null; then')),
+    "destroy job: must exit 1 when the environment's state file is missing",
+)
+# Any RDS error other than DBInstanceNotFound stops the run.
+check(
+    re.search(r'\n {12}fi\n {12}echo "\$PROTECTED"\n {12}exit 1\n', rds),
+    "destroy job: the RDS step must exit 1 on any describe error other than DBInstanceNotFound",
+)
 summary = destroy_step("Write summary")
 check(
     "BACKUP: ${{ steps.backup.outputs.location }}" in summary and "SNAPSHOT: ${{ steps.snapshot.outputs.name }}" in summary
@@ -1309,6 +1344,11 @@ check(
 for line in summary.splitlines():
     check("OIDC provider" not in line or "kept" in line,
           f"destroy job: the summary must not claim the shared GitHub OIDC provider was deleted: '{line.strip()}'")
+
+# The owner's choice: one code owner for everything.
+codeowners = [l.strip() for l in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
+              if l.strip() and not l.lstrip().startswith("#")] if (ROOT / ".github" / "CODEOWNERS").exists() else []
+check(codeowners == ["* @1xabhay"], f".github/CODEOWNERS must be exactly '* @1xabhay', got {codeowners}")
 
 # --- Stale files and statements ----------------------------------------------
 

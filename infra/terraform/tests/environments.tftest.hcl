@@ -104,6 +104,29 @@ run "production_keeps_its_data" {
   }
 }
 
+# Production's database leaves a named final snapshot when deleted. The name
+# carries a random suffix, given a fixed value here so the plan knows it.
+run "production_names_its_final_snapshot" {
+  command = plan
+
+  override_resource {
+    target          = random_id.final_snapshot_suffix
+    override_during = plan
+    values = {
+      hex = "0a1b2c3d"
+    }
+  }
+
+  variables {
+    environment = "production"
+  }
+
+  assert {
+    condition     = aws_db_instance.main.final_snapshot_identifier != null && aws_db_instance.main.final_snapshot_identifier == "chatbotlab-production-final-snapshot-0a1b2c3d"
+    error_message = "The production database must name a final snapshot."
+  }
+}
+
 # The defaults are production's, so a stack that sets nothing keeps its data.
 run "defaults_keep_data" {
   command = plan
