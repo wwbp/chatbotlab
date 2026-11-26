@@ -169,7 +169,7 @@ After infrastructure is provisioned, GitHub Actions assumes an IAM role via OIDC
 The trust policy on the GitHub Actions IAM role restricts assumption to:
 
 - OIDC issuer: ``token.actions.githubusercontent.com``
-- Subject: ``repo:{github_org}/{github_repo}:*`` (scoped to the exact fork)
+- Subject, exactly (no wildcard): ``repo:{github_org}/{github_repo}:ref:refs/heads/main`` for production (``production.yml`` on ``main``), ``repo:{github_org}/{github_repo}:environment:test`` for the test stack; each also in the immutable-ID form ``repo:{org}@{org_id}/{repo}@{repo_id}:...``. A workflow a pull request adds cannot assume it.
 
 ``deploy-infrastructure.yml`` and ``destroy-infrastructure.yml`` also sign in through OIDC, with an apply role per environment that a person creates one time from the policies in ``infra/terraform/bootstrap/iam/``: ``<PREFIX>-terraform-apply-production`` in the production account and ``<PREFIX>-terraform-apply-test`` in the lab's separate TEST account, each with a permissions boundary for the roles its stack creates. The production role carries an explicit Deny on the hand-built live resources in the same account and on any change to the GitHub OIDC provider. No workflow uses long-lived AWS keys.
 

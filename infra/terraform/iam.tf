@@ -209,6 +209,10 @@ locals {
   github_oidc_provider_arn = var.create_github_oidc_provider ? aws_iam_openid_connect_provider.github_actions[0].arn : "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/token.actions.githubusercontent.com"
 }
 
+locals {
+  deploy_subject_context = var.environment == "production" ? "ref:refs/heads/main" : "environment:test"
+}
+
 # The IAM role that GitHub Actions workflows assume during deployments
 resource "aws_iam_role" "github_actions_deployment" {
   name                 = "${local.name_prefix}-github-actions"
@@ -226,32 +230,24 @@ resource "aws_iam_role" "github_actions_deployment" {
       Condition = {
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-        }
-        StringLike = {
-          # Both subject formats are listed because GitHub issues two.
+          # Exactly one caller, never a wildcard: a workflow added by a pull
+          # request could otherwise ask for a token and deploy with this role.
+          #   production: pushes and manual runs on main (production.yml)
+          #   test:       jobs in the `test` GitHub Environment (approved)
           #
-          # The classic claim is "repo:<org>/<repo>:ref:refs/heads/<branch>".
-          # GitHub now also issues subjects carrying immutable numeric IDs:
-          # "repo:<org>@<org_id>/<repo>@<repo_id>:ref:refs/heads/<branch>",
-          # so that a trust policy cannot be satisfied by re-creating a
-          # deleted org or repo under the same name.
-          #
-          # A pattern written only against the classic format stops matching
-          # the moment the immutable claim is issued, and every deploy fails
-          # with "Not authorized to perform sts:AssumeRoleWithWebIdentity" —
-          # which reads like a permissions problem rather than a claim-format
-          # one. That outage happened here; keep both patterns.
-          #
-          # Set github_org_id / github_repo_id to enable the immutable pattern.
-          # Find them with:
-          #   gh api orgs/<org> --jq .id
-          #   gh api repos/<org>/<repo> --jq .id
-          #
-          # Tighten either pattern to a single branch (for example
-          # ":ref:refs/heads/main") if only main should reach production.
+          # Both subject formats are listed because GitHub issues two: the
+          # classic "repo:<org>/<repo>:<context>" and, with immutable numeric
+          # IDs, "repo:<org>@<org_id>/<repo>@<repo_id>:<context>" (so a trust
+          # policy cannot be satisfied by re-creating a deleted org or repo
+          # under the same name). A policy written only against the classic
+          # format stops matching once the immutable claim is issued, and
+          # every deploy fails with "Not authorized to perform
+          # sts:AssumeRoleWithWebIdentity". That outage happened here; keep
+          # both. Find the IDs with gh api orgs/<org> --jq .id and
+          # gh api repos/<org>/<repo> --jq .id.
           "token.actions.githubusercontent.com:sub" = compact([
-            "repo:${var.github_org}/${var.github_repo}:*",
-            var.github_org_id != "" && var.github_repo_id != "" ? "repo:${var.github_org}@${var.github_org_id}/${var.github_repo}@${var.github_repo_id}:*" : "",
+            "repo:${var.github_org}/${var.github_repo}:${local.deploy_subject_context}",
+            var.github_org_id != "" && var.github_repo_id != "" ? "repo:${var.github_org}@${var.github_org_id}/${var.github_repo}@${var.github_repo_id}:${local.deploy_subject_context}" : "",
           ])
         }
       }
