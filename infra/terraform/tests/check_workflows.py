@@ -23,8 +23,9 @@ def check(ok, message):
 
 
 # A terraform subcommand, allowing global options in between
-# (`terraform -chdir=infra/terraform apply`).
-TF = r"\bterraform\b[^\n|;&]*?\b"
+# (`terraform -chdir=infra/terraform apply`), but not a name such as
+# `<prefix>-terraform-apply-production`.
+TF = r"(?<![\w-])terraform\s[^\n|;&]*?\b"
 
 
 def uncommented(path):
@@ -82,9 +83,8 @@ for name, text in infra_workflows.items():
     check(values, f"{name}: TF_VAR_environment is not set")
     for value in values:
         check(
-            "inputs.environment" in value or "matrix.environment" in value,
-            f"{name}: TF_VAR_environment must come from inputs.environment (or the "
-            f"plan job's matrix), got '{value.strip()}'",
+            value.strip() == "${{ inputs.environment }}",
+            f"{name}: TF_VAR_environment must come from inputs.environment, got '{value.strip()}'",
         )
     check(
         re.search(r"\n      environment:\n(?:        .*\n)*?        required: true", text),
@@ -115,7 +115,7 @@ check(
     "destroy-infrastructure.yml: bucket emptying must be limited to <prefix>-<environment>-",
 )
 check(
-    "-production-" not in destroy and "-staging-" not in destroy,
+    not re.search(r"-(production|staging|test)-", destroy),
     "destroy-infrastructure.yml: resource names must not hardcode an environment",
 )
 
@@ -131,9 +131,7 @@ check(
 )
 for name, text in {**all_workflows, "setup.sh": setup_sh}.items():
     check("use_lockfile=false" not in text, f"{name}: must not switch the state lock off")
-    # The one exception is the pull-request plan, checked further down.
-    if name != "deploy-infrastructure.yml":
-        check("-lock=false" not in text, f"{name}: must not run terraform without the state lock")
+    check("-lock=false" not in text, f"{name}: must not run terraform without the state lock")
 
 # use_lockfile needs Terraform 1.11. Every place that pins a version must agree.
 pins = {
@@ -233,21 +231,32 @@ check(
     "deploy-infrastructure.yml: 'Check required secrets' must exit 1 when a required secret is missing",
 )
 
-# While production.yml still falls back to the shared names, writing staging's
-# secrets would repoint production. The preflight must stop that run.
-preflight = block(block(deploy, r"name: Check required secrets"), r'if \[\[ "\$ENVIRONMENT" == "staging" \]\]; then')
-check(preflight, "deploy-infrastructure.yml: no staging preflight ('if [[ \"$ENVIRONMENT\" == \"staging\" ]]')")
-loop = re.search(r"for name in ([\w ]+); do", preflight)
-checked = set(loop.group(1).split()) if loop else set()
+# Production may be built only from main: the workflow refuses before it
+# touches AWS (the GitHub Environment's branch rule and the role's trust
+# policy refuse it again).
+MAIN_ONLY = '"$ENVIRONMENT" == "production" && "$GITHUB_REF" != "refs/heads/main"'
 check(
-    checked == {prod for prod, _ in fallbacks} and checked,
-    f"deploy-infrastructure.yml: the staging preflight must check exactly the AWS_PROD_* "
-    f"names production.yml falls back from; checks {sorted(checked)}",
+    "fail=1" in block(block(deploy, r"name: Check required secrets"), re.escape(f"if [[ {MAIN_ONLY} ]]; then")),
+    f"deploy-infrastructure.yml: 'Check required secrets' must set fail=1 when [[ {MAIN_ONLY} ]]",
 )
+# write_deploy_secrets for test is refused before anything touches AWS.
 check(
-    'if ! grep -qx "$name"' in preflight and "fail=1" in preflight
-    and re.search(r"if \[\[ \$fail -eq 1 \]\]; then exit 1; fi", preflight),
-    "deploy-infrastructure.yml: the staging preflight must fail (exit 1) when an AWS_PROD_* secret is missing",
+    "fail=1" in block(block(deploy, r"name: Check required secrets"),
+                      re.escape('if [[ "$WRITE_DEPLOY_SECRETS" == "true" && "$ENVIRONMENT" != "production" ]]; then')),
+    "deploy-infrastructure.yml: 'Check required secrets' must set fail=1 for write_deploy_secrets outside production",
+)
+# The old project-wide state key describes a production stack: stop until it
+# has been moved, or an empty per-environment state would build a second copy.
+bootstrap_step = block(deploy, r"- name: Bootstrap Terraform state backend")
+check(
+    'legacy=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "${TF_PROJECT_PREFIX}/terraform.tfstate"' in bootstrap_step
+    and "exit 1" in block(bootstrap_step, re.escape('if [[ "$legacy" != "0" ]]; then')),
+    "deploy-infrastructure.yml: the bootstrap step must exit 1 while the old <prefix>/terraform.tfstate exists",
+)
+choices = re.search(r"\n      environment:\n(?:        .*\n)*?        options:\n((?:          - .*\n)+)", deploy)
+check(
+    choices and sorted(re.findall(r"- (\w+)", choices.group(1))) == ["production", "test"],
+    "deploy-infrastructure.yml: the environment choices must be exactly test and production",
 )
 
 check(
@@ -274,19 +283,21 @@ check(
     len(re.findall(r"\bset_secret\s+AWS_", deploy)) == len(re.findall(r"\bset_secret\s+AWS_", step)),
     "deploy-infrastructure.yml: set_secret is called outside the 'Write deployment secrets' step",
 )
+# Only production has an app deploy workflow reading deploy secrets. The test
+# stack writes none, and nothing here writes the names staging.yml (the
+# hand-built dev site) reads.
 written = {}
-for env_name in ("staging", "production"):
+for env_name in ("production",):
     branch = re.search(rf"\n\s+{env_name}\)\n(.*?)\n\s+;;", step, re.S)
     check(branch, f"deploy-infrastructure.yml: no '{env_name})' branch in the secrets step")
     written[env_name] = set(re.findall(r"set_secret\s+(\w+)", branch.group(1))) if branch else set()
 check(
     len(re.findall(r"\bset_secret\s+AWS_", step)) == sum(len(names) for names in written.values()),
-    "deploy-infrastructure.yml: a secret is written outside the staging/production branches",
+    "deploy-infrastructure.yml: a secret is written outside the production branch",
 )
 check(
-    written["staging"] == aws_secrets(staging_yml),
-    f"building staging must write exactly the secrets staging.yml reads; "
-    f"difference: {sorted(written['staging'] ^ aws_secrets(staging_yml))}",
+    not re.search(r"\n\s+(staging|test)\)\n", step),
+    "deploy-infrastructure.yml: only production writes deploy secrets",
 )
 production_reads = {name for name in aws_secrets(production_yml) if "PROD" in name}
 check(
@@ -300,7 +311,7 @@ check(
 # one list for both once led to staging's bucket secret naming production's.
 def pairs(text, call):
     found = {}
-    for env_name in ("staging", "production"):
+    for env_name in ("production",):
         body = block(text, rf"{env_name}\)")
         found[env_name] = set(re.findall(rf'\b{call}\s+(\w+)\s+"?\$?\(?(?:out\s+)?(\w+)', body))
     return found
@@ -308,7 +319,7 @@ def pairs(text, call):
 
 setup_pairs = pairs(setup_sh, "show")
 workflow_pairs = pairs(step, "set_secret")
-for env_name in ("staging", "production"):
+for env_name in ("production",):
     check(
         setup_pairs[env_name] and setup_pairs[env_name] == workflow_pairs[env_name],
         f"setup.sh must print the same {env_name} (secret, output) pairs as the workflow writes; "
@@ -316,22 +327,19 @@ for env_name in ("staging", "production"):
     )
 check(
     len(re.findall(r"\bshow\s+AWS_", setup_sh)) == sum(len(p) for p in setup_pairs.values()),
-    "setup.sh: a secret is printed outside the staging/production branches",
+    "setup.sh: a secret is printed outside the production branch",
 )
 check(
     re.search(r'case "\$ENVIRONMENT" in', setup_sh),
     "setup.sh: must choose the secret names by $ENVIRONMENT",
 )
-# An output description that names a staging secret without saying so invites
-# setting it from a production stack.
+# staging.yml deploys the hand-built dev site. An output description that
+# names one of its secrets invites pointing that site's deploys at a Terraform
+# stack (they empty the frontend bucket first).
 outputs_tf = (TERRAFORM / "outputs.tf").read_text()
 for description in re.findall(r'description\s*=\s*"([^"]*)"', outputs_tf):
-    for secret in aws_secrets(staging_yml):
-        for m in re.finditer(rf"\b{secret}\b", description):
-            check(
-                description[m.end():].startswith(" for staging"),
-                f"outputs.tf: description names staging's {secret} without ' for staging': '{description}'",
-            )
+    named = [x for x in aws_secrets(staging_yml) if re.search(rf"\b{x}\b", description)]
+    check(not named, f"outputs.tf: description names staging.yml's {named}: '{description}'")
 
 # Building infrastructure must not also start an application deploy.
 check(
@@ -339,7 +347,7 @@ check(
     "deploy-infrastructure.yml: must not trigger another workflow",
 )
 
-# --- Plan on pull requests; apply only by hand, behind a GitHub Environment --
+# --- Pull requests: offline checks only; apply only by hand ------------------
 
 
 def jobs_of(text):
@@ -353,14 +361,54 @@ def steps_of(job):
     return re.split(r"\n      - ", job)[1:]
 
 
+def triggers_of(text):
+    """The workflow's `on:` section (or one-line `on: ...`)."""
+    m = re.search(r"^on:(.*?)(?=^\S|\Z)", text, re.M | re.S)
+    return m.group(1) if m else ""
+
+
+# Code from a pull request must never get AWS credentials, a GitHub
+# Environment (and its secrets) or any secret: the pull-request path runs only
+# offline checks (ci.yml, "Terraform test"). A reusable workflow a
+# pull-request workflow calls is held to the same rule.
+def pr_access_problems(name, seen=()):
+    text = all_workflows.get(name, "")
+    problems = []
+    if re.search(r"\bid-token:\s*write\b|\bwrite-all\b", text):
+        problems.append("id-token: write")
+    if "configure-aws-credentials" in text:
+        problems.append("configure-aws-credentials")
+    if re.search(r"^\s+environment:\s*\S", text, re.M):
+        problems.append("a GitHub Environment")
+    other_secrets = set(re.findall(r"secrets\.(\w+)", text)) - {"GITHUB_TOKEN"}
+    if other_secrets or "secrets: inherit" in text:
+        problems.append(f"secrets {sorted(other_secrets) or ['inherit']}")
+    for called in re.findall(r"uses:\s*\./\.github/workflows/([\w.-]+)", text):
+        if called not in seen:
+            problems += [f"{called}: {p}" for p in pr_access_problems(called, (*seen, name))]
+    return problems
+
+
+# workflow_run and issue_comment count too: both can be set off by a pull
+# request and are tempted to check out its code with the base's secrets.
+pr_workflows = [n for n, t in all_workflows.items()
+                if re.search(r"\b(pull_request(_target)?|workflow_run|issue_comment)\b", triggers_of(t))]
+check("ci.yml" in pr_workflows, "ci.yml must run on pull requests (the offline checks)")
+for name in pr_workflows:
+    problems = pr_access_problems(name)
+    check(not problems, f"{name}: runs on pull requests, so it must not use {problems}")
+
+# The pull-request checks of the Terraform code, all offline.
+terraform_test = jobs_of(all_workflows["ci.yml"]).get("terraform-test", "")
+for needle in ("terraform fmt -check -recursive", "terraform init -backend=false", "terraform validate",
+               "terraform test", "python3 infra/terraform/tests/check_workflows.py"):
+    check(needle in terraform_test, f"ci.yml 'Terraform test' job: must run '{needle}'")
+check("name: Terraform test\n" in terraform_test, "ci.yml: keep the job name 'Terraform test' (a required check)")
+
 triggers = deploy.split("\njobs:\n", 1)[0]
 check(
-    not re.search(r"\n  (push|schedule|pull_request_target|workflow_run):", triggers),
-    "deploy-infrastructure.yml: may be started only by workflow_dispatch and pull_request",
-)
-check(
-    re.search(r"\n  pull_request:\n    paths:\n(?:      .*\n)*?      - 'infra/terraform/\*\*'", triggers),
-    "deploy-infrastructure.yml: must plan on pull requests that touch infra/terraform/**",
+    re.findall(r"\n  (\w+):", "\n" + triggers_of(deploy)) == ["workflow_dispatch"],
+    "deploy-infrastructure.yml: may be started only by workflow_dispatch",
 )
 check(
     "\npermissions: {}\n" in triggers,
@@ -378,32 +426,11 @@ for name, text in all_workflows.items():
         not re.search(r"aws-access-key-id|aws-secret-access-key|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY", text),
         f"{name}: must not use long-lived AWS access keys",
     )
+    check("TF_PLAN_ROLE_ARN" not in text, f"{name}: the pull-request plan role is gone; TF_PLAN_ROLE_ARN must not be read")
 
 deploy_jobs = jobs_of(deploy)
-check(set(deploy_jobs) == {"plan", "apply"}, f"deploy-infrastructure.yml: expected jobs plan and apply, found {sorted(deploy_jobs)}")
-plan_job = deploy_jobs.get("plan", "")
+check(set(deploy_jobs) == {"apply"}, f"deploy-infrastructure.yml: expected the single job apply, found {sorted(deploy_jobs)}")
 apply_job = deploy_jobs.get("apply", "")
-
-# The pull-request plan runs code from the pull request, so it gets a
-# read-only role, no GitHub Environment and no real application secrets.
-check(
-    re.search(r"\n    if: github\.event_name == 'pull_request'\n", "\n" + plan_job),
-    "plan job: must run only on pull_request",
-)
-check(not re.search(TF + r"apply\b", plan_job), "plan job: must never apply")
-plan_secrets = set(re.findall(r"secrets\.(\w+)", plan_job))
-allowed = {"TF_PLAN_ROLE_ARN", "TF_PROJECT_PREFIX"}
-check(
-    plan_secrets <= allowed,
-    f"plan job: may read only {sorted(allowed)}, also reads {sorted(plan_secrets - allowed)}",
-)
-check("configured == 'true'" in plan_job, "plan job: must skip cleanly when its role is not configured")
-for line in deploy.splitlines():
-    if "-lock=false" in line:
-        check(
-            "terraform plan" in line and line in plan_job,
-            f"deploy-infrastructure.yml: -lock=false is allowed only on the pull-request plan: '{line.strip()}'",
-        )
 
 # Applying is a deliberate act by a person, approved through the GitHub
 # Environment of the same name as the stack.
@@ -451,8 +478,33 @@ check(
     f"apply job: the full apply must be exactly 'terraform apply -input=false tfplan', found {full_applies}",
 )
 
-# Per-environment settings live in git, where the pull-request plan sees them.
-for env_name in ("staging", "production"):
+# Per-environment settings live in git, where a pull request reviews them.
+check(
+    sorted(p.stem for p in (TERRAFORM / "environments").glob("*.tfvars")) == ["production", "test"],
+    "environments/: exactly production.tfvars and test.tfvars",
+)
+
+
+def tfvars(env_name):
+    path = TERRAFORM / "environments" / f"{env_name}.tfvars"
+    text = uncommented(path) if path.exists() else ""
+    return {k: v.split("#", 1)[0].strip() for k, v in re.findall(r"^\s*(\w+)\s*=\s*(.*)$", text, re.M)}
+
+
+# Production holds study data: its settings say so explicitly, and only the
+# test stack may relax them. variables.tf refuses the same relaxations for
+# production (tests/environments.tftest.hcl).
+prod = tfvars("production")
+check(prod.get("deletion_protection") == "true", "production.tfvars: deletion_protection must be true")
+check(prod.get("force_destroy_buckets") == "false", "production.tfvars: force_destroy_buckets must be false")
+check(
+    prod.get("backup_retention_period", "").isdigit() and int(prod["backup_retention_period"]) >= 7,
+    f"production.tfvars: backup_retention_period must be at least 7, got {prod.get('backup_retention_period')}",
+)
+test_vars = tfvars("test")
+check(test_vars.get("deletion_protection") == "false" and test_vars.get("force_destroy_buckets") == "true",
+      "test.tfvars: the on-demand test stack turns deletion protection off and lets buckets be force-destroyed")
+for env_name in ("test", "production"):
     path = TERRAFORM / "environments" / f"{env_name}.tfvars"
     check(path.exists(), f"environments/{env_name}.tfvars is missing")
     text = uncommented(path) if path.exists() else ""
@@ -506,21 +558,10 @@ check(
     "apply job: the deletion check must run whenever the apply runs",
 )
 check(
-    "continue-on-error" not in apply_job and "continue-on-error" not in plan_job,
+    "continue-on-error" not in apply_job,
     "deploy-infrastructure.yml: no step may continue on error",
 )
 
-# An unreadable state bucket is an error, not "never built": skipping the
-# plan would hide every change the pull request makes.
-locate = next((st for st in steps_of(plan_job) if st.startswith("name: Locate Terraform state")), "")
-check(
-    re.search(r'\n {10}aws s3api head-bucket --bucket "\$BUCKET"\n', locate),
-    "plan job: Locate Terraform state must run 'aws s3api head-bucket' on its own line, so any error fails the step",
-)
-check(
-    "(404)" in locate and re.search(r"else\n(?:.*\n)*?\s+exit 1\n", locate),
-    "plan job: only a 404 on the state key may mean 'not built yet'; any other error must exit 1",
-)
 for name, text in infra_workflows.items():
     for line in text.splitlines():
         if "head-object" in line:
@@ -550,21 +591,48 @@ check(
     "deploy and destroy workflows must set TF_VAR_create_github_oidc_provider to false",
 )
 
-# On a pull request without the plan role (or from a fork), every step after
-# the configuration check must skip, not fail.
-plan_steps = steps_of(plan_job)
-for st in plan_steps[1:]:
-    check(
-        re.search(r"\n        if: steps\.(config\.outputs\.configured|state\.outputs\.found) == 'true'\n", st),
-        f"plan job, step '{st.splitlines()[0]}': must be skipped unless the plan role is configured",
-    )
-# The apply job always signs in with its own role.
-creds = [st for st in apply_steps if "aws-actions/configure-aws-credentials" in st]
-check(
-    len(creds) == 1 and "\n        if:" not in creds[0]
-    and "role-to-assume: ${{ secrets.TF_APPLY_ROLE_ARN }}" in creds[0],
-    "apply job: one unconditional configure-aws-credentials step assuming secrets.TF_APPLY_ROLE_ARN",
-)
+# Production and test live in different AWS accounts. Each job that signs in
+# picks the account from the environment, in one place: production reads only
+# TF_PROD_ACCOUNT_ID, test only TF_TEST_ACCOUNT_ID, the two must differ, and
+# configure-aws-credentials refuses credentials from any other account.
+def account_problems(job):
+    steps = steps_of(job)
+    choose = [i for i, st in enumerate(steps) if st.startswith("name: Choose the AWS account")]
+    creds = [i for i, st in enumerate(steps) if "aws-actions/configure-aws-credentials" in st]
+    if len(choose) != 1 or len(creds) != 1 or choose[0] > creds[0]:
+        return ["needs one 'Choose the AWS account' step, then one configure-aws-credentials step"]
+    step, cred = steps[choose[0]], steps[creds[0]]
+    problems = []
+    if not re.search(r"\n        id: aws\n", step):
+        problems.append("'Choose the AWS account' needs id: aws")
+    for env_name, secret in (("production", "TF_PROD_ACCOUNT_ID"), ("test", "TF_TEST_ACCOUNT_ID")):
+        used = set(re.findall(r"\b(TF_\w*ACCOUNT_ID)\b", block(step, rf"{env_name}\)")))
+        if used != {secret}:
+            problems.append(f"the {env_name}) branch must read only {secret}, reads {sorted(used)}")
+    for var, secret in re.findall(r"\n\s+(\w+):\s*\$\{\{\s*secrets\.(\w+)\s*\}\}", step):
+        if var != secret:
+            problems.append(f"env {var} is set from secrets.{secret}")
+    if "fail=1" not in block(step, re.escape('if [[ "$TF_PROD_ACCOUNT_ID" == "$TF_TEST_ACCOUNT_ID" ]]; then')) \
+            and "exit 1" not in block(step, re.escape('if [[ "$TF_PROD_ACCOUNT_ID" == "$TF_TEST_ACCOUNT_ID" ]]; then')):
+        problems.append("must stop when TF_PROD_ACCOUNT_ID equals TF_TEST_ACCOUNT_ID")
+    if not re.search(r"\n\s+\*\)[^\n]*exit 1", step):
+        problems.append("an unknown environment must exit 1")
+    if 'echo "role=arn:aws:iam::${ACCOUNT}:role/${TF_PROJECT_PREFIX}-terraform-apply-${ENVIRONMENT}"' not in step:
+        problems.append("the role must be arn:aws:iam::${ACCOUNT}:role/${TF_PROJECT_PREFIX}-terraform-apply-${ENVIRONMENT}")
+    if "\n        if:" in cred or "role-to-assume: ${{ steps.aws.outputs.role }}\n" not in cred \
+            or "allowed-account-ids: ${{ steps.aws.outputs.account }}\n" not in cred:
+        problems.append("configure-aws-credentials must be unconditional, assume steps.aws.outputs.role "
+                        "and set allowed-account-ids: steps.aws.outputs.account")
+    return problems
+
+
+for name, text in infra_workflows.items():
+    for job_name, job in jobs_of(text).items():
+        if "configure-aws-credentials" in job or "role-to-assume" in job:
+            for problem in account_problems(job):
+                check(False, f"{name}, job {job_name}: {problem}")
+for name, text in all_workflows.items():
+    check("TF_APPLY_ROLE_ARN" not in text, f"{name}: TF_APPLY_ROLE_ARN is gone; the role comes from the account of the environment")
 
 # Prose must not promise more than the workflow does.
 reference = (ROOT / "docs" / "deployment" / "technical-reference.rst").read_text()
@@ -579,8 +647,10 @@ check(
 )
 
 # --- IAM roles for Terraform: committed, and checked here ---------------------
-# The Terraform roles live in the same AWS account as the hand-built live
-# deployment. Each role trusts one GitHub Environment on one branch, reaches
+# The production role lives in the same AWS account as the hand-built live
+# deployment; the test role in the lab's separate TEST account, with the same
+# policies so a rehearsal also tests them. Each role trusts one GitHub
+# Environment (production: on main only), reaches
 # only its own environment's state and resources, cannot change IAM beyond its
 # own names (and only under a permissions boundary), cannot change the shared
 # GitHub OIDC provider, and is explicitly denied the live resources.
@@ -618,25 +688,29 @@ EB_MANAGED_POLICIES = {
     "arn:aws:iam::aws:policy/AWSElasticBeanstalkManagedUpdatesCustomerRolePolicy",
     "arn:aws:iam::aws:policy/AdministratorAccess-AWSElasticBeanstalk",
 }
-ENVIRONMENTS = ("staging", "production")
+ENVIRONMENTS = ("test", "production")
 # Services whose resources Elastic Beanstalk names itself, so the Terraform
 # roles reach them by tag (Environment / Project), not by name.
 TAG_SCOPED_SERVICES = {"ec2", "autoscaling", "elasticloadbalancing", "cloudformation", "cloudfront", "acm", "cloudwatch"}
 # Calls with no resource to tag: nothing narrower than "*" exists.
 UNTAGGABLE_ACTIONS = {"cloudwatch:PutMetricData"}
-OTHER = {"staging": "production", "production": "staging"}
-BRANCH = {"staging": "refs/heads/staging", "production": "refs/heads/main"}
+# The name set each role must be denied. The test role lives in the lab's
+# separate TEST account and is denied production's names anyway. Production's
+# policies keep denying the retired staging names: a stack built under them
+# may still exist in the production account until someone destroys it.
+OTHER = {"test": "production", "production": "staging"}
 # role -> (environment it serves, GitHub Environment it trusts, ref condition)
 ROLES = {
-    # Pull requests plan staging only: until secrets leave the state, no
-    # pull-request code may run with a role that reads production's state.
-    # Production is planned by the apply job (action = plan), from main.
-    "plan-staging": ("staging", "plan-staging", ("StringLike", "refs/pull/*/merge")),
-    **{f"apply-{e}": (e, e, ("StringEquals", BRANCH[e])) for e in ENVIRONMENTS},
+    # Production: only from main.
+    "apply-production": ("production", "production", ("StringEquals", ["refs/heads/main"])),
+    # Test: main, or a test/* branch to try a risky change before it merges.
+    # Not any branch: during a rehearsal the TEST account holds a copy of
+    # production data. The `test` Environment's reviewers approve every run.
+    "apply-test": ("test", "test", ("StringLike", ["refs/heads/main", "refs/heads/test/*"])),
 }
 
 
-ROLE_PARTS = {"plan": ("permissions",), "apply": ("permissions", "abac", "guardrails")}
+ROLE_PARTS = {"apply": ("permissions", "abac", "guardrails")}
 
 
 def boundary_arn(env_name):
@@ -780,7 +854,7 @@ def tag_scope_problems(st, environment):
 
 
 # The validator itself: statements that must be refused, and ones it must pass.
-_tags = lambda kind, op="StringEquals": {op: {f"aws:{kind}/Environment": "staging", f"aws:{kind}/Project": "<PREFIX>"}}
+_tags = lambda kind, op="StringEquals": {op: {f"aws:{kind}/Environment": "test", f"aws:{kind}/Project": "<PREFIX>"}}
 _keys = {"ForAllValues:StringEquals": {"aws:TagKeys": ["Environment", "Project"]}}
 for label, st, ok in (
     ("terminate scoped by RequestTag only", {"Effect": "Allow", "Action": "ec2:TerminateInstances", "Resource": "*",
@@ -813,7 +887,7 @@ for label, st, ok in (
     ("retag own resource", {"Effect": "Allow", "Action": "ec2:CreateTags", "Resource": "*",
                             "Condition": {**_tags("ResourceTag"), **_tags("RequestTag", "StringEqualsIfExists"), **_keys}}, True),
 ):
-    check(bool(tag_scope_problems(st, "staging")) != ok,
+    check(bool(tag_scope_problems(st, "test")) != ok,
           f"tag_scope_problems: fixture '{label}' should be {'accepted' if ok else 'refused'}")
 
 
@@ -848,9 +922,15 @@ for role, (environment, gh_environment, (ref_operator, ref)) in ROLES.items():
         f"got {sorted(subjects)}",
     )
     check("pull_request" not in json.dumps(trust), f"{role}-trust.json: must not trust the pull_request subject")
+    refs = [r for op in condition.values() for r in as_list(op.get(f"{OIDC}:ref", []))]
     check(
-        as_list(condition.get(ref_operator, {}).get(f"{OIDC}:ref", [])) == [ref],
-        f"{role}-trust.json: needs {ref_operator} {OIDC}:ref = {ref}",
+        sorted(as_list(condition.get(ref_operator, {}).get(f"{OIDC}:ref", []))) == sorted(ref)
+        and sorted(refs) == sorted(ref),
+        f"{role}-trust.json: needs {ref_operator} {OIDC}:ref = {ref} and no other ref, got {refs}",
+    )
+    check(
+        all(r == "refs/heads/test/*" or "*" not in r for r in refs),
+        f"{role}-trust.json: a ref wildcard other than refs/heads/test/* (e.g. refs/heads/*) trusts any branch: {refs}",
     )
     # A role's permissions may be split over several managed policies
     # (<role>-permissions.json, <role>-abac.json, <role>-guardrails.json); the
@@ -942,26 +1022,10 @@ for name, policy in policies.items():
             f"{fname}.json: must deny everything tagged Environment={other}",
         )
 
-    if kind in ("plan", "apply"):
+    if kind == "apply":
         check(not allows(policy, "s3:GetObject", "arn:aws:s3:::someone-elses-bucket/key"),
               f"{fname}.json: must not read objects in buckets that are not its own")
-    if kind == "plan":
-        own = sample_arns(environment)
-        check(not allows(policy, "s3:GetObject", own["object"]),
-              f"{fname}.json: must not read application data (only its state file)")
-        check(allows(policy, "s3:GetObject", own["state"]), f"{fname}.json: must read its own state file")
-        for st in policy["Statement"]:
-            if st.get("Effect") != "Allow":
-                continue
-            for action in as_list(st.get("Action", [])):
-                check(re.match(r"(Describe|Get|List|Head)", action.split(":", 1)[-1]),
-                      f"{fname}.json: '{action}' is not read-only")
-            for resource in as_list(st.get("Resource", [])):
-                check(
-                    not (resource.startswith("arn:aws:s3:::") and "/" in resource) or resource == own["state"],
-                    f"{fname}.json: may read one S3 object, its own state file; found '{resource}'",
-                )
-    elif kind == "apply":
+    if kind == "apply":
         own = sample_arns(environment)
         for action in ("s3:GetObject", "s3:PutObject", "s3:DeleteObject"):
             check(allows(policy, action, own["state"]), f"{fname}.json: {action} on its own state must be allowed")
@@ -1020,7 +1084,7 @@ for name, policy in policies.items():
                        "iam:SetDefaultPolicyVersion"):
             check(denies(policy, action, boundary_arn(environment)) or denies(policy, action, own["role"]),
                   f"{fname}.json: must deny {action} (the boundary must stay in place)")
-        for target in ("role/<PREFIX>-terraform-apply-production", "role/<PREFIX>-terraform-plan-staging",
+        for target in ("role/<PREFIX>-terraform-apply-production", "role/<PREFIX>-terraform-apply-test",
                        "role/aws-elasticbeanstalk-ec2-role", f"role/<PREFIX>-{other}-github-actions"):
             check(not allows(policy, "iam:PutRolePolicy", f"arn:aws:iam::<ACCOUNT_ID>:{target}"),
                   f"{fname}.json: must not change {target}")
@@ -1056,22 +1120,6 @@ for name, policy in policies.items():
 check(len({json.dumps(v) for v in live_statements.values()}) == 1 and all(len(v) == 3 for v in live_statements.values()),
       "bootstrap/iam: every policy must carry the same three live/OIDC Deny statements")
 
-# The pull-request plan runs only after a reviewer approves it in the
-# plan-<environment> GitHub Environment, the subject its role trusts.
-check(
-    "\n    environment: plan-${{ matrix.environment }}\n" in "\n" + plan_job,
-    "plan job: must run in the 'plan-<environment>' GitHub Environment (required reviewers approve each run)",
-)
-check(
-    re.search(r"\n      matrix:\n        environment: \[staging\]\n", plan_job) and "production" not in plan_job,
-    "plan job: pull requests plan staging only; no pull-request code may get a role that reads production state",
-)
-readme_text = (TERRAFORM / "README.md").read_text()
-check(
-    re.search(r"`plan-staging`[^\n]*\n?[^\n]*\*\*Required reviewers\*\*[^.]*\*\*Prevent self-review\*\*", readme_text)
-    and "plan-production" not in readme_text,
-    "README.md: plan-staging needs required reviewers with Prevent self-review; there is no plan-production",
-)
 # The boundary is mandatory: no switch turns it off.
 for name, text in {**all_workflows, "variables.tf": (TERRAFORM / "variables.tf").read_text()}.items():
     check("use_permissions_boundary" not in text, f"{name}: the permissions boundary must not be optional")
@@ -1081,19 +1129,60 @@ check(
 )
 
 readme = (TERRAFORM / "README.md").read_text()
-check("ReadOnlyAccess" not in readme, "README.md: the plan role must not get ReadOnlyAccess")
 check(":pull_request" not in readme, "README.md: no role may trust the pull_request subject")
 check(
-    re.search(r"- `production`: \*\*Required reviewers\*\*, \*\*Prevent self-review\*\* ticked", readme),
-    "README.md: production needs required reviewers with 'Prevent self-review'",
+    re.search(r"- `production`: \*\*Required reviewers\*\*(?:(?!\n *- )[\s\S])*?\*\*Deployment branches\*\*: `main` only", readme)
+    and re.search(r"- `test`: \*\*Required reviewers\*\*(?:(?!\n *- )[\s\S])*?\*\*Deployment branches\*\*: `main` and `test/\*`", readme),
+    "README.md: the production Environment needs required reviewers and main only; test needs required "
+    "reviewers and deployment branches `main` and `test/*` (as apply-test-trust.json)",
 )
+check(
+    "trusts that branch's code with the TEST account" in readme and "never production's" in readme,
+    "README.md: say that approving a test run trusts that branch's code with the TEST account (which may hold "
+    "a production snapshot), and that the test stack uses its own API keys, never production's",
+)
+# The owner approves their own runs: no document may tell them to switch on
+# "Prevent self-review" (it would lock them out of their own deploys).
+for doc in (TERRAFORM / "README.md", ROOT / "docs" / "deployment" / "technical-reference.rst",
+            ROOT / "docs" / "deployment" / "for-researchers.rst"):
+    for line in doc.read_text().splitlines():
+        check("self-review" not in line.lower() or re.search(r"\b(off|not|unticked)\b", line),
+              f"{doc.name}: must not tell anyone to enable Prevent self-review: '{line.strip()}'")
+# The owner's one-time setup: the account secrets, and what to delete.
+for needle in ("TF_PROD_ACCOUNT_ID", "TF_TEST_ACCOUNT_ID", "`plan-staging`", "`plan-production`",
+               "`TF_PLAN_ROLE_ARN`", "`TF_APPLY_ROLE_ARN`", "bootstrap/iam/apply-test-trust.json"):
+    check(needle in readme, f"README.md: the setup steps must name {needle}")
+check("plan-staging" not in reference and "TF_APPLY_ROLE_ARN" not in reference,
+      "technical-reference.rst: describes the removed pull-request plan or TF_APPLY_ROLE_ARN")
+runbook = (ROOT / "docs" / "deployment" / "data-migration.rst").read_text()
+check("test stack" in runbook and "Follow it for **staging first**" not in runbook,
+      "data-migration.rst: the rehearsal runs on the test stack, not on a Terraform staging stack")
 check(
     not re.search(r"Deployment branches\*\*[^.]*`staging`[^.]*production|production[^.]*Deployment branches\*\*[^.]*`staging`", readme),
     "README.md: production may deploy only from main",
 )
 check("bootstrap/iam/" in readme, "README.md: setup must point at the committed policies in bootstrap/iam/")
+# GH_PAT can write repository secrets. As a repository secret any same-repo
+# workflow run could read it; write_deploy_secrets is production only, so it
+# belongs to the production Environment (approved runs from main only).
+deploy_header = (WORKFLOWS / "deploy-infrastructure.yml").read_text().split("\non:\n", 1)[0]
+check(
+    "#   Environment secrets (Settings → Environments → production)" in deploy_header
+    and deploy_header.find("GH_PAT") > deploy_header.find("#   Environment secrets (Settings → Environments → production)"),
+    "deploy-infrastructure.yml header: GH_PAT must be listed as a production Environment secret",
+)
+repo_bullet = re.search(r"\n\d+\. \*\*Repository secrets\*\*(?:(?!\n\d+\. )[\s\S])*", readme)
+env_bullet = re.search(r"\n\d+\. \*\*Environment secrets\*\*(?:(?!\n\d+\. )[\s\S])*", readme)
+check(
+    repo_bullet and env_bullet and "GH_PAT" not in repo_bullet.group(0) and "`GH_PAT`" in env_bullet.group(0)
+    and "production" in env_bullet.group(0),
+    "README.md: GH_PAT is a production Environment secret, not a repository secret",
+)
 
-# --- Destroy: manual, one named environment, production needs a second yes ---
+# --- Destroy: manual, one named environment; production needs every yes ----
+# The test stack needs only its typed name and the test Environment's
+# approval. Production needs the typed confirmations, allow_production and
+# main, and is backed up first.
 
 destroy_triggers = destroy.split("\njobs:\n", 1)[0]
 check(
@@ -1119,10 +1208,13 @@ destroy_job = destroy_jobs.get("destroy", "")
 check("\n    environment:" not in "\n" + validate_job, "destroy validate job: must not use a GitHub Environment")
 check("role-to-assume" not in validate_job, "destroy validate job: must not sign in to AWS")
 for needle, why in (
-    ('"$ENVIRONMENT" != "staging" && "$ENVIRONMENT" != "production"', "reject any environment other than staging or production"),
-    ('"$CONFIRM_DESTROY" != "destroy $ENVIRONMENT"', "require the typed confirmation 'destroy <environment>'"),
+    ('"$ENVIRONMENT" != "test" && "$ENVIRONMENT" != "production"', "reject any environment other than test or production"),
+    ('"$ENVIRONMENT" == "production" && "$CONFIRM_DESTROY" != "destroy production"',
+     "require the typed confirmation 'destroy production' for production"),
     ('"$ENVIRONMENT" == "production" && "$ALLOW_PRODUCTION" != "true"', "refuse production unless allow_production is set"),
-    ('"$CONFIRM_DATA" != "destroy data"', "require the typed confirmation 'destroy data'"),
+    ('"$ENVIRONMENT" == "production" && "$CONFIRM_DATA" != "destroy data"',
+     "require the typed confirmation 'destroy data' for production"),
+    (MAIN_ONLY, "refuse production unless the run is on main"),
 ):
     check(needle in validate_job, f"destroy validate job: must {why}")
     # ...and each refusal must count: the if-block sets fail=1.
@@ -1186,6 +1278,11 @@ check("DBInstanceNotFound" in rds, "destroy job: only DBInstanceNotFound may mea
 # changed; deletion protection comes off only after that, and the buckets are
 # emptied only after it is off.
 backup = destroy_step("Back up the data bucket")
+# Production's data bucket is always backed up; the test stack's never is.
+check(
+    re.search(r"\n        if: (\$\{\{ *)?inputs\.environment == 'production'( *\}\})? *\n", "\n" + backup),
+    "destroy job: the backup step must run exactly when inputs.environment == 'production'",
+)
 order = [destroy_titles.index(t) if t in destroy_titles else -1 for t in (
     "name: Back up the data bucket", "name: Disable RDS deletion protection", "name: Empty S3 buckets",
     "name: Destroy infrastructure")]
@@ -1212,11 +1309,33 @@ check(
     and re.search(r'if \[\[ "\$src" != "\$dst" \]\]; then\n(?:.*\n)*?\s+exit 1\n', backup),
     "destroy job: the backup step must compare object count and total size and exit 1 on a mismatch",
 )
+# The backup is compared with the source, not the source with itself.
+check(
+    'aws s3 sync "s3://$DATA" "$BACKUP/"' in backup and '\n          src=$(totals "s3://$DATA")\n' in backup
+    and '\n          dst=$(totals "$BACKUP/")\n' in backup,
+    "destroy job: the backup must sync s3://$DATA to $BACKUP/, with src from s3://$DATA and dst from $BACKUP/",
+)
+# No state for this environment: stop before anything is emptied.
+locate_state = destroy_step("Locate Terraform state bucket")
+check(
+    "exit 1" in block(locate_state, re.escape(
+        'if ! aws s3api head-object --bucket "$BUCKET" --key "${TF_PROJECT_PREFIX}/${ENVIRONMENT}/terraform.tfstate" >/dev/null; then')),
+    "destroy job: must exit 1 when the environment's state file is missing",
+)
+# Any RDS error other than DBInstanceNotFound stops the run.
+check(
+    re.search(r'\n {12}fi\n {12}echo "\$PROTECTED"\n {12}exit 1\n', rds),
+    "destroy job: the RDS step must exit 1 on any describe error other than DBInstanceNotFound",
+)
 summary = destroy_step("Write summary")
 check(
     "BACKUP: ${{ steps.backup.outputs.location }}" in summary and "SNAPSHOT: ${{ steps.snapshot.outputs.name }}" in summary
     and '"$BACKUP"' in summary and '"$SNAPSHOT"' in summary,
     "destroy job: the summary must name the data backup and the RDS final snapshot",
+)
+check(
+    "ENVIRONMENT: ${{ inputs.environment }}" in summary and "test stack is destroyed without a backup" in summary,
+    "destroy job: the summary must say plainly that the test stack is destroyed without a backup",
 )
 check(
     "final_snapshot_identifier" in destroy_step("Read the RDS final snapshot name"),
@@ -1225,6 +1344,11 @@ check(
 for line in summary.splitlines():
     check("OIDC provider" not in line or "kept" in line,
           f"destroy job: the summary must not claim the shared GitHub OIDC provider was deleted: '{line.strip()}'")
+
+# The owner's choice: one code owner for everything.
+codeowners = [l.strip() for l in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
+              if l.strip() and not l.lstrip().startswith("#")] if (ROOT / ".github" / "CODEOWNERS").exists() else []
+check(codeowners == ["* @1xabhay"], f".github/CODEOWNERS must be exactly '* @1xabhay', got {codeowners}")
 
 # --- Stale files and statements ----------------------------------------------
 
@@ -1244,12 +1368,10 @@ check(
     "README.md: refers to the removed test-iac workflow or the tf-iac branch",
 )
 reference = (ROOT / "docs" / "deployment" / "technical-reference.rst").read_text()
-rds_tf = (TERRAFORM / "rds.tf").read_text()
-if re.search(r'backup_retention_period\s*=\s*var\.environment == "production" \? 7 : 1', rds_tf):
-    check(
-        "backup_retention_period = 0" not in reference and "backups are disabled" not in reference,
-        "technical-reference.rst: says backups are disabled, but rds.tf keeps 7 days (production) / 1 day (staging)",
-    )
+check(
+    "backup_retention_period = 0" not in reference and "backups are disabled" not in reference,
+    "technical-reference.rst: says backups are disabled, but every stack keeps backup_retention_period days",
+)
 
 if failures:
     print("\n".join(f"FAIL: {f}" for f in failures))

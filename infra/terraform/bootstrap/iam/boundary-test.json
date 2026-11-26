@@ -24,7 +24,7 @@
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:RequestTag/Environment": "staging",
+          "aws:RequestTag/Environment": "test",
           "aws:RequestTag/Project": "<PREFIX>"
         },
         "ForAllValues:StringLike": {
@@ -79,7 +79,7 @@
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:ResourceTag/Environment": "staging",
+          "aws:ResourceTag/Environment": "test",
           "aws:ResourceTag/Project": "<PREFIX>"
         }
       }
@@ -90,7 +90,7 @@
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:RequestTag/Environment": "staging",
+          "aws:RequestTag/Environment": "test",
           "aws:RequestTag/Project": "<PREFIX>"
         },
         "StringLike": {
@@ -120,7 +120,7 @@
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:RequestTag/Environment": "staging",
+          "aws:RequestTag/Environment": "test",
           "aws:RequestTag/Project": "<PREFIX>"
         },
         "StringLike": {
@@ -160,8 +160,8 @@
       "Effect": "Allow",
       "Action": "elasticbeanstalk:*",
       "Resource": [
-        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:*/<PREFIX>-staging",
-        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:*/<PREFIX>-staging/*",
+        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:*/<PREFIX>-test",
+        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:*/<PREFIX>-test/*",
         "arn:aws:elasticbeanstalk:*::solutionstack/*",
         "arn:aws:elasticbeanstalk:*::platform/*"
       ]
@@ -176,8 +176,8 @@
         "s3:PutObject"
       ],
       "Resource": [
-        "arn:aws:s3:::<PREFIX>-staging-*",
-        "arn:aws:s3:::elasticbeanstalk-*/<PREFIX>-staging/*"
+        "arn:aws:s3:::<PREFIX>-test-*",
+        "arn:aws:s3:::elasticbeanstalk-*/<PREFIX>-test/*"
       ]
     },
     {
@@ -195,7 +195,7 @@
         "logs:DescribeLogStreams",
         "logs:PutLogEvents"
       ],
-      "Resource": "arn:aws:logs:*:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/<PREFIX>-staging-*"
+      "Resource": "arn:aws:logs:*:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/<PREFIX>-test-*"
     },
     {
       "Effect": "Allow",
@@ -214,7 +214,7 @@
         "ssm:GetParameters",
         "ssm:GetParametersByPath"
       ],
-      "Resource": "arn:aws:ssm:*:<ACCOUNT_ID>:parameter/<PREFIX>-staging/*"
+      "Resource": "arn:aws:ssm:*:<ACCOUNT_ID>:parameter/<PREFIX>-test/*"
     },
     {
       "Effect": "Allow",
@@ -258,7 +258,7 @@
     {
       "Effect": "Allow",
       "Action": "iam:PassRole",
-      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-staging-*",
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-test-*",
       "Condition": {
         "StringEquals": {
           "iam:PassedToService": [

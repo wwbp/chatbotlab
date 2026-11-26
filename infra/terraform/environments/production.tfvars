@@ -1,17 +1,23 @@
 # Non-secret settings for the production stack.
 #
-# The Deploy Infrastructure workflow reads this file for both its jobs, so a
-# change here is planned on the pull request and applied only by a manual run.
+# The Deploy Infrastructure workflow reads this file. A change here is
+# reviewed in a pull request and applied only by a manual run from main.
 #
 # Not here, on purpose:
 #   environment, project_name   set by the workflow together with the state
-#                               key; setting them here could cross the two
+#                               key; setting them here could cross the
 #                               environments
 #   passwords, API keys, tokens GitHub secrets (see the workflow header)
 
 eb_instance_type  = "t3.small"
 eb_max_instances  = 1
 db_instance_class = "db.t3.micro"
+
+# Production holds study data. These are also the defaults, written out so a
+# change to them shows in review; variables.tf refuses any relaxation here.
+deletion_protection     = true
+backup_retention_period = 7
+force_destroy_buckets   = false
 
 # Custom domain, e.g. "chatbot.mylab.org". Empty: the CloudFront URL is used.
 # Setting it makes the next apply create a certificate and print the DNS

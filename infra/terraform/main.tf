@@ -12,7 +12,7 @@
 # `terraform init` time, which keeps account-specific values out of git:
 #   terraform init -backend-config=backend.hcl \
 #     -backend-config="key=<project>/<environment>/terraform.tfstate"
-# Each environment has its own key, so staging and production never share a
+# Each environment has its own key, so test and production never share a
 # state file.
 # -----------------------------------------------------------------------------
 

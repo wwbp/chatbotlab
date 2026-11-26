@@ -28,7 +28,7 @@
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:RequestTag/Environment": "staging",
+          "aws:RequestTag/Environment": "test",
           "aws:RequestTag/Project": "<PREFIX>"
         },
         "ForAllValues:StringLike": {
@@ -98,7 +98,7 @@
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:ResourceTag/Environment": "staging",
+          "aws:ResourceTag/Environment": "test",
           "aws:ResourceTag/Project": "<PREFIX>"
         }
       }
@@ -117,11 +117,11 @@
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:ResourceTag/Environment": "staging",
+          "aws:ResourceTag/Environment": "test",
           "aws:ResourceTag/Project": "<PREFIX>"
         },
         "StringEqualsIfExists": {
-          "aws:RequestTag/Environment": "staging",
+          "aws:RequestTag/Environment": "test",
           "aws:RequestTag/Project": "<PREFIX>"
         },
         "ForAllValues:StringLike": {
@@ -145,7 +145,7 @@
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:RequestTag/Environment": "staging",
+          "aws:RequestTag/Environment": "test",
           "aws:RequestTag/Project": "<PREFIX>"
         },
         "StringLike": {
@@ -176,7 +176,7 @@
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:RequestTag/Environment": "staging",
+          "aws:RequestTag/Environment": "test",
           "aws:RequestTag/Project": "<PREFIX>"
         },
         "StringLike": {
@@ -225,7 +225,7 @@
         "cloudfront:TestFunction",
         "cloudfront:UpdateFunction"
       ],
-      "Resource": "arn:aws:cloudfront::<ACCOUNT_ID>:function/<PREFIX>-staging-*"
+      "Resource": "arn:aws:cloudfront::<ACCOUNT_ID>:function/<PREFIX>-test-*"
     },
     {
       "Sid": "CloudFrontOriginAccessControls",

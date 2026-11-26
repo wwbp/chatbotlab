@@ -27,7 +27,7 @@ mock_provider "random" {}
 
 variables {
   project_name         = "chatbotlab"
-  environment          = "staging"
+  environment          = "test"
   db_password          = "test-password-not-real"
   admin_panel_password = "test-password-not-real"
 }
@@ -38,7 +38,7 @@ run "email_settings_reach_the_application" {
   variables {
     site_url           = "https://dev.example.org"
     email_backend      = "chatbot.email_backend.SESBackend"
-    default_from_email = "ChatbotLab (staging) <no-reply@example.org>"
+    default_from_email = "ChatbotLab (test) <no-reply@example.org>"
   }
 
   assert {
@@ -48,7 +48,7 @@ run "email_settings_reach_the_application" {
       })) == tomap({
       SITE_URL           = "https://dev.example.org"
       EMAIL_BACKEND      = "chatbot.email_backend.SESBackend"
-      DEFAULT_FROM_EMAIL = "ChatbotLab (staging) <no-reply@example.org>"
+      DEFAULT_FROM_EMAIL = "ChatbotLab (test) <no-reply@example.org>"
     })
     error_message = "SITE_URL, EMAIL_BACKEND and DEFAULT_FROM_EMAIL must be set on the EB environment from the variables."
   }
@@ -68,11 +68,11 @@ run "instance_role_may_send_from_the_configured_address_only" {
 
   variables {
     email_backend      = "chatbot.email_backend.SESBackend"
-    default_from_email = "ChatbotLab (staging) <no-reply@example.org>"
+    default_from_email = "ChatbotLab (test) <no-reply@example.org>"
   }
 
   assert {
-    condition     = length(aws_iam_role_policy.eb_instance_send_email) == 1 && aws_iam_role_policy.eb_instance_send_email[0].role == "chatbotlab-staging-eb-instance-role"
+    condition     = length(aws_iam_role_policy.eb_instance_send_email) == 1 && aws_iam_role_policy.eb_instance_send_email[0].role == "chatbotlab-test-eb-instance-role"
     error_message = "The SES policy must be attached to the EB instance role."
   }
 
@@ -196,7 +196,7 @@ run "a_sender_that_is_not_an_address_is_rejected" {
 
   variables {
     email_backend      = "chatbot.email_backend.SESBackend"
-    default_from_email = "ChatbotLab staging"
+    default_from_email = "ChatbotLab test"
   }
 
   expect_failures = [var.default_from_email]

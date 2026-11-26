@@ -18,22 +18,14 @@ name: Deploy Infrastructure
 # │  a SECOND one, and you pay for both.                                    │
 # └─────────────────────────────────────────────────────────────────────────┘
 #
-# Two jobs:
+# One job, started only by hand. It runs in the GitHub Environment named by
+# the `environment` input, so required reviewers on that Environment must
+# approve before anything starts. `action` defaults to "plan": the run prints
+# the real plan and stops. Choose "apply" to print the plan and then apply
+# exactly that plan.
 #
-#   plan   Runs on every pull request that touches infra/terraform/**, for
-#          staging only, after a reviewer approves it in the plan-staging
-#          GitHub Environment. (Until secrets leave the state, no pull-request
-#          code gets a role that can read production's state: production is
-#          planned by the apply job with action = plan, from main.) Read-only: it
-#          assumes a role that cannot change AWS, takes no state lock, and is
-#          given no real application secrets. It skips with a notice when the role is not
-#          configured (and on pull requests from forks, which get no secrets).
-#
-#   apply  Runs only when a person starts the workflow by hand. It runs in the
-#          GitHub Environment named by the `environment` input, so required
-#          reviewers on that Environment must approve before anything starts.
-#          `action` defaults to "plan": the run prints the real plan and stops.
-#          Choose "apply" to print the plan and then apply exactly that plan.
+# Pull requests never run this workflow and never get AWS access: they run
+# only the offline checks in ci.yml ("Terraform test").
 #
 # A failed apply leaves everything in place. Nothing here destroys or deletes.
 #
@@ -51,28 +43,30 @@ name: Deploy Infrastructure
 #     TF_PROJECT_PREFIX     Name prefix for every AWS resource (var.project_name).
 #                           No default: a wrong value points Terraform at the
 #                           wrong state.
+#     TF_PROD_ACCOUNT_ID    AWS account of production.
+#     TF_TEST_ACCOUNT_ID    The lab's separate TEST account, where the test
+#                           stack lives. Must differ from TF_PROD_ACCOUNT_ID.
+#                           The job assumes
+#                           <TF_PROJECT_PREFIX>-terraform-apply-<environment>
+#                           in the account of the chosen environment, and
+#                           refuses credentials from any other account.
+#
+#   Environment secrets (Settings → Environments → production)
 #     GH_PAT                Token that can write repository secrets. Needed
-#                           only when write_deploy_secrets is ticked.
+#                           only when write_deploy_secrets is ticked
+#                           (production only). Never a repository secret:
+#                           any workflow run in the repository could read it.
 #
-#   Environment secret (Settings → Environments → plan-staging / plan-production)
-#     TF_PLAN_ROLE_ARN      Read-only IAM role the plan job assumes for that
-#                           environment.
-#
-#   Environment secrets (Settings → Environments → staging / production)
-#     TF_APPLY_ROLE_ARN     IAM role the apply job assumes.
+#   Environment secrets (Settings → Environments → test / production)
 #     DB_PASSWORD           Database password (letters + numbers only).
 #     ADMIN_PANEL_PASSWORD  Password of the `admin` user in the admin panel.
 #     OPENAI_API_KEY        OpenAI key (or ANTHROPIC_API_KEY, or both).
 #     ANTHROPIC_API_KEY
 #     SURVEY_INGEST_TOKEN   Optional.
-#   These may also be repository secrets, but then staging and production
-#   share them and are not protected by the Environment's reviewers.
+#   Keep these Environment secrets, not repository secrets: then test and
+#   production do not share them, and only an approved run can read them.
 
 on:
-  pull_request:
-    paths:
-      - 'infra/terraform/**'
-      - '.github/workflows/deploy-infrastructure.yml'
   workflow_dispatch:
     inputs:
       # No default on purpose: the person starting the run chooses. Each
@@ -82,8 +76,9 @@ on:
         description: 'Which environment to build or update'
         required: true
         type: choice
+        # test first: a choice list preselects its first entry.
         options:
-          - staging
+          - test
           - production
       # Plan unless told otherwise, so a run started without thought changes
       # nothing.
@@ -102,11 +97,12 @@ on:
         required: false
         default: false
         type: boolean
-      # Off unless asked. The deploy secrets decide where staging.yml and
-      # production.yml send the application, so writing them is a cutover step,
-      # not part of building infrastructure.
+      # Off unless asked. The deploy secrets decide where production.yml sends
+      # the application, so writing them is the cutover step, not part of
+      # building infrastructure. Production only: the test stack has no app
+      # deploy workflow.
       write_deploy_secrets:
-        description: "With apply: also point this environment's app deploy workflow at this stack (writes GitHub secrets)"
+        description: "Production, with apply: also point production.yml at this stack (writes GitHub secrets)"
         required: false
         default: false
         type: boolean
@@ -117,139 +113,9 @@ permissions: {}
 
 jobs:
   # ════════════════════════════════════════════════════════════════════════════
-  # plan — pull requests only, read-only
-  # ════════════════════════════════════════════════════════════════════════════
-  plan:
-    name: Plan (${{ matrix.environment }})
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    # Runs only after a required reviewer approves it in the
-    # plan-<environment> GitHub Environment: it runs the pull request's code
-    # with a role that can read that environment's Terraform state (which
-    # still holds secrets). Each plan role trusts only its own Environment.
-    environment: plan-${{ matrix.environment }}
-    permissions:
-      id-token: write
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        # Staging only: see the header.
-        environment: [staging]
-    env:
-      ENVIRONMENT:                        ${{ matrix.environment }}
-      TF_VAR_project_name:                ${{ secrets.TF_PROJECT_PREFIX }}
-      TF_VAR_environment:                 ${{ matrix.environment }}
-      TF_VAR_github_org:                  ${{ github.repository_owner }}
-      TF_VAR_github_repo:                 ${{ github.event.repository.name }}
-      TF_VAR_github_org_id:               ${{ github.repository_owner_id }}
-      TF_VAR_github_repo_id:              ${{ github.repository_id }}
-      TF_VAR_create_github_oidc_provider: false
-      # This job runs the pull request's own code, so it is given no real
-      # application secrets. The plan therefore always shows the database
-      # password and the secret application settings as changed. Ignore those
-      # lines; the plan printed by a manual run (action = plan) has the real
-      # values.
-      TF_VAR_db_password:                 placeholder-not-the-real-password
-      TF_VAR_admin_panel_password:        placeholder-not-the-real-password
-
-    steps:
-      # Skip, do not fail, when the plan role is not set up yet. Pull requests
-      # from forks land here too: GitHub gives them no secrets.
-      - name: Check that the plan role is configured
-        id: config
-        env:
-          TF_PLAN_ROLE_ARN:  ${{ secrets.TF_PLAN_ROLE_ARN }}
-          TF_PROJECT_PREFIX: ${{ secrets.TF_PROJECT_PREFIX }}
-        run: |
-          if [[ -z "$TF_PLAN_ROLE_ARN" || -z "$TF_PROJECT_PREFIX" ]]; then
-            echo "::notice::Terraform plan skipped: the TF_PLAN_ROLE_ARN (plan-staging Environment) and TF_PROJECT_PREFIX (repository) secrets are not both set (or this pull request comes from a fork). See infra/terraform/README.md, 'Running Terraform from GitHub Actions'."
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Checkout
-        if: steps.config.outputs.configured == 'true'
-        uses: actions/checkout@v7
-
-      - name: Setup Terraform
-        if: steps.config.outputs.configured == 'true'
-        uses: hashicorp/setup-terraform@v4
-        with:
-          terraform_version: '~1.11'
-          terraform_wrapper: false
-
-      - name: Configure AWS credentials (read-only role, OIDC)
-        if: steps.config.outputs.configured == 'true'
-        uses: aws-actions/configure-aws-credentials@v6
-        with:
-          role-to-assume: ${{ secrets.TF_PLAN_ROLE_ARN }}
-          aws-region: us-east-1
-
-      # An environment that was never built has no state to compare with.
-      - name: Locate Terraform state
-        id: state
-        if: steps.config.outputs.configured == 'true'
-        env:
-          TF_PROJECT_PREFIX: ${{ secrets.TF_PROJECT_PREFIX }}
-        run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          BUCKET="${TF_PROJECT_PREFIX}-tfstate-${ACCOUNT_ID}"
-          # Any error here (no bucket, access denied) fails the job: a
-          # skipped plan would hide what the pull request changes.
-          aws s3api head-bucket --bucket "$BUCKET"
-          if err=$(aws s3api head-object --bucket "$BUCKET" --key "${TF_PROJECT_PREFIX}/${ENVIRONMENT}/terraform.tfstate" 2>&1 >/dev/null); then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-            echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
-          elif grep -q "(404)" <<<"$err"; then
-            echo "::notice::Terraform plan skipped for ${ENVIRONMENT}: no state file yet (the environment has not been built)."
-            echo "found=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "$err"
-            echo "::error::Cannot read the ${ENVIRONMENT} state file. Check the plan role's permissions (bootstrap/iam/plan-permissions.json)."
-            exit 1
-          fi
-
-      - name: Initialise Terraform
-        if: steps.state.outputs.found == 'true'
-        working-directory: infra/terraform
-        env:
-          TF_PROJECT_PREFIX: ${{ secrets.TF_PROJECT_PREFIX }}
-        run: |
-          terraform init \
-            -backend-config="bucket=${{ steps.state.outputs.bucket }}" \
-            -backend-config="key=${TF_PROJECT_PREFIX}/${ENVIRONMENT}/terraform.tfstate" \
-            -backend-config="region=us-east-1" \
-            -backend-config="encrypt=true" \
-            -reconfigure \
-            -input=false
-
-      # -lock=false: this plan is never applied, and taking the lock would
-      # mean giving a role that runs pull-request code write access to the
-      # state bucket. The apply job plans again, under the lock.
-      - name: Plan
-        if: steps.state.outputs.found == 'true'
-        working-directory: infra/terraform
-        run: |
-          set -o pipefail
-          terraform plan -lock=false -input=false -no-color -var-file="environments/${ENVIRONMENT}.tfvars" | tee plan.txt
-          {
-            echo "## Terraform plan: ${ENVIRONMENT}"
-            echo ""
-            echo "\`$(grep -E '^(Plan:|No changes\.)' plan.txt | head -1)\`"
-            echo ""
-            echo "The full plan is in this job's log, step **Plan**."
-            echo ""
-            echo "The database password and the secret application settings always show as changed here: this job is given placeholders, not the real secrets."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  # ════════════════════════════════════════════════════════════════════════════
   # apply — started by hand, approved through the GitHub Environment
   # ════════════════════════════════════════════════════════════════════════════
   apply:
-    # A fixed name: on pull requests this job is skipped, and GitHub shows a
-    # skipped job's name without filling in expressions.
     name: Plan or apply (manual run)
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -287,7 +153,6 @@ jobs:
           ANTHROPIC_KEY:        ${{ secrets.ANTHROPIC_API_KEY }}
           DB_PASSWORD:          ${{ secrets.DB_PASSWORD }}
           ADMIN_PANEL_PASSWORD: ${{ secrets.ADMIN_PANEL_PASSWORD }}
-          TF_APPLY_ROLE_ARN:    ${{ secrets.TF_APPLY_ROLE_ARN }}
           GH_PAT:               ${{ secrets.GH_PAT }}
           TF_PROJECT_PREFIX:    ${{ secrets.TF_PROJECT_PREFIX }}
           OLD_DOMAIN_NAME:      ${{ secrets.DOMAIN_NAME }}
@@ -297,7 +162,6 @@ jobs:
           fail=0
           missing() { echo "::error::$1 secret is not set"; fail=1; }
 
-          [[ -z "$TF_APPLY_ROLE_ARN" ]]    && missing "TF_APPLY_ROLE_ARN"
           [[ -z "$DB_PASSWORD" ]]          && missing "DB_PASSWORD"
           [[ -z "$ADMIN_PANEL_PASSWORD" ]] && missing "ADMIN_PANEL_PASSWORD"
           [[ -z "$TF_PROJECT_PREFIX" ]]    && missing "TF_PROJECT_PREFIX"
@@ -316,8 +180,19 @@ jobs:
             fail=1
           fi
 
+          # Production only from main. The production Environment's branch
+          # rule and the role's trust policy refuse other branches too.
+          if [[ "$ENVIRONMENT" == "production" && "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::Production is built only from main; this run is on $GITHUB_REF."
+            fail=1
+          fi
+
           if [[ "$WRITE_DEPLOY_SECRETS" == "true" && "$ACTION" != "apply" ]]; then
             echo "::error::write_deploy_secrets needs action = apply."
+            fail=1
+          fi
+          if [[ "$WRITE_DEPLOY_SECRETS" == "true" && "$ENVIRONMENT" != "production" ]]; then
+            echo "::error::write_deploy_secrets is for production only: the test stack has no app deploy workflow."
             fail=1
           fi
           [[ "$WRITE_DEPLOY_SECRETS" == "true" && -z "$GH_PAT" ]] && missing "GH_PAT"
@@ -335,21 +210,6 @@ jobs:
               exit 1
             fi
             gh secret delete __PREFLIGHT_TEST__ --repo "${{ github.repository }}" 2>/dev/null || true
-
-            # production.yml falls back to AWS_ACCOUNT_ID, AWS_ROLE_NAME and
-            # AWS_BACKEND_APPLICATION_NAME until its own AWS_PROD_* secrets
-            # exist. Writing the staging values while it still falls back
-            # would repoint production deploys at the staging stack.
-            if [[ "$ENVIRONMENT" == "staging" ]]; then
-              existing=$(gh secret list --repo "${{ github.repository }}" --json name --jq '.[].name')
-              for name in AWS_PROD_ACCOUNT_ID AWS_PROD_ROLE_NAME AWS_PROD_BACKEND_APPLICATION_NAME; do
-                if ! grep -qx "$name" <<<"$existing"; then
-                  echo "::error::$name is not set. Set the three AWS_PROD_* secrets (account, role, EB application) to the values production uses today before writing the staging secrets."
-                  fail=1
-                fi
-              done
-              if [[ $fail -eq 1 ]]; then exit 1; fi
-            fi
           fi
 
           echo "All required secrets are present and valid."
@@ -366,11 +226,40 @@ jobs:
           terraform_wrapper: false
 
       # ── 4. AWS credentials (short-lived, GitHub OIDC) ─────────────────────────
+      # Production and test live in different AWS accounts. The account comes
+      # from the environment, here and nowhere else, and the credentials
+      # action refuses credentials from any other account.
+      - name: Choose the AWS account
+        id: aws
+        env:
+          TF_PROD_ACCOUNT_ID: ${{ secrets.TF_PROD_ACCOUNT_ID }}
+          TF_TEST_ACCOUNT_ID: ${{ secrets.TF_TEST_ACCOUNT_ID }}
+          TF_PROJECT_PREFIX:  ${{ secrets.TF_PROJECT_PREFIX }}
+        run: |
+          case "$ENVIRONMENT" in
+            production) ACCOUNT="$TF_PROD_ACCOUNT_ID" ;;
+            test)       ACCOUNT="$TF_TEST_ACCOUNT_ID" ;;
+            *)          echo "::error::Unknown environment '$ENVIRONMENT'"; exit 1 ;;
+          esac
+          if [[ ! "$ACCOUNT" =~ ^[0-9]{12}$ ]]; then
+            echo "::error::The AWS account ID of $ENVIRONMENT is not set (repository secret TF_PROD_ACCOUNT_ID or TF_TEST_ACCOUNT_ID, 12 digits)."
+            exit 1
+          fi
+          if [[ "$TF_PROD_ACCOUNT_ID" == "$TF_TEST_ACCOUNT_ID" ]]; then
+            echo "::error::TF_TEST_ACCOUNT_ID equals TF_PROD_ACCOUNT_ID. The test stack must live in the lab's separate TEST account."
+            exit 1
+          fi
+          {
+            echo "account=$ACCOUNT"
+            echo "role=arn:aws:iam::${ACCOUNT}:role/${TF_PROJECT_PREFIX}-terraform-apply-${ENVIRONMENT}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ secrets.TF_APPLY_ROLE_ARN }}
+          role-to-assume: ${{ steps.aws.outputs.role }}
           aws-region: us-east-1
+          allowed-account-ids: ${{ steps.aws.outputs.account }}
 
       # ── 5. Find the S3 state bucket; create it on a first apply ──────────────
       # Deterministic name: "<TF_PROJECT_PREFIX>-tfstate-<ACCOUNT_ID>" — no random
@@ -514,11 +403,10 @@ jobs:
         run: |
           terraform apply -input=false tfplan
 
-      # ── 11. Point one environment's app deploy workflow at this stack ─────────
-      # Only when asked, and only the secrets of the environment that was
-      # built: staging.yml reads the plain names, production.yml reads the
-      # *PROD* names. The two lists share nothing, so building one environment
-      # can never repoint the other's deploys.
+      # ── 11. Point production.yml at this stack ────────────────────────────────
+      # Only when asked, and only for production: production.yml reads the
+      # *PROD* names. The plain AWS_* names belong to staging.yml, which
+      # deploys the hand-built dev site, and are never written here.
       - name: Write deployment secrets
         if: inputs.action == 'apply' && inputs.write_deploy_secrets
         working-directory: infra/terraform
@@ -530,14 +418,6 @@ jobs:
           out() { terraform output -raw "github_secret_$1"; }
 
           case "$ENVIRONMENT" in
-            staging)
-              set_secret AWS_ACCOUNT_ID                 "$(out AWS_ACCOUNT_ID)"
-              set_secret AWS_ROLE_NAME                  "$(out AWS_ROLE_NAME)"
-              set_secret AWS_S3_BUCKET_NAME_FRONTEND    "$(out AWS_S3_BUCKET_NAME_FRONTEND)"
-              set_secret AWS_CLOUDFRONT_DISTRIBUTION_ID "$(out AWS_CLOUDFRONT_DISTRIBUTION_ID)"
-              set_secret AWS_BACKEND_APPLICATION_NAME   "$(out AWS_BACKEND_APPLICATION_NAME)"
-              set_secret AWS_BACKEND_ENVIRONMENT_NAME   "$(out AWS_BACKEND_ENVIRONMENT_NAME)"
-              ;;
             production)
               set_secret AWS_PROD_ACCOUNT_ID                 "$(out AWS_ACCOUNT_ID)"
               set_secret AWS_PROD_ROLE_NAME                  "$(out AWS_ROLE_NAME)"

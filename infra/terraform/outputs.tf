@@ -28,41 +28,41 @@ output "backend_api_url" {
 
 # -----------------------------------------------------------------------------
 # Deploy secret values
-# Each value goes into a differently named GitHub secret per environment:
-# staging.yml reads AWS_*, production.yml reads AWS_PROD_* / AWS_S3_PROD_*.
-# Set only the names of the environment this stack is (setup.sh prints them,
-# and the Deploy Infrastructure workflow writes them when asked). Setting a
-# staging name from a production stack would point staging deploys, which
-# empty the frontend bucket first, at production.
+# For a production stack, each value goes into the GitHub secret that
+# production.yml reads (AWS_PROD_* / AWS_S3_PROD_*); setup.sh prints them and
+# the Deploy Infrastructure workflow writes them when asked. The test stack
+# has no app deploy workflow. Never copy these into the plain AWS_* names
+# staging.yml reads: it deploys the hand-built dev site and empties its
+# frontend bucket first.
 # -----------------------------------------------------------------------------
 
 output "github_secret_AWS_ACCOUNT_ID" {
-  description = "AWS account ID. Deploy secret: AWS_ACCOUNT_ID for staging, AWS_PROD_ACCOUNT_ID for production."
+  description = "AWS account ID. Production deploy secret: AWS_PROD_ACCOUNT_ID."
   value       = data.aws_caller_identity.current.account_id
 }
 
 output "github_secret_AWS_ROLE_NAME" {
-  description = "IAM role GitHub Actions assumes via OIDC. Deploy secret: AWS_ROLE_NAME for staging, AWS_PROD_ROLE_NAME for production."
+  description = "IAM role GitHub Actions assumes via OIDC. Production deploy secret: AWS_PROD_ROLE_NAME."
   value       = aws_iam_role.github_actions_deployment.name
 }
 
 output "github_secret_AWS_S3_BUCKET_NAME_FRONTEND" {
-  description = "Frontend bucket. Holds the compiled React app. Deploy secret: AWS_S3_BUCKET_NAME_FRONTEND for staging, AWS_S3_PROD_BUCKET_NAME_FRONTEND for production."
+  description = "Frontend bucket. Holds the compiled React app. Production deploy secret: AWS_S3_PROD_BUCKET_NAME_FRONTEND."
   value       = aws_s3_bucket.frontend_assets.id
 }
 
 output "github_secret_AWS_CLOUDFRONT_DISTRIBUTION_ID" {
-  description = "CloudFront distribution invalidated after each frontend deploy. Deploy secret: AWS_CLOUDFRONT_DISTRIBUTION_ID for staging, AWS_PROD_CLOUDFRONT_DISTRIBUTION_ID for production."
+  description = "CloudFront distribution invalidated after each frontend deploy. Production deploy secret: AWS_PROD_CLOUDFRONT_DISTRIBUTION_ID."
   value       = aws_cloudfront_distribution.frontend.id
 }
 
 output "github_secret_AWS_BACKEND_APPLICATION_NAME" {
-  description = "Elastic Beanstalk application. Deploy secret: AWS_BACKEND_APPLICATION_NAME for staging, AWS_PROD_BACKEND_APPLICATION_NAME for production."
+  description = "Elastic Beanstalk application. Production deploy secret: AWS_PROD_BACKEND_APPLICATION_NAME."
   value       = aws_elastic_beanstalk_application.chatbot_api.name
 }
 
 output "github_secret_AWS_BACKEND_ENVIRONMENT_NAME" {
-  description = "Elastic Beanstalk environment. Deploy secret: AWS_BACKEND_ENVIRONMENT_NAME for staging, AWS_PROD_BACKEND_ENVIRONMENT_NAME for production."
+  description = "Elastic Beanstalk environment. Production deploy secret: AWS_PROD_BACKEND_ENVIRONMENT_NAME."
   value       = aws_elastic_beanstalk_environment.chatbot_api.name
 }
 

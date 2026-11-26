@@ -9,8 +9,8 @@
 # -----------------------------------------------------------------------------
 
 # Which environment am I deploying?
-# Allowed values: "staging" or "production"
-environment = "staging"
+# Allowed values: "test" or "production"
+environment = "test"
 
 # The AWS region where I deploy everything.
 # All resources (EB, RDS, ElastiCache, S3, CloudFront) land here.
@@ -62,7 +62,7 @@ github_org = "wwbp"
 github_repo = "chatbotlab"
 
 # -----------------------------------------------------------------------
-# Instance sizing — safe to leave as defaults for staging
+# Instance sizing — safe to leave as defaults for the test stack
 # -----------------------------------------------------------------------
 
 # EC2 instance type for the Elastic Beanstalk application servers

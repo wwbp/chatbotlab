@@ -8,7 +8,7 @@
 
 locals {
   # Every AWS resource I create is prefixed with this value.
-  # Example: "humanlike-chatbot-staging"
+  # Example: "humanlike-chatbot-production"
   name_prefix = "${var.project_name}-${var.environment}"
 
   # Every role this stack creates carries this boundary (a customer managed

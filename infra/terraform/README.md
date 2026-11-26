@@ -22,7 +22,8 @@ nothing to configure in the AWS console after apply completes.
 
 > **This Terraform does not manage the live deployment**
 >
-> Staging and production were built **manually**, before this IaC existed, and
+> The live sites (production `bot.wwbp.org`, and the dev site
+> `dev.bot.wwbp.org` that `staging.yml` deploys) were built **manually**, before this IaC existed, and
 > are not tracked in any Terraform state. As of this writing the live stack is:
 >
 > | Layer | Live (manual, unmanaged) | What Terraform would create |
@@ -36,9 +37,9 @@ nothing to configure in the AWS console after apply completes.
 > you also pay for. Migrating the live deployment under Terraform is a separate
 > exercise requiring deliberate `terraform import` of each resource.
 >
-> To validate the IaC, run it with a distinct `TF_PROJECT_PREFIX` (for example
-> `chatbotlab-iac-test`), ideally in a separate AWS account, and tear it down
-> afterwards with the Destroy Infrastructure workflow.
+> To validate the IaC, build the on-demand **test stack** in the lab's
+> separate TEST account and destroy it afterwards (see "Running Terraform
+> from GitHub Actions").
 
 ---
 
@@ -50,7 +51,7 @@ nothing to configure in the AWS console after apply completes.
 | Public subnets | 10.0.1/24, 10.0.2/24 | Load balancer and application instances |
 | Private subnets | 10.0.10/24, 10.0.11/24 | RDS and ElastiCache — no internet route |
 | Security groups | 4 (CloudFront → ALB → EB → RDS/Cache) | Least-privilege firewall chain; the ALB accepts CloudFront only |
-| RDS MariaDB 10.11 | db.t3.micro (staging) | Primary database, encrypted, automated backups |
+| RDS MariaDB 10.11 | db.t3.micro | Primary database, encrypted, automated backups |
 | ElastiCache Serverless Redis | TLS-only | Django session cache |
 | S3 frontend bucket | Private + CloudFront OAC | Compiled React app |
 | S3 data bucket | Private + CORS | Avatars, uploads, voice audio |
@@ -122,7 +123,7 @@ Open `terraform.tfvars` and fill in every value:
 | `db_password` | Make up a strong password (letters + numbers, min 8 chars) |
 | `admin_panel_password` | Make up a password — you log into `/api/admin/` with it as user `admin` |
 | `project_name` | A short prefix for every AWS resource (must match `TF_PROJECT_PREFIX`) |
-| `environment` | `"staging"` or `"production"` |
+| `environment` | `"test"` or `"production"` |
 
 `django_secret_key` is not in that list on purpose. Leave it empty and Terraform
 generates one and keeps it in state, so it stays stable across re-deploys and
@@ -149,24 +150,16 @@ What the script does:
 
 ### Step 4 — Configure GitHub Actions secrets
 
-After `setup.sh` finishes, it prints the secrets for the environment named in
-`terraform.tfvars`, and only those. Staging:
-
-```
-AWS_ACCOUNT_ID                                    123456789012
-AWS_ROLE_NAME                                     <project-prefix>-staging-github-actions
-AWS_S3_BUCKET_NAME_FRONTEND                       <project-prefix>-staging-frontend
-...
-```
-
-Production prints the names `production.yml` reads instead
-(`AWS_PROD_ACCOUNT_ID`, `AWS_PROD_ROLE_NAME`, `AWS_S3_PROD_BUCKET_NAME_FRONTEND`, ...).
+For a production stack, `setup.sh` prints the secrets `production.yml` reads
+(`AWS_PROD_ACCOUNT_ID`, `AWS_PROD_ROLE_NAME`, `AWS_S3_PROD_BUCKET_NAME_FRONTEND`,
+...). A test stack prints none: it has no app deploy workflow (deploy to it by
+hand, see "Manual deployment").
 
 Go to `https://github.com/<org>/<repo>/settings/secrets/actions` and add each
 value as a repository secret using the exact name shown. Never copy a value
-from one environment's stack into the other environment's secret names:
-`staging.yml` empties the bucket named in `AWS_S3_BUCKET_NAME_FRONTEND` before
-each deploy, so pointing it at production's bucket wipes the live frontend.
+into the plain `AWS_*` names `staging.yml` reads: that workflow deploys the
+hand-built dev site and empties the bucket named in
+`AWS_S3_BUCKET_NAME_FRONTEND` before each deploy.
 
 You can re-print these values at any time:
 ```bash
@@ -178,11 +171,8 @@ production; use the `AWS_PROD_*` names above.
 
 ### Step 5 — First application deployment
 
-Push to the branch that triggers your workflow:
-
-```bash
-git push origin staging    # triggers .github/workflows/staging.yml
-```
+For production, push to `main` (triggers `.github/workflows/production.yml`).
+For the test stack, deploy by hand ("Manual deployment" below).
 
 The workflow builds the React app, syncs it to S3, invalidates CloudFront, and
 deploys the Django backend to Elastic Beanstalk. The first deploy takes about
@@ -204,48 +194,83 @@ curl $(terraform output -raw backend_api_url)/health/
 
 ## Running Terraform from GitHub Actions
 
-`.github/workflows/deploy-infrastructure.yml` is the way to change a shared
-environment. It has two jobs.
-
-| Job | Starts when | What it does |
+| Where | What | AWS access |
 |---|---|---|
-| `plan` | A pull request touches `infra/terraform/**`, and a reviewer approves the run in the `plan-staging` GitHub Environment | Prints `terraform plan` for staging only (production is planned by `apply` with `action = plan`, from `main`). Read-only. Skips with a notice if its role is not configured |
-| `apply` | A person runs the workflow by hand and picks an environment | Runs in the GitHub Environment of that name. `action = plan` (the default) prints the real plan and stops. `action = apply` prints the plan, then applies exactly that plan |
+| Your laptop | Local containers, the full test suite | None |
+| Pull requests | Offline checks only (`ci.yml`, job **Terraform test**): `terraform fmt -check`, `terraform validate` (`init -backend=false`), the mocked `terraform test`, `tests/check_workflows.py` | None: no OIDC, no role, no GitHub Environment, no secrets |
+| Test stack | Applied on demand in the lab's separate **TEST** AWS account for a rehearsal or a risky change, tested, then destroyed | The test account only |
+| Production | Plan, then apply, by hand from `main`, behind the `production` GitHub Environment | The production account only |
 
-A failed apply leaves everything in place. The workflow never destroys.
+`.github/workflows/deploy-infrastructure.yml` has one job, started by hand
+(**Actions → Deploy Infrastructure → Run workflow**). Pick `environment`
+(`test` or `production`) and `action`: `plan` (the default) prints the plan
+and stops; `apply` prints the plan, then applies exactly that plan. A plan
+that deletes or replaces anything stops unless `allow_destroy` is ticked. A
+second run on the same environment waits for the first. A failed apply
+leaves everything in place; the workflow never destroys.
+
+`.github/workflows/destroy-infrastructure.yml` removes a stack:
+
+- **test**: type `test` and approve the run. Nothing is backed up: the test
+  stack's data bucket and database are deleted for good. It holds no study
+  data.
+- **production**: type `production`, `destroy production` and
+  `destroy data`, tick `allow_production`, run from `main`, approve. The data
+  bucket is copied to the state bucket and verified first, and the database
+  leaves a final snapshot.
 
 ### Settings
 
-- **Non-secret settings** are in `environments/staging.tfvars` and
-  `environments/production.tfvars` (instance sizes, `domain_name`). Change them
-  in a pull request: the `plan` job shows the effect.
+- **Non-secret settings** are in `environments/production.tfvars` and
+  `environments/test.tfvars` (instance sizes, `domain_name`, data safety).
+  Production keeps `deletion_protection = true`, `backup_retention_period = 7`
+  and `force_destroy_buckets = false`; `variables.tf` refuses relaxing them
+  anywhere but test. Change them in a pull request.
 - **Secrets** are GitHub secrets. Their names are listed at the top of the
   workflow file.
 
-### One-time setup
+### The two accounts
 
-The Terraform stack shares an AWS account with the hand-built live deployment
-(EB application `humanlikebot`, its `awseb-e-*` RDS instances, the
+Each run picks the AWS account from the environment: `TF_PROD_ACCOUNT_ID`
+for production, `TF_TEST_ACCOUNT_ID` for test (the two must differ). It
+assumes `<PREFIX>-terraform-apply-<environment>` in that account and refuses
+credentials from any other account. Each account has its own state bucket,
+`<PREFIX>-tfstate-<account id>`, with the state at
+`<PREFIX>/<environment>/terraform.tfstate`.
+
+The production account also holds the hand-built live deployment (EB
+application `humanlikebot`, its `awseb-e-*` RDS instances, the
 `bot.wwbp.org` / `dev.bot.wwbp.org` / `bot-avatar.wwbp.org` /
 `dev.bot-avatar.wwbp.org` buckets and their two CloudFront distributions).
-The roles below are isolated from it, and from each other, by policy:
+The production role is isolated from it by policy:
 
-- every role is explicitly denied the live resources, by name (EB application
-  `humanlikebot`, `awseb-e-*` databases and snapshots, the four buckets, the
-  two distributions, the `humanlikebot/` keys in the shared
-  `elasticbeanstalk-*` bucket) and by the tag
+- explicitly denied the live resources, by name and by the tag
   `elasticbeanstalk:environment-name` = `humanlikebot-env` /
   `humanlike-bot-development-env` (the EB-made instances, security groups,
   load balancers, Auto Scaling groups and `awseb-e-*` CloudFormation stacks);
-- every role is denied the other environment's names (`<PREFIX>-<other>-*`,
-  its state, its EB keys) and anything tagged `Environment=<other>`;
-- every role is denied any change to the GitHub OIDC provider;
-- a role trusts one GitHub Environment on one branch, and reads only its own
-  environment's state file.
+- denied the retired `<PREFIX>-staging-*` names and anything tagged
+  `Environment=staging`;
+- denied any change to the GitHub OIDC provider (read-only);
+- trusts only the `production` GitHub Environment on `main`, reads only
+  production's state file.
+
+The test role uses the same policies with `test` in place of `production`
+(so a rehearsal also tests them) and trusts only the `test` GitHub
+Environment, on `main` or a `test/*` branch (push a risky infrastructure
+change to `test/<name>` to try it before it merges). It lives in the TEST
+account, so it cannot reach production.
+
+The TEST account is not a throwaway: during a data-migration rehearsal it
+holds a copy of a production snapshot, with real participant data.
+**Approving a test run trusts that branch's code with the TEST account**,
+and so with that copy. Read the branch before you approve.
+
+### One-time setup (the owner)
 
 The policies are committed in `bootstrap/iam/` and checked by
-`tests/check_workflows.py`. Replace `<ACCOUNT_ID>` and `<PREFIX>` (the value of
-`TF_PROJECT_PREFIX`) before using them, for example:
+`tests/check_workflows.py`. Replace `<ACCOUNT_ID>` (the account the policy
+goes into), `<PREFIX>` (the value of `TF_PROJECT_PREFIX`) and
+`<SES_FROM_DOMAIN>` before using them, for example:
 
 ```bash
 for f in bootstrap/iam/*.json; do
@@ -254,110 +279,78 @@ for f in bootstrap/iam/*.json; do
 done
 ```
 
-Do these steps in order. Steps 1 to 4 are in AWS (an administrator, once),
-steps 5 to 7 in GitHub. Everything happens per environment `<env>` =
-`staging` and `production`.
+In **each** account (production with `<env>` = `production`, TEST with
+`<env>` = `test`), as an administrator:
 
-1. **GitHub OIDC provider.** The AWS account needs the identity provider
-   `token.actions.githubusercontent.com` (audience `sts.amazonaws.com`). Check
-   with `aws iam list-open-id-connect-providers`. The live deploy roles use it
-   too, so it is created once, by hand, and no Terraform stack owns it: the
-   workflows always pass `create_github_oidc_provider = false`, and every
-   Terraform role is denied changing it. If it is missing, create it with
-   `aws iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com`.
-   If an existing state already owns the provider (an older stack built with
-   `create_github_oidc_provider = true`), its next plan shows the provider as
-   deleted and the deletion check stops the run: move it out of that state
-   with `terraform state rm aws_iam_openid_connect_provider.github_actions[0]`
+1. **GitHub OIDC provider** `token.actions.githubusercontent.com` (audience
+   `sts.amazonaws.com`). Check with `aws iam list-open-id-connect-providers`;
+   if missing, `aws iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com`.
+   No Terraform stack owns it: the workflows always pass
+   `create_github_oidc_provider = false`. If an existing state already owns
+   the provider (an older stack built with `create_github_oidc_provider =
+   true`), its next plan shows the provider as deleted and the deletion
+   check stops the run: move it out of that state with
+   `terraform state rm aws_iam_openid_connect_provider.github_actions[0]`
    (by hand, with admin credentials) first.
 2. **Permissions boundary** `<PREFIX>-terraform-boundary-<env>`, a customer
-   managed policy from `bootstrap/iam/boundary-<env>.json` (also replace
-   `<SES_FROM_DOMAIN>` with the domain the app sends email from). It caps
-   every role the stack creates (EB instance and service roles, the deploy
-   role): no IAM changes, no Terraform state, S3 only the environment's
-   buckets and EB keys, SSM only `parameter/<PREFIX>-<env>/`, nothing live,
-   nothing of the other environment. Terraform always attaches it, also when
-   run locally with `setup.sh`, so create it before the first apply. The apply
-   role may create or change a role (inline policies, attached policies) only
-   when that role carries this boundary, and cannot remove or swap it.
-   **Roles that already exist** (a stack built before this change) must get
-   the boundary once, by an administrator, before the apply policy is granted:
+   managed policy from `bootstrap/iam/boundary-<env>.json`. It caps every
+   role the stack creates; Terraform always attaches it, so create it before
+   the first apply. **Roles that already exist** (a stack built before the
+   boundary) must get it once, before the apply policy is granted:
    `aws iam put-role-permissions-boundary --role-name <role> --permissions-boundary arn:aws:iam::<ACCOUNT_ID>:policy/<PREFIX>-terraform-boundary-<env>`
    for each `<PREFIX>-<env>-*` role. The apply role cannot change a role's
-   trust policy (`iam:UpdateAssumeRolePolicy` is not granted); a change to
-   one is an administrator's job.
-3. **Plan role** `<PREFIX>-terraform-plan-staging`, staging only. Trust:
-   `bootstrap/iam/plan-staging-trust.json` (subject
-   `repo:wwbp/chatbotlab:environment:plan-staging`, ref `refs/pull/*/merge`).
-   Permissions: `bootstrap/iam/plan-staging-permissions.json` as a customer
-   managed policy: describe/list/get only, `s3:GetObject` on staging's state
-   file only. There is deliberately no production plan role: until secrets
-   leave the state, no pull-request code may run with a role that reads
-   production's state. Production is planned by the apply job
-   (`action = plan`), which runs only from `main` in the `production`
-   Environment.
-4. **Apply roles** `<PREFIX>-terraform-apply-<env>`. Trust:
-   `bootstrap/iam/apply-<env>-trust.json` (subject
-   `repo:wwbp/chatbotlab:environment:<env>`, ref `refs/heads/main` for
-   production; `refs/heads/staging` for staging, so staging is built from the
-   branch that `staging.yml` deploys). Permissions: three customer managed
-   policies (one would exceed IAM's 6144-character limit),
-   `bootstrap/iam/apply-<env>-permissions.json`, `-abac.json` and
-   `-guardrails.json` (the explicit Denies). RDS, ElastiCache, Elastic
-   Beanstalk, log groups and S3 only under `<PREFIX>-<env>` names; in the
-   shared `elasticbeanstalk-*` bucket only the `<PREFIX>-<env>/` keys; named
-   IAM actions only on `<PREFIX>-<env>-*` roles and instance profiles,
-   attaching only the Elastic Beanstalk managed policies. EC2, load
-   balancing, Auto Scaling, CloudFormation, CloudFront and ACM (resources
-   Elastic Beanstalk names itself) by tag, positively: creating calls must
-   carry `Environment=<env>` and `Project=<PREFIX>` (and only known tag keys);
-   every other call needs those tags on the resource; tagging an existing
-   resource needs both. Untagged resources, such as the hand-built live ones,
-   are out of reach. This depends on Elastic Beanstalk and CloudFormation
-   passing the environment's tags to what they create: if the first apply
-   fails with AccessDenied on an EC2/ELB/Auto Scaling call, that is where to
-   look (it fails closed). Verify the first apply in a test account:
-   Elastic Beanstalk may need more of its bucket (`resources/`) than these
-   policies give.
-5. **GitHub Environments** (Settings → Environments):
-   - `plan-staging`: **Required reviewers**, **Prevent self-review** ticked.
-     Approve a run only after reading the pull request: the plan runs its
-     code with a role that reads staging's state (and so its secrets). The
-     first pull-request runs created this Environment, and an unused one
-     for a production plan, with no rules: add the reviewers here, and
-     delete the production plan Environment.
-   - `staging`: **Required reviewers**; **Deployment branches**: `staging`
-     only (the branch the staging trust policy accepts).
-   - `production`: **Required reviewers**, **Prevent self-review** ticked;
-     **Deployment branches**: `main` only.
-   Without required reviewers, anyone who can run workflows can apply.
-6. **Environment secrets**: in `plan-staging`, `TF_PLAN_ROLE_ARN`. In `staging` and `production`:
-   `TF_APPLY_ROLE_ARN`, `DB_PASSWORD`, `ADMIN_PANEL_PASSWORD`, and
-   `OPENAI_API_KEY` and/or `ANTHROPIC_API_KEY`. Optional:
-   `SURVEY_INGEST_TOKEN`.
-7. **Repository secrets**: `TF_PROJECT_PREFIX`. `GH_PAT` only if you use
-   `write_deploy_secrets`.
+   trust policy; that is an administrator's job.
+3. **Apply role** `<PREFIX>-terraform-apply-<env>`, exactly this name (the
+   workflow builds the ARN from it). Trust: `bootstrap/iam/apply-production-trust.json`
+   (environment `production`, ref `refs/heads/main`) or
+   `bootstrap/iam/apply-test-trust.json` (environment `test`, refs
+   `refs/heads/main` and `refs/heads/test/*`).
+   Permissions: three customer managed policies (one would exceed IAM's
+   6144-character limit), `bootstrap/iam/apply-<env>-permissions.json`,
+   `-abac.json` and `-guardrails.json`. They scope RDS, ElastiCache, Elastic
+   Beanstalk, logs and S3 to `<PREFIX>-<env>` names, and EC2, load
+   balancing, Auto Scaling, CloudFormation, CloudFront and ACM to the
+   `Environment=<env>` / `Project=<PREFIX>` tags. If the first test apply
+   fails with AccessDenied, widen the test policy first, then carry the fix
+   to production in a pull request.
 
-Then run the workflow from `staging`: environment `staging`, action `apply`.
-The first apply creates the state bucket.
+In GitHub (**Settings**):
+
+4. **Environments**:
+   - `production`: **Required reviewers**: the owner and one senior
+     colleague; **Prevent self-review**: off (the owner approves their own
+     runs); **Deployment branches**: `main` only.
+   - `test`: **Required reviewers**: the owner; **Deployment branches**: `main` and `test/*`
+     (the same refs `apply-test-trust.json` accepts).
+   Without required reviewers, anyone who can run workflows can apply.
+5. **Environment secrets**, in `production` and in `test` (different values):
+   `DB_PASSWORD`, `ADMIN_PANEL_PASSWORD`, and `OPENAI_API_KEY` and/or
+   `ANTHROPIC_API_KEY`. Optional: `SURVEY_INGEST_TOKEN`. The test stack uses
+   its own LLM API keys, scoped to it (a separate project or key with a low
+   spending limit), never production's. In `production` only: `GH_PAT`, if
+   you use `write_deploy_secrets` (it can write repository secrets, so keep
+   it out of the repository secrets, where any workflow run could read it).
+6. **Repository secrets**: `TF_PROJECT_PREFIX`, `TF_PROD_ACCOUNT_ID`,
+   `TF_TEST_ACCOUNT_ID`.
+7. **Delete what is left of the old setup**: the Environments
+   `plan-staging` and `plan-production`, the secrets `TF_PLAN_ROLE_ARN` and
+   `TF_APPLY_ROLE_ARN` (wherever they were set), a repository-level `GH_PAT`, and, in AWS, the role
+   `<PREFIX>-terraform-plan-staging` and any `<PREFIX>-terraform-apply-staging`
+   role or `<PREFIX>-terraform-boundary-staging` policy. Keep the plain
+   `AWS_*` repository secrets: `staging.yml` still deploys the hand-built dev
+   site with them.
+
+Then run the workflow from `main` or a `test/*` branch: environment `test`, action `apply`. The
+first apply creates the test account's state bucket.
 
 ### Secrets in the state file
 
 The Terraform state still holds the database password, the admin password,
-the API keys and the Django secret key. **Anyone who can run a plan for an
-environment can read that environment's state, and so its secrets.** That
-includes the code of any pull request a reviewer approves in `plan-staging`
-(staging's secrets only; pull requests never get a production role).
-Moving the secrets out of the state into Secrets Manager is the next,
-separate change (decided by the owner); until it lands, treat approving a
-plan like handing over that environment's secrets.
-
-### What a pull-request plan cannot show
-
-The `plan` job is given placeholders in place of the real passwords and keys,
-because it runs code from the pull request. Its plan always shows the database
-password and the secret application settings as changed. For the exact plan,
-run the workflow by hand with `action = plan`.
+the API keys and the Django secret key. Anyone who can run a plan for an
+environment can read its secrets; that is why every run needs an approval in
+that environment's GitHub Environment, and pull requests get no AWS access.
+Moving the secrets out of the state into Secrets Manager is a separate,
+later change.
 
 ## Offline checks
 
@@ -365,58 +358,34 @@ run the workflow by hand with `action = plan`.
 account or credentials. CI runs it on every pull request:
 
 ```bash
+terraform fmt -check -recursive
 terraform init -backend=false && terraform validate && terraform test
 ```
 
-`tests/check_workflows.py` reads the infrastructure workflows as text and fails
-if a known hazard comes back (destroy on failure, a hardcoded environment, a
-state key shared by both environments, a missing state lock). CI runs it in the
-same job:
+`tests/check_workflows.py` reads the workflows, the IAM policies and the
+settings files as text and fails if a known hazard comes back (destroy on
+failure, a hardcoded environment, a shared state key, a missing state lock,
+AWS access on a pull request, test and production crossing accounts, a
+relaxed production setting). CI runs it in the same job:
 
 ```bash
 python3 infra/terraform/tests/check_workflows.py   # from the repository root
 ```
 
-## Testing on a separate AWS account
+## The test stack by hand
 
-Use this to validate Terraform changes without touching the existing staging
-or production deployment.
-
-### On your machine (Terraform apply)
-
-Configure credentials for the test account in a named profile:
+To build the test stack from your machine instead, sign in to the TEST
+account and run `setup.sh` with `environment = "test"` in
+`terraform.tfvars`:
 
 ```bash
-aws configure --profile test-account
-# Enter the test account keys when prompted
-```
-
-Run setup with that profile:
-```bash
-cd terraform
 AWS_PROFILE=test-account bash setup.sh
-# Enter environment="staging" and a test project_name (e.g. "chatbot-test")
-# in terraform.tfvars to keep resource names distinct
+AWS_PROFILE=test-account terraform destroy -var-file=terraform.tfvars -var-file=environments/test.tfvars
 ```
 
-### Tear down the test environment
-
-For a stack built by the Deploy Infrastructure workflow, use the **Destroy
-Infrastructure** workflow. It asks for the environment by name, for the typed
-confirmation `destroy <environment>`, and, for production, for
-`allow_production`. For a stack built with `setup.sh`:
-
-```bash
-AWS_PROFILE=test-account terraform destroy -var-file=terraform.tfvars
-```
-
-On staging the destroy completes without extra steps.
-On production, you must first disable deletion protection:
-```bash
-# Edit rds.tf: set deletion_protection = false, then:
-AWS_PROFILE=test-account terraform apply -var-file=terraform.tfvars
-AWS_PROFILE=test-account terraform destroy -var-file=terraform.tfvars
-```
+`environments/test.tfvars` turns deletion protection off and lets the
+buckets be force-destroyed, so the destroy needs no extra steps. Use the
+Destroy Infrastructure workflow for a stack the workflow built.
 
 ---
 
@@ -460,11 +429,11 @@ a mailbox, and a support request that AWS reviews.
 
 ### Deploying application changes
 
-No Terraform involvement. Just push to the appropriate branch:
+No Terraform involvement. Push to the branch:
 
 ```bash
-git push origin staging     # → staging environment
-git push origin main        # → production environment
+git push origin staging     # → the hand-built dev site (dev.bot.wwbp.org)
+git push origin main        # → production
 ```
 
 GitHub Actions builds, syncs, and deploys automatically.
@@ -544,7 +513,7 @@ After `setup.sh` completes and the infrastructure is up, deploy the app manually
 cd api
 pip install awsebcli
 eb init <project-prefix> --platform docker --region us-east-1
-eb use <project-prefix>-staging-env
+eb use <project-prefix>-test-env
 eb deploy
 ```
 
@@ -553,7 +522,7 @@ On first deploy, set the FRONTEND_URL env var (CloudFront domain from `terraform
 ```bash
 CF_DOMAIN=$(cd terraform && terraform output -raw frontend_url)
 aws elasticbeanstalk update-environment \
-  --environment-name <project-prefix>-staging-env \
+  --environment-name <project-prefix>-test-env \
   --option-settings Namespace=aws:elasticbeanstalk:application:environment,OptionName=FRONTEND_URL,Value="https://${CF_DOMAIN}"
 ```
 
@@ -561,7 +530,7 @@ To create a Django admin superuser on first deploy, set these env vars before `e
 
 ```bash
 aws elasticbeanstalk update-environment \
-  --environment-name <project-prefix>-staging-env \
+  --environment-name <project-prefix>-test-env \
   --option-settings \
     Namespace=aws:elasticbeanstalk:application:environment,OptionName=DJANGO_SUPERUSER_PASSWORD,Value="YourPassword" \
     Namespace=aws:elasticbeanstalk:application:environment,OptionName=DJANGO_SUPERUSER_USERNAME,Value="admin" \
@@ -570,7 +539,7 @@ aws elasticbeanstalk update-environment \
 eb deploy
 # Remove the password var after the user is created
 aws elasticbeanstalk update-environment \
-  --environment-name <project-prefix>-staging-env \
+  --environment-name <project-prefix>-test-env \
   --options-to-remove Namespace=aws:elasticbeanstalk:application:environment,OptionName=DJANGO_SUPERUSER_PASSWORD
 ```
 

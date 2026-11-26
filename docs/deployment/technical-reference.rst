@@ -98,33 +98,36 @@ resources is ``{PROJECT_PREFIX}-production``, where ``{PROJECT_PREFIX}`` is the 
 Deployment workflows
 ---------------------
 
-``deploy-infrastructure.yml`` (plan on pull requests, apply by hand)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``deploy-infrastructure.yml`` (manual trigger only)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The workflow has two jobs. Setup is in ``infra/terraform/README.md``, section "Running Terraform from GitHub Actions".
+Pull requests never run it and get no AWS access: they run only the offline checks in ``ci.yml`` (job **Terraform test**: ``terraform fmt -check``, ``terraform validate``, the mocked ``terraform test`` and ``check_workflows.py``). Setup is in ``infra/terraform/README.md``, section "Running Terraform from GitHub Actions".
 
-**plan** runs on each pull request that changes ``infra/terraform/``, once a reviewer approves the run in the ``plan-staging`` GitHub Environment. It runs ``terraform plan`` for staging only, with a read-only IAM role that trusts only that Environment and reads only staging's state file. Production is planned by the apply job (``action = plan``), from ``main``. It takes no state lock and gets no application secrets, but the role can read the state, which still holds secrets: approving a plan lets the pull request's code read staging's secrets until they move to Secrets Manager (a separate, later change). If the role is not configured, the job skips with a notice.
+The one job runs only when a person starts the workflow. The person selects ``environment`` (``test``, the on-demand stack in the lab's separate TEST AWS account, or ``production``) and ``action`` (``plan`` or ``apply``; the default is ``plan``). The job runs in the GitHub Environment with the same name as ``environment``. Required reviewers on that Environment must approve the run before it starts. Steps:
 
-**apply** runs only when a person starts the workflow. The person selects ``environment`` (``staging`` or ``production``) and ``action`` (``plan`` or ``apply``; the default is ``plan``). The job runs in the GitHub Environment with the same name as ``environment``. Required reviewers on that Environment must approve the run before it starts. Steps:
-
-1. **Check required secrets**. Runs before the job touches AWS.
-2. **AWS credentials**. Assumes the role in ``TF_APPLY_ROLE_ARN`` through GitHub OIDC. The workflow uses no long-lived keys.
-3. **State bucket**. Finds ``{PROJECT_PREFIX}-tfstate-{ACCOUNT_ID}``. Creates it on a first apply.
+1. **Check required secrets**. Runs before the job touches AWS. Production runs only from ``main``.
+2. **AWS credentials**. Picks the account from the environment (``TF_PROD_ACCOUNT_ID`` or ``TF_TEST_ACCOUNT_ID``; the two must differ), assumes ``<PREFIX>-terraform-apply-<environment>`` there through GitHub OIDC, and refuses credentials from any other account. The workflow uses no long-lived keys.
+3. **State bucket**. Finds ``{PROJECT_PREFIX}-tfstate-{ACCOUNT_ID}`` in that account. Creates it on a first apply.
 4. **Terraform init**. Points to the state file of the selected environment. A second run on the same environment waits for the first (concurrency group ``terraform-<environment>``); a run started outside this workflow stops with a lock error.
 5. **ACM certificate** (apply with a custom domain only). Targeted apply, so the validation CNAME can be printed before the full apply blocks waiting for DNS. It runs before the plan in step 6 and is not part of it; it touches only the certificate.
 6. **Plan**. Reads ``environments/{environment}.tfvars`` and prints the plan. With ``action = plan`` the job stops here.
 7. **Check the plan for deletions** (apply only). If the plan deletes or replaces any resource, the run stops unless ``allow_destroy`` was ticked.
 8. **Apply**. Applies the plan saved in step 6.
-9. **Write deployment secrets** (only when the ``write_deploy_secrets`` input is ticked). Uses ``GH_PAT`` to write the deploy secrets of the selected environment with ``gh secret set``. Staging gets the names ``staging.yml`` reads (``AWS_ROLE_NAME``, ``AWS_S3_BUCKET_NAME_FRONTEND``, etc.). Production gets the names ``production.yml`` reads (``AWS_PROD_ROLE_NAME``, ``AWS_S3_PROD_BUCKET_NAME_FRONTEND``, etc.). The two lists share no name. The workflow does not start an application deploy. Writing staging's names first requires the three ``AWS_PROD_*`` secrets production falls back from to exist; otherwise the run stops.
+9. **Write deployment secrets** (production only, only when the ``write_deploy_secrets`` input is ticked). Uses ``GH_PAT`` to write the names ``production.yml`` reads (``AWS_PROD_ROLE_NAME``, ``AWS_S3_PROD_BUCKET_NAME_FRONTEND``, etc.) with ``gh secret set``. It never writes the plain ``AWS_*`` names ``staging.yml`` reads. The workflow does not start an application deploy.
 
-   **Before ticking it for production**, write down the values production deploys use today (account ID, role, frontend bucket, CloudFront distribution, EB application and environment; read them from the AWS console, since GitHub never shows a secret's value once set). Overwriting the ``AWS_PROD_*`` secrets is the cutover, and those notes are the only way back.
+   **Before ticking it**, write down the values production deploys use today (account ID, role, frontend bucket, CloudFront distribution, EB application and environment; read them from the AWS console, since GitHub never shows a secret's value once set). Overwriting the ``AWS_PROD_*`` secrets is the cutover, and those notes are the only way back.
 10. **Report failure**. If any step fails, the workflow writes a notice to the Summary and changes nothing. It does not destroy, delete or import resources.
 11. **Summary**. Writes the chatbot URL and admin panel URL to the workflow Summary.
 
 ``destroy-infrastructure.yml`` (manual trigger only)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Deletes one environment and its data. The person who starts it must type the environment name, the confirmation ``destroy <environment>`` and the confirmation ``destroy data``. For production, the person must also tick ``allow_production``. A first job checks these values before the workflow signs in to AWS. The second job runs in the GitHub Environment with the same name, so required reviewers must approve it. It first copies the data bucket to ``<state bucket>/<prefix>/<environment>/backups/<UTC time>/data/`` and compares object count and total size, stopping on a mismatch before changing anything. Then it turns off RDS deletion protection and waits for that to apply, empties the buckets of that environment and runs ``terraform destroy``. If the run fails after it turned deletion protection off, a last step turns it back on. It does not delete the Terraform state bucket, which keeps the backup. Production's database leaves a final snapshot. The run summary names the backup and the snapshot. The GitHub OIDC provider is never deleted.
+Deletes one environment. A first job checks the typed values before the workflow signs in to AWS; the second runs in the GitHub Environment with the same name, so required reviewers must approve it.
+
+- **test**: the person types ``test``. Nothing else is asked and **nothing is backed up**: the test stack's data bucket and database are deleted for good.
+- **production**: the person types ``production``, ``destroy production`` and ``destroy data``, ticks ``allow_production``, and runs it from ``main``. The job first copies the data bucket to ``<state bucket>/<prefix>/production/backups/<UTC time>/data/`` and compares object count and total size, stopping on a mismatch before changing anything. Then it turns off RDS deletion protection and waits for that to apply, empties the buckets and runs ``terraform destroy``. If the run fails after it turned deletion protection off, a last step turns it back on. The database leaves a final snapshot. The run summary names the backup and the snapshot.
+
+It does not delete the Terraform state bucket. The GitHub OIDC provider is never deleted.
 
 ``production.yml`` (triggers on push to ``main`` or ``workflow_dispatch``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -166,9 +169,9 @@ After infrastructure is provisioned, GitHub Actions assumes an IAM role via OIDC
 The trust policy on the GitHub Actions IAM role restricts assumption to:
 
 - OIDC issuer: ``token.actions.githubusercontent.com``
-- Subject: ``repo:{github_org}/{github_repo}:*`` (scoped to the exact fork)
+- Subject, exactly (no wildcard): ``repo:{github_org}/{github_repo}:ref:refs/heads/main`` for production (``production.yml`` on ``main``), ``repo:{github_org}/{github_repo}:environment:test`` for the test stack; each also in the immutable-ID form ``repo:{org}@{org_id}/{repo}@{repo_id}:...``. A workflow a pull request adds cannot assume it.
 
-``deploy-infrastructure.yml`` also signs in through OIDC, with roles that a person creates one time from the policies in ``infra/terraform/bootstrap/iam/``: a read-only plan role for staging, and per environment an apply role and a permissions boundary for the roles the stack creates. The Terraform roles carry an explicit Deny on the hand-built live resources in the same account, on the other environment's resources and on the GitHub OIDC provider. ``destroy-infrastructure.yml`` uses the apply role. No workflow uses long-lived AWS keys.
+``deploy-infrastructure.yml`` and ``destroy-infrastructure.yml`` also sign in through OIDC, with an apply role per environment that a person creates one time from the policies in ``infra/terraform/bootstrap/iam/``: ``<PREFIX>-terraform-apply-production`` in the production account and ``<PREFIX>-terraform-apply-test`` in the lab's separate TEST account, each with a permissions boundary for the roles its stack creates. The production role carries an explicit Deny on the hand-built live resources in the same account and on any change to the GitHub OIDC provider. No workflow uses long-lived AWS keys.
 
 
 Application stack
@@ -237,11 +240,11 @@ Known gotchas
 1. RDS automated backups depend on the environment
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``infra/terraform/rds.tf`` sets ``backup_retention_period`` to ``7`` days for production and ``1`` day for staging. AWS takes a daily snapshot and keeps the transaction logs for that period, so you can restore the database to a point in time in that period.
+``backup_retention_period`` is ``7`` days for production (``environments/production.tfvars``; ``variables.tf`` refuses fewer) and ``1`` day for the test stack. AWS takes a daily snapshot and keeps the transaction logs for that period, so you can restore the database to a point in time in that period.
 
-Production also has ``deletion_protection`` and takes a final snapshot when the database is deleted. Staging has neither.
+Production also has ``deletion_protection`` and takes a final snapshot when the database is deleted. The test stack has neither, and its buckets may be force-destroyed.
 
-**To keep backups longer:** change the number in ``rds.tf`` in a pull request and apply it with the Deploy Infrastructure workflow. Backup storage has a small cost.
+**To keep backups longer:** change the number in ``environments/production.tfvars`` in a pull request and apply it with the Deploy Infrastructure workflow. Backup storage has a small cost.
 
 2. CloudFront ``custom_error_response`` blocks are global
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -302,7 +305,7 @@ Django's async (ASGI) request handling uses ``thread_sensitive=True`` for databa
 
 The GitHub Personal Access Token has an expiration date. When it expires, the Deploy Infrastructure workflow will fail at the "Write deployment secrets" step.
 
-**Fix:** generate a new token, update the ``GH_PAT`` secret in GitHub Settings, and re-run the workflow.
+**Fix:** generate a new token, update the ``GH_PAT`` secret of the ``production`` GitHub Environment (an Environment secret, not a repository secret), and re-run the workflow.
 
 **Note:** expiry only affects re-running the infra workflow. Day-to-day application deploys (push to ``main``) use the OIDC IAM role and are not affected by GH_PAT expiry.
 

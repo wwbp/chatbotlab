@@ -12,7 +12,7 @@
 #
 # Important: Terraform provisions the infrastructure here. The application
 # code is deployed separately by the GitHub Actions workflow
-# (.github/workflows/staging.yml / production.yml). On first apply, EB will
+# (.github/workflows/production.yml; by hand on the test stack). On first apply, EB will
 # be in a "No Data" health state until the first `eb deploy` runs — that is
 # expected and not an error.
 #
