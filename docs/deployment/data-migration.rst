@@ -1,7 +1,11 @@
 Data Migration Runbook
 ======================
 
-How to move the live database from the hand-built Elastic Beanstalk environment (with its EB-managed RDS instance) to the Terraform-managed stack without losing or altering study data. Follow it for **staging first**, end to end, and only then for production.
+How to move the live database from the hand-built Elastic Beanstalk environment (with its EB-managed RDS instance) to the Terraform-managed stack without losing or altering study data. **Rehearse it first, end to end, on the test stack**: Deploy Infrastructure with environment ``test`` builds it on demand in the lab's separate TEST AWS account, the source is a restored copy of the production database snapshot, and Destroy Infrastructure removes it afterwards. Only then run it for production.
+
+.. warning::
+
+   During a rehearsal the TEST account holds a copy of real participant data. Restrict who can sign in to it, use the test stack's own API keys (never production's), and destroy the stack and delete the copied snapshot when the rehearsal is done.
 
 The copy is done and proven by ``scripts/migration/dbcopy.py``. What it guarantees, each backed by a test against real database servers (``api/chatbot/tests/data_migration/``):
 
@@ -26,7 +30,7 @@ Do these days before the window. Each one can stop the plan.
 
    The tool refuses to copy between MySQL and MariaDB (they store JSON differently and share no collations, so the copy could not be proven unchanged). If the old database is MySQL, change the Terraform engine to the same MySQL major version before going further. A MariaDB target older than the source is refused unless ``--allow-version-downgrade`` is passed to ``preflight``.
 
-2. **Where the tool runs.** It needs to reach both databases on port 3306 at the same time, from a machine with Python 3.11+ and the MariaDB client (``mariadb``, ``mariadb-dump``); the backend Docker image has both. Both databases are in private subnets, so this is usually two port-forwards (SSM or SSH) through an instance of each environment. This path is **not** proven by the tests; prove it in the staging rehearsal with ``preflight --dry-run``.
+2. **Where the tool runs.** It needs to reach both databases on port 3306 at the same time, from a machine with Python 3.11+ and the MariaDB client (``mariadb``, ``mariadb-dump``); the backend Docker image has both. Both databases are in private subnets, so this is usually two port-forwards (SSM or SSH) through an instance of each environment. This path is **not** proven by the tests; prove it in the test-stack rehearsal with ``preflight --dry-run``.
 
 3. **Uploaded files are not in the database.** Voice audio, avatars and uploads live in the S3 bucket named by ``AWS_BUCKET_NAME``; the database stores only their paths. The new stack has its own bucket. Copy the objects (step 9) or the paths will point at nothing.
 
@@ -46,7 +50,7 @@ Credentials come from the environment or from a client option file, never from t
    export MIG_SOURCE_USER=...  MIG_SOURCE_PASSWORD=...
    export MIG_TARGET_HOST=...  MIG_TARGET_PORT=3306  MIG_TARGET_DATABASE=chatbot_db
    export MIG_TARGET_USER=chatbot_user  MIG_TARGET_PASSWORD=...
-   RUN="--run-dir migration-runs/staging-$(date -u +%Y%m%d)"
+   RUN="--run-dir migration-runs/rehearsal-$(date -u +%Y%m%d)"
    python3 scripts/migration/dbcopy.py $RUN preflight --dry-run
 
 Instead of ``HOST``/``PORT``/``USER``/``PASSWORD`` you may set ``MIG_SOURCE_DEFAULTS_FILE`` (and ``MIG_TARGET_DEFAULTS_FILE``) to a ``chmod 600`` client option file with a ``[client]`` section.
@@ -77,8 +81,8 @@ Steps 1 to 3 are preparation and can be done ahead of time. The window (app offl
 
    .. code-block:: bash
 
-      git tag -a migration-staging-start -m "Before staging data migration" <deployed-sha>
-      git push origin migration-staging-start
+      git tag -a migration-rehearsal-start -m "Before the data migration rehearsal" <deployed-sha>
+      git push origin migration-rehearsal-start
 
    (``migration-production-start`` for production.) Deploy that tag to the old and the new environment.
 
@@ -108,7 +112,7 @@ Steps 1 to 3 are preparation and can be done ahead of time. The window (app offl
 
    .. code-block:: bash
 
-      SNAP=pre-migration-staging-$(date -u +%Y%m%d-%H%M)
+      SNAP=pre-migration-rehearsal-$(date -u +%Y%m%d-%H%M)
       aws rds create-db-snapshot --db-instance-identifier <old-db-id> --db-snapshot-identifier $SNAP
       aws rds wait db-snapshot-available --db-snapshot-identifier $SNAP
       aws rds restore-db-instance-from-db-snapshot --db-instance-identifier $SNAP-proof \
@@ -177,11 +181,11 @@ Steps 1 to 3 are preparation and can be done ahead of time. The window (app offl
 12. **Check and close the window.** ::
 
        scripts/smoke.sh https://dev.bot.wwbp.org
-       git tag -a migration-staging-done -m "Staging data migration verified" && git push origin migration-staging-done
+       git tag -a migration-rehearsal-done -m "Data migration rehearsal verified" && git push origin migration-rehearsal-done
 
     *Gate:* smoke test passes on the public name; one test conversation works end to end and appears in the admin.
 
-13. **Staging before production.** Leave staging on the new stack for at least a week of normal use. Production is not touched until the staging run completed with every gate met and the timings recorded.
+13. **Rehearsal before production.** Production is not touched until the test-stack rehearsal completed with every gate met and the timings recorded. Then destroy the test stack (Destroy Infrastructure, environment ``test``) and delete the copied snapshot from the TEST account.
 
 14. **Keep the old environment** blocked (or at 0 instances) for 30 days, or one full study cycle if longer. Keep the step 5 snapshot until the study data's retention period ends. Before terminating the old environment, confirm that snapshot still exists and delete ``dump.sql`` from wherever the tool ran.
 
@@ -229,7 +233,7 @@ Measured on a laptop, both servers in containers with 64 MB buffer pools:
      - 8.9 s
      - 2.9 s
 
-That is about 150 MB/s dumping, 30 MB/s restoring and 550,000 rows/s verifying, on local disks. Expect a small RDS instance reached through a port-forward to be several times slower, restore most of all. All three scale roughly with data size. The real database's size is not known here: step 3 reports it, and the staging rehearsal gives real timings on real hardware and network. RDS operations in step 5 (snapshot, restore to a proof instance) typically take 10 to 25 minutes together regardless of how small the database is, and are the largest part of a 30 to 60 minute window. If the rehearsal shows the window is too tight, the snapshot proof can run in parallel with step 8 (and must still pass before step 11); that is the owner's decision.
+That is about 150 MB/s dumping, 30 MB/s restoring and 550,000 rows/s verifying, on local disks. Expect a small RDS instance reached through a port-forward to be several times slower, restore most of all. All three scale roughly with data size. The real database's size is not known here: step 3 reports it, and the test-stack rehearsal gives real timings on real hardware and network. RDS operations in step 5 (snapshot, restore to a proof instance) typically take 10 to 25 minutes together regardless of how small the database is, and are the largest part of a 30 to 60 minute window. If the rehearsal shows the window is too tight, the snapshot proof can run in parallel with step 8 (and must still pass before step 11); that is the owner's decision.
 
 
 What verify does not compare

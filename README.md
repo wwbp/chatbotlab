@@ -224,7 +224,7 @@ Production runtime configuration lives in Elastic Beanstalk environment variable
 
 ### Infrastructure
 
-AWS resources are defined in [`infra/terraform/`](infra/terraform/) and managed by [`deploy-infrastructure.yml`](.github/workflows/deploy-infrastructure.yml) (with a matching destroy workflow). Researchers standing up their own instance should follow the [deployment guide](https://wwbp.github.io/chatbotlab/deployment/) rather than running Terraform by hand.
+AWS resources are defined in [`infra/terraform/`](infra/terraform/) and managed by [`deploy-infrastructure.yml`](.github/workflows/deploy-infrastructure.yml) (with a matching destroy workflow), started by hand: `production` from `main`, or the on-demand `test` stack in the lab's separate TEST AWS account. Pull requests run only offline Terraform checks, with no AWS access. Setup: [`infra/terraform/README.md`](infra/terraform/README.md). Researchers standing up their own instance should follow the [deployment guide](https://wwbp.github.io/chatbotlab/deployment/) rather than running Terraform by hand.
 
 ---
 

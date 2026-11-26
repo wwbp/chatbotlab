@@ -1107,7 +1107,7 @@ check(
 readme = (TERRAFORM / "README.md").read_text()
 check(":pull_request" not in readme, "README.md: no role may trust the pull_request subject")
 check(
-    re.search(r"- `production`: \*\*Required reviewers\*\*[^\n]*\*\*Deployment branches\*\*: `main` only", readme)
+    re.search(r"- `production`: \*\*Required reviewers\*\*(?:(?!\n *- )[\s\S])*?\*\*Deployment branches\*\*: `main` only", readme)
     and re.search(r"- `test`: \*\*Required reviewers\*\*", readme),
     "README.md: the production Environment needs required reviewers and main only; test needs required reviewers",
 )
