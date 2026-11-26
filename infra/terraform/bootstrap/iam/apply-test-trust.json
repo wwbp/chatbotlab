@@ -16,7 +16,10 @@
           ]
         },
         "StringLike": {
-          "token.actions.githubusercontent.com:ref": "refs/heads/*"
+          "token.actions.githubusercontent.com:ref": [
+            "refs/heads/main",
+            "refs/heads/test/*"
+          ]
         }
       }
     }

@@ -256,8 +256,14 @@ The production role is isolated from it by policy:
 
 The test role uses the same policies with `test` in place of `production`
 (so a rehearsal also tests them) and trusts only the `test` GitHub
-Environment, on any branch. It lives in the TEST account, so it cannot reach
-production.
+Environment, on `main` or a `test/*` branch (push a risky infrastructure
+change to `test/<name>` to try it before it merges). It lives in the TEST
+account, so it cannot reach production.
+
+The TEST account is not a throwaway: during a data-migration rehearsal it
+holds a copy of a production snapshot, with real participant data.
+**Approving a test run trusts that branch's code with the TEST account**,
+and so with that copy. Read the branch before you approve.
 
 ### One-time setup (the owner)
 
@@ -297,7 +303,8 @@ In **each** account (production with `<env>` = `production`, TEST with
 3. **Apply role** `<PREFIX>-terraform-apply-<env>`, exactly this name (the
    workflow builds the ARN from it). Trust: `bootstrap/iam/apply-production-trust.json`
    (environment `production`, ref `refs/heads/main`) or
-   `bootstrap/iam/apply-test-trust.json` (environment `test`, any branch).
+   `bootstrap/iam/apply-test-trust.json` (environment `test`, refs
+   `refs/heads/main` and `refs/heads/test/*`).
    Permissions: three customer managed policies (one would exceed IAM's
    6144-character limit), `bootstrap/iam/apply-<env>-permissions.json`,
    `-abac.json` and `-guardrails.json`. They scope RDS, ElastiCache, Elastic
@@ -313,11 +320,14 @@ In GitHub (**Settings**):
    - `production`: **Required reviewers**: the owner and one senior
      colleague; **Prevent self-review**: off (the owner approves their own
      runs); **Deployment branches**: `main` only.
-   - `test`: **Required reviewers**: the owner.
+   - `test`: **Required reviewers**: the owner; **Deployment branches**: `main` and `test/*`
+     (the same refs `apply-test-trust.json` accepts).
    Without required reviewers, anyone who can run workflows can apply.
 5. **Environment secrets**, in `production` and in `test` (different values):
    `DB_PASSWORD`, `ADMIN_PANEL_PASSWORD`, and `OPENAI_API_KEY` and/or
-   `ANTHROPIC_API_KEY`. Optional: `SURVEY_INGEST_TOKEN`.
+   `ANTHROPIC_API_KEY`. Optional: `SURVEY_INGEST_TOKEN`. The test stack uses
+   its own LLM API keys, scoped to it (a separate project or key with a low
+   spending limit), never production's.
 6. **Repository secrets**: `TF_PROJECT_PREFIX`, `TF_PROD_ACCOUNT_ID`,
    `TF_TEST_ACCOUNT_ID`. `GH_PAT` only if you use `write_deploy_secrets`
    (production only).
@@ -329,7 +339,7 @@ In GitHub (**Settings**):
    `AWS_*` repository secrets: `staging.yml` still deploys the hand-built dev
    site with them.
 
-Then run the workflow on any branch: environment `test`, action `apply`. The
+Then run the workflow from `main` or a `test/*` branch: environment `test`, action `apply`. The
 first apply creates the test account's state bucket.
 
 ### Secrets in the state file
