@@ -14,7 +14,7 @@
 #     enforced by security group rules in security_groups.tf.
 #
 # Using two AZs means the load balancer keeps working if one AWS data centre
-# has an outage. The database runs in a single AZ (cheaper for staging) but
+# has an outage. The database runs in a single AZ (cheaper) but
 # the subnet group covers both AZs so I can enable Multi-AZ later with no
 # infrastructure changes.
 # -----------------------------------------------------------------------------

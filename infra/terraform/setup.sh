@@ -18,9 +18,10 @@
 #   # Edit terraform.tfvars with your actual values
 #   bash setup.sh
 #
-# To deploy a second environment (e.g. production), set environment="production"
-# in terraform.tfvars and run again. Each environment has its own state file
-# (<project_name>/<environment>/terraform.tfstate) in the same bucket.
+# environment in terraform.tfvars is "test" or "production". Each environment
+# has its own state file (<project_name>/<environment>/terraform.tfstate) in
+# the state bucket of the account you are signed in to. The test stack belongs
+# in the lab's separate TEST account.
 # -----------------------------------------------------------------------------
 
 set -euo pipefail
@@ -102,8 +103,8 @@ PROJECT_NAME=$(grep -E '^\s*project_name\s*=' "$TFVARS" | head -1 | cut -d'"' -f
 ENVIRONMENT=$(grep -E '^\s*environment\s*=' "$TFVARS" | head -1 | cut -d'"' -f2)
 [[ -n "$PROJECT_NAME" ]] \
   || die "project_name is not set in $TFVARS — add it before running setup."
-[[ "$ENVIRONMENT" == "staging" || "$ENVIRONMENT" == "production" ]] \
-  || die "environment in $TFVARS must be \"staging\" or \"production\"."
+[[ "$ENVIRONMENT" == "test" || "$ENVIRONMENT" == "production" ]] \
+  || die "environment in $TFVARS must be \"test\" or \"production\"."
 
 if [[ -f "$BACKEND_HCL" ]]; then
   info "backend.hcl already exists — skipping bootstrap (state backend is already provisioned)"
@@ -167,8 +168,9 @@ GITHUB_ORG=$(grep 'github_org' "$TFVARS" | head -1 | sed 's/.*=[ ]*"\(.*\)".*/\1
 GITHUB_REPO=$(grep 'github_repo' "$TFVARS" | head -1 | sed 's/.*=[ ]*"\(.*\)".*/\1/')
 echo -e "${BOLD}Go to: https://github.com/${GITHUB_ORG:-<your-org>}/${GITHUB_REPO:-<your-repo>}/settings/secrets/actions${RESET}"
 echo ""
-echo "Copy these values into your repository secrets ($ENVIRONMENT only — the"
-echo "other environment's deploy workflow reads different names):"
+echo "Copy these values into your repository secrets (production only — the test"
+echo "stack has no app deploy workflow, and staging.yml's plain AWS_* names belong"
+echo "to the hand-built dev site):"
 echo ""
 
 # The same (secret, output) pairs the Deploy Infrastructure workflow writes;
@@ -178,13 +180,8 @@ show() {
   printf "  ${BOLD}%-50s${RESET} %s\n" "$1" "$VALUE"
 }
 case "$ENVIRONMENT" in
-  staging)
-    show AWS_ACCOUNT_ID                 AWS_ACCOUNT_ID
-    show AWS_ROLE_NAME                  AWS_ROLE_NAME
-    show AWS_S3_BUCKET_NAME_FRONTEND    AWS_S3_BUCKET_NAME_FRONTEND
-    show AWS_CLOUDFRONT_DISTRIBUTION_ID AWS_CLOUDFRONT_DISTRIBUTION_ID
-    show AWS_BACKEND_APPLICATION_NAME   AWS_BACKEND_APPLICATION_NAME
-    show AWS_BACKEND_ENVIRONMENT_NAME   AWS_BACKEND_ENVIRONMENT_NAME
+  test)
+    echo "  (none: deploy the app to the test stack by hand, see README.md \"Manual deployment\")"
     ;;
   production)
     show AWS_PROD_ACCOUNT_ID                 AWS_ACCOUNT_ID
@@ -200,4 +197,4 @@ echo ""
 info "Frontend URL: $(terraform output -raw frontend_url)"
 info "Backend URL:  $(terraform output -raw backend_api_url)"
 echo ""
-info "Next step: deploy the app — push to the staging branch (staging) or main (production)."
+info "Next step: deploy the app — push to main (production), or by hand (test)."

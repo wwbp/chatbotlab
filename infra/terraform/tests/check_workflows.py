@@ -23,8 +23,9 @@ def check(ok, message):
 
 
 # A terraform subcommand, allowing global options in between
-# (`terraform -chdir=infra/terraform apply`).
-TF = r"\bterraform\b[^\n|;&]*?\b"
+# (`terraform -chdir=infra/terraform apply`), but not a name such as
+# `<prefix>-terraform-apply-production`.
+TF = r"(?<![\w-])terraform\s[^\n|;&]*?\b"
 
 
 def uncommented(path):

@@ -26,6 +26,8 @@
 
 resource "aws_s3_bucket" "frontend_assets" {
   bucket = "${local.name_prefix}-frontend"
+  # Only the test stack (variables.tf refuses it for production).
+  force_destroy = var.force_destroy_buckets
 
   tags = {
     Name    = "${local.name_prefix}-frontend"
@@ -60,6 +62,9 @@ resource "aws_s3_bucket_public_access_block" "frontend_assets" {
 
 resource "aws_s3_bucket" "application_data" {
   bucket = "${local.name_prefix}-data"
+  # Only the test stack: production's participant uploads are never deleted
+  # by a destroy without the backup in destroy-infrastructure.yml.
+  force_destroy = var.force_destroy_buckets
 
   tags = {
     Name = "${local.name_prefix}-data"

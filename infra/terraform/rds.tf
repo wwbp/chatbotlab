@@ -9,10 +9,11 @@
 #   - Placed in private subnets — nothing outside the VPC can reach it.
 #   - Encrypted at rest with AES-256 — required for any database holding
 #     conversation transcripts and participant data.
-#   - skip_final_snapshot = true on staging so I can tear it down freely
-#     during development. On production I take a final snapshot first.
-#   - deletion_protection = true on production means I must manually disable
-#     it before a destroy, which prevents accidental data loss.
+#   - skip_final_snapshot = true on the test stack so it can be torn down
+#     freely. On production I take a final snapshot first.
+#   - deletion_protection (var.deletion_protection, true unless the test
+#     stack turns it off) must be disabled before a destroy, which prevents
+#     accidental data loss.
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
@@ -84,15 +85,14 @@ resource "aws_db_instance" "main" {
   parameter_group_name   = aws_db_parameter_group.mariadb.name
 
   # Backups
-  # I keep 7 days of backups on production so I can restore to any point in
-  # the past week. Staging only keeps 1 day — enough to recover from a
-  # mistake during development without paying for extra storage.
-  backup_retention_period = var.environment == "production" ? 7 : 1
+  # At least 7 days on production (variables.tf refuses fewer), so I can
+  # restore to any point in the past week. The test stack keeps 1 day.
+  backup_retention_period = var.backup_retention_period
   backup_window           = "03:00-04:00"
   maintenance_window      = "Mon:04:00-Mon:05:00"
 
   # Deletion behaviour
-  # On staging: skip the final snapshot so I can destroy and recreate freely.
+  # On the test stack: skip the final snapshot so I can destroy and recreate freely.
   # On production: take a final snapshot and block deletion until I explicitly
   # disable deletion_protection — this prevents accidental data loss.
   #
@@ -107,7 +107,7 @@ resource "aws_db_instance" "main" {
   # needed.
   skip_final_snapshot       = var.environment != "production"
   final_snapshot_identifier = var.environment == "production" ? "${local.name_prefix}-final-snapshot-${random_id.final_snapshot_suffix.hex}" : null
-  deletion_protection       = var.environment == "production"
+  deletion_protection       = var.deletion_protection
 
   tags = {
     Name = "${local.name_prefix}-database"

@@ -29,11 +29,46 @@ variable "project_name" {
 }
 
 variable "environment" {
-  description = "Which deployment environment I am provisioning. I use this to adjust resource sizing and backup retention — staging is cheaper, production is durable."
+  description = "Which deployment environment I am provisioning: production (study data, in the production AWS account) or test (the on-demand stack in the lab's separate TEST account, applied and destroyed when needed)."
   type        = string
   validation {
-    condition     = contains(["staging", "production"], var.environment)
-    error_message = "I only accept 'staging' or 'production' as valid environments."
+    condition     = contains(["test", "production"], var.environment)
+    error_message = "I only accept 'test' or 'production' as valid environments."
+  }
+}
+
+# -----------------------------------------------------------------------
+# Data safety. The defaults are production's; only the test stack may relax
+# them (environments/test.tfvars). Production refuses any relaxation.
+# -----------------------------------------------------------------------
+
+variable "deletion_protection" {
+  description = "RDS deletion protection. Must stay true for production; the test stack turns it off so it can be destroyed on demand."
+  type        = bool
+  default     = true
+  validation {
+    condition     = var.deletion_protection || var.environment == "test"
+    error_message = "Only the test stack may turn deletion_protection off."
+  }
+}
+
+variable "backup_retention_period" {
+  description = "Days of RDS automated backups (point-in-time restore window). At least 7 for production; the test stack may keep fewer."
+  type        = number
+  default     = 7
+  validation {
+    condition     = var.backup_retention_period >= 7 || var.environment == "test"
+    error_message = "Production must keep at least 7 days of backups; only the test stack may keep fewer."
+  }
+}
+
+variable "force_destroy_buckets" {
+  description = "Let terraform destroy delete the S3 buckets with their objects. Only for the test stack: production's data bucket holds participant uploads."
+  type        = bool
+  default     = false
+  validation {
+    condition     = !var.force_destroy_buckets || var.environment == "test"
+    error_message = "Only the test stack may force-destroy its buckets."
   }
 }
 
@@ -162,7 +197,7 @@ variable "eb_max_instances" {
 }
 
 variable "db_instance_class" {
-  description = "The RDS instance class for the MariaDB database. db.t3.micro is free-tier eligible and sufficient for staging. Consider db.t3.small or db.t3.medium for production."
+  description = "The RDS instance class for the MariaDB database. db.t3.micro is free-tier eligible and sufficient for the test stack. Consider db.t3.small or db.t3.medium for production."
   type        = string
   default     = "db.t3.micro"
 }

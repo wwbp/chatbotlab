@@ -29,13 +29,13 @@
         "s3:GetObject",
         "s3:PutObject"
       ],
-      "Resource": "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>/<PREFIX>/staging/*"
+      "Resource": "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>/<PREFIX>/test/*"
     },
     {
       "Sid": "ManageOwnBuckets",
       "Effect": "Allow",
       "Action": "s3:*",
-      "Resource": "arn:aws:s3:::<PREFIX>-staging-*"
+      "Resource": "arn:aws:s3:::<PREFIX>-test-*"
     },
     {
       "Sid": "ElasticBeanstalkBucketLevel",
@@ -56,14 +56,14 @@
         "s3:GetObject",
         "s3:PutObject"
       ],
-      "Resource": "arn:aws:s3:::elasticbeanstalk-*/<PREFIX>-staging/*"
+      "Resource": "arn:aws:s3:::elasticbeanstalk-*/<PREFIX>-test/*"
     },
     {
       "Sid": "ManageOwnDatabase",
       "Effect": "Allow",
       "Action": "rds:*",
       "Resource": [
-        "arn:aws:rds:*:<ACCOUNT_ID>:*:<PREFIX>-staging-*",
+        "arn:aws:rds:*:<ACCOUNT_ID>:*:<PREFIX>-test-*",
         "arn:aws:rds:*:<ACCOUNT_ID>:og:default:*"
       ]
     },
@@ -71,15 +71,15 @@
       "Sid": "ManageOwnCache",
       "Effect": "Allow",
       "Action": "elasticache:*",
-      "Resource": "arn:aws:elasticache:*:<ACCOUNT_ID>:serverlesscache:<PREFIX>-staging-*"
+      "Resource": "arn:aws:elasticache:*:<ACCOUNT_ID>:serverlesscache:<PREFIX>-test-*"
     },
     {
       "Sid": "ManageOwnElasticBeanstalk",
       "Effect": "Allow",
       "Action": "elasticbeanstalk:*",
       "Resource": [
-        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:*/<PREFIX>-staging",
-        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:*/<PREFIX>-staging/*",
+        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:*/<PREFIX>-test",
+        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:*/<PREFIX>-test/*",
         "arn:aws:elasticbeanstalk:*::solutionstack/*",
         "arn:aws:elasticbeanstalk:*::platform/*"
       ]
@@ -88,7 +88,7 @@
       "Sid": "ManageOwnLogGroups",
       "Effect": "Allow",
       "Action": "logs:*",
-      "Resource": "arn:aws:logs:*:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/<PREFIX>-staging-*"
+      "Resource": "arn:aws:logs:*:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/<PREFIX>-test-*"
     },
     {
       "Sid": "ReadEverythingElse",
@@ -128,10 +128,10 @@
         "iam:PutRolePermissionsBoundary",
         "iam:PutRolePolicy"
       ],
-      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-staging-*",
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-test-*",
       "Condition": {
         "StringEquals": {
-          "iam:PermissionsBoundary": "arn:aws:iam::<ACCOUNT_ID>:policy/<PREFIX>-terraform-boundary-staging"
+          "iam:PermissionsBoundary": "arn:aws:iam::<ACCOUNT_ID>:policy/<PREFIX>-terraform-boundary-test"
         }
       }
     },
@@ -145,7 +145,7 @@
         "iam:UpdateRole",
         "iam:UpdateRoleDescription"
       ],
-      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-staging-*"
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-test-*"
     },
     {
       "Sid": "AttachOnlyElasticBeanstalkManagedPolicies",
@@ -154,7 +154,7 @@
         "iam:AttachRolePolicy",
         "iam:DetachRolePolicy"
       ],
-      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-staging-*",
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-test-*",
       "Condition": {
         "ArnEquals": {
           "iam:PolicyARN": [
@@ -165,7 +165,7 @@
           ]
         },
         "StringEquals": {
-          "iam:PermissionsBoundary": "arn:aws:iam::<ACCOUNT_ID>:policy/<PREFIX>-terraform-boundary-staging"
+          "iam:PermissionsBoundary": "arn:aws:iam::<ACCOUNT_ID>:policy/<PREFIX>-terraform-boundary-test"
         }
       }
     },
@@ -180,13 +180,13 @@
         "iam:TagInstanceProfile",
         "iam:UntagInstanceProfile"
       ],
-      "Resource": "arn:aws:iam::<ACCOUNT_ID>:instance-profile/<PREFIX>-staging-*"
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:instance-profile/<PREFIX>-test-*"
     },
     {
       "Sid": "PassOwnRolesToElasticBeanstalkAndEc2",
       "Effect": "Allow",
       "Action": "iam:PassRole",
-      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-staging-*",
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<PREFIX>-test-*",
       "Condition": {
         "StringEquals": {
           "iam:PassedToService": [

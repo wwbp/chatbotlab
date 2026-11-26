@@ -8,7 +8,7 @@ name: Destroy Infrastructure
 # └─────────────────────────────────────────────────────────────────────────┘
 #
 # Manual only. To destroy an environment you must:
-#   1. type its name (staging or production) — there is no default;
+#   1. type its name (test or production) — there is no default;
 #   2. type "destroy <that name>" and "destroy data";
 #   3. for production, also tick allow_production;
 #   4. be approved by the reviewers of the GitHub Environment of that name,
@@ -20,7 +20,8 @@ name: Destroy Infrastructure
 # leaves a final snapshot; the summary names both.
 #
 # Secrets: the same ones the apply job of Deploy Infrastructure uses
-# (TF_APPLY_ROLE_ARN, TF_PROJECT_PREFIX, DB_PASSWORD, ADMIN_PANEL_PASSWORD, …).
+# (TF_PROD_ACCOUNT_ID / TF_TEST_ACCOUNT_ID, TF_PROJECT_PREFIX, DB_PASSWORD,
+# ADMIN_PANEL_PASSWORD, …).
 # AWS access is by GitHub OIDC; there are no stored AWS keys.
 
 on:
@@ -29,11 +30,11 @@ on:
       # Typed, not chosen from a list, and with no default: a list would
       # preselect its first entry.
       environment:
-        description: 'Environment to destroy: type "staging" or "production"'
+        description: 'Environment to destroy: type "test" or "production"'
         required: true
         type: string
       confirm_destroy:
-        description: 'Type "destroy staging" or "destroy production" — it must name the same environment'
+        description: 'Type "destroy test" or "destroy production" — it must name the same environment'
         required: true
         type: string
       confirm_data_loss:
@@ -41,7 +42,7 @@ on:
         required: true
         type: string
       allow_production:
-        description: 'Required to destroy production. Leave unticked for staging.'
+        description: 'Required to destroy production. Leave unticked for test.'
         required: false
         default: false
         type: boolean
@@ -64,8 +65,8 @@ jobs:
           ALLOW_PRODUCTION: ${{ inputs.allow_production }}
         run: |
           fail=0
-          if [[ "$ENVIRONMENT" != "staging" && "$ENVIRONMENT" != "production" ]]; then
-            echo "::error::Environment must be exactly 'staging' or 'production'. Got: '$ENVIRONMENT'"
+          if [[ "$ENVIRONMENT" != "test" && "$ENVIRONMENT" != "production" ]]; then
+            echo "::error::Environment must be exactly 'test' or 'production'. Got: '$ENVIRONMENT'"
             fail=1
           fi
           if [[ "$CONFIRM_DESTROY" != "destroy $ENVIRONMENT" ]]; then
@@ -110,11 +111,41 @@ jobs:
           terraform_wrapper: false
 
       # ── 4. AWS credentials (short-lived, GitHub OIDC) ─────────────────────────
+      # The same account choice as Deploy Infrastructure: production and test
+      # live in different AWS accounts, and credentials from any other account
+      # are refused.
+      - name: Choose the AWS account
+        id: aws
+        env:
+          ENVIRONMENT:        ${{ inputs.environment }}
+          TF_PROD_ACCOUNT_ID: ${{ secrets.TF_PROD_ACCOUNT_ID }}
+          TF_TEST_ACCOUNT_ID: ${{ secrets.TF_TEST_ACCOUNT_ID }}
+          TF_PROJECT_PREFIX:  ${{ secrets.TF_PROJECT_PREFIX }}
+        run: |
+          case "$ENVIRONMENT" in
+            production) ACCOUNT="$TF_PROD_ACCOUNT_ID" ;;
+            test)       ACCOUNT="$TF_TEST_ACCOUNT_ID" ;;
+            *)          echo "::error::Unknown environment '$ENVIRONMENT'"; exit 1 ;;
+          esac
+          if [[ ! "$ACCOUNT" =~ ^[0-9]{12}$ ]]; then
+            echo "::error::The AWS account ID of $ENVIRONMENT is not set (repository secret TF_PROD_ACCOUNT_ID or TF_TEST_ACCOUNT_ID, 12 digits)."
+            exit 1
+          fi
+          if [[ "$TF_PROD_ACCOUNT_ID" == "$TF_TEST_ACCOUNT_ID" ]]; then
+            echo "::error::TF_TEST_ACCOUNT_ID equals TF_PROD_ACCOUNT_ID. The test stack must live in the lab's separate TEST account."
+            exit 1
+          fi
+          {
+            echo "account=$ACCOUNT"
+            echo "role=arn:aws:iam::${ACCOUNT}:role/${TF_PROJECT_PREFIX}-terraform-apply-${ENVIRONMENT}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ secrets.TF_APPLY_ROLE_ARN }}
+          role-to-assume: ${{ steps.aws.outputs.role }}
           aws-region: us-east-1
+          allowed-account-ids: ${{ steps.aws.outputs.account }}
 
       # ── 5. Locate state bucket ────────────────────────────────────────────────
       - name: Locate Terraform state bucket
