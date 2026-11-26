@@ -685,10 +685,11 @@ OTHER = {"test": "production", "production": "staging"}
 # role -> (environment it serves, GitHub Environment it trusts, ref condition)
 ROLES = {
     # Production: only from main.
-    "apply-production": ("production", "production", ("StringEquals", "refs/heads/main")),
-    # Test: any branch, so a change can be rehearsed before it merges. The
-    # `test` Environment's reviewers approve every run.
-    "apply-test": ("test", "test", ("StringLike", "refs/heads/*")),
+    "apply-production": ("production", "production", ("StringEquals", ["refs/heads/main"])),
+    # Test: main, or a test/* branch to try a risky change before it merges.
+    # Not any branch: during a rehearsal the TEST account holds a copy of
+    # production data. The `test` Environment's reviewers approve every run.
+    "apply-test": ("test", "test", ("StringLike", ["refs/heads/main", "refs/heads/test/*"])),
 }
 
 
@@ -904,9 +905,15 @@ for role, (environment, gh_environment, (ref_operator, ref)) in ROLES.items():
         f"got {sorted(subjects)}",
     )
     check("pull_request" not in json.dumps(trust), f"{role}-trust.json: must not trust the pull_request subject")
+    refs = [r for op in condition.values() for r in as_list(op.get(f"{OIDC}:ref", []))]
     check(
-        as_list(condition.get(ref_operator, {}).get(f"{OIDC}:ref", [])) == [ref],
-        f"{role}-trust.json: needs {ref_operator} {OIDC}:ref = {ref}",
+        sorted(as_list(condition.get(ref_operator, {}).get(f"{OIDC}:ref", []))) == sorted(ref)
+        and sorted(refs) == sorted(ref),
+        f"{role}-trust.json: needs {ref_operator} {OIDC}:ref = {ref} and no other ref, got {refs}",
+    )
+    check(
+        all(r == "refs/heads/test/*" or "*" not in r for r in refs),
+        f"{role}-trust.json: a ref wildcard other than refs/heads/test/* (e.g. refs/heads/*) trusts any branch: {refs}",
     )
     # A role's permissions may be split over several managed policies
     # (<role>-permissions.json, <role>-abac.json, <role>-guardrails.json); the
@@ -1108,8 +1115,14 @@ readme = (TERRAFORM / "README.md").read_text()
 check(":pull_request" not in readme, "README.md: no role may trust the pull_request subject")
 check(
     re.search(r"- `production`: \*\*Required reviewers\*\*(?:(?!\n *- )[\s\S])*?\*\*Deployment branches\*\*: `main` only", readme)
-    and re.search(r"- `test`: \*\*Required reviewers\*\*", readme),
-    "README.md: the production Environment needs required reviewers and main only; test needs required reviewers",
+    and re.search(r"- `test`: \*\*Required reviewers\*\*(?:(?!\n *- )[\s\S])*?\*\*Deployment branches\*\*: `main` and `test/\*`", readme),
+    "README.md: the production Environment needs required reviewers and main only; test needs required "
+    "reviewers and deployment branches `main` and `test/*` (as apply-test-trust.json)",
+)
+check(
+    "trusts that branch's code with the TEST account" in readme and "never production's" in readme,
+    "README.md: say that approving a test run trusts that branch's code with the TEST account (which may hold "
+    "a production snapshot), and that the test stack uses its own API keys, never production's",
 )
 # The owner approves their own runs: no document may tell them to switch on
 # "Prevent self-review" (it would lock them out of their own deploys).
