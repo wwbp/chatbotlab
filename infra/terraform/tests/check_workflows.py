@@ -1145,6 +1145,22 @@ check(
     "README.md: production may deploy only from main",
 )
 check("bootstrap/iam/" in readme, "README.md: setup must point at the committed policies in bootstrap/iam/")
+# GH_PAT can write repository secrets. As a repository secret any same-repo
+# workflow run could read it; write_deploy_secrets is production only, so it
+# belongs to the production Environment (approved runs from main only).
+deploy_header = (WORKFLOWS / "deploy-infrastructure.yml").read_text().split("\non:\n", 1)[0]
+check(
+    "#   Environment secrets (Settings → Environments → production)" in deploy_header
+    and deploy_header.find("GH_PAT") > deploy_header.find("#   Environment secrets (Settings → Environments → production)"),
+    "deploy-infrastructure.yml header: GH_PAT must be listed as a production Environment secret",
+)
+repo_bullet = re.search(r"\n\d+\. \*\*Repository secrets\*\*(?:(?!\n\d+\. )[\s\S])*", readme)
+env_bullet = re.search(r"\n\d+\. \*\*Environment secrets\*\*(?:(?!\n\d+\. )[\s\S])*", readme)
+check(
+    repo_bullet and env_bullet and "GH_PAT" not in repo_bullet.group(0) and "`GH_PAT`" in env_bullet.group(0)
+    and "production" in env_bullet.group(0),
+    "README.md: GH_PAT is a production Environment secret, not a repository secret",
+)
 
 # --- Destroy: manual, one named environment; production needs every yes ----
 # The test stack needs only its typed name and the test Environment's
