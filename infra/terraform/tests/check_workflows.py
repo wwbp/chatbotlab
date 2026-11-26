@@ -82,9 +82,8 @@ for name, text in infra_workflows.items():
     check(values, f"{name}: TF_VAR_environment is not set")
     for value in values:
         check(
-            "inputs.environment" in value or "matrix.environment" in value,
-            f"{name}: TF_VAR_environment must come from inputs.environment (or the "
-            f"plan job's matrix), got '{value.strip()}'",
+            value.strip() == "${{ inputs.environment }}",
+            f"{name}: TF_VAR_environment must come from inputs.environment, got '{value.strip()}'",
         )
     check(
         re.search(r"\n      environment:\n(?:        .*\n)*?        required: true", text),
@@ -131,9 +130,7 @@ check(
 )
 for name, text in {**all_workflows, "setup.sh": setup_sh}.items():
     check("use_lockfile=false" not in text, f"{name}: must not switch the state lock off")
-    # The one exception is the pull-request plan, checked further down.
-    if name != "deploy-infrastructure.yml":
-        check("-lock=false" not in text, f"{name}: must not run terraform without the state lock")
+    check("-lock=false" not in text, f"{name}: must not run terraform without the state lock")
 
 # use_lockfile needs Terraform 1.11. Every place that pins a version must agree.
 pins = {
@@ -339,7 +336,7 @@ check(
     "deploy-infrastructure.yml: must not trigger another workflow",
 )
 
-# --- Plan on pull requests; apply only by hand, behind a GitHub Environment --
+# --- Pull requests: offline checks only; apply only by hand ------------------
 
 
 def jobs_of(text):
@@ -353,14 +350,51 @@ def steps_of(job):
     return re.split(r"\n      - ", job)[1:]
 
 
+def triggers_of(text):
+    """The workflow's `on:` section (or one-line `on: ...`)."""
+    m = re.search(r"^on:(.*?)(?=^\S|\Z)", text, re.M | re.S)
+    return m.group(1) if m else ""
+
+
+# Code from a pull request must never get AWS credentials, a GitHub
+# Environment (and its secrets) or any secret: the pull-request path runs only
+# offline checks (ci.yml, "Terraform test"). A reusable workflow a
+# pull-request workflow calls is held to the same rule.
+def pr_access_problems(name, seen=()):
+    text = all_workflows.get(name, "")
+    problems = []
+    if re.search(r"\bid-token:\s*write\b|\bwrite-all\b", text):
+        problems.append("id-token: write")
+    if "configure-aws-credentials" in text:
+        problems.append("configure-aws-credentials")
+    if re.search(r"^\s+environment:\s*\S", text, re.M):
+        problems.append("a GitHub Environment")
+    other_secrets = set(re.findall(r"secrets\.(\w+)", text)) - {"GITHUB_TOKEN"}
+    if other_secrets or "secrets: inherit" in text:
+        problems.append(f"secrets {sorted(other_secrets) or ['inherit']}")
+    for called in re.findall(r"uses:\s*\./\.github/workflows/([\w.-]+)", text):
+        if called not in seen:
+            problems += [f"{called}: {p}" for p in pr_access_problems(called, (*seen, name))]
+    return problems
+
+
+pr_workflows = [n for n, t in all_workflows.items() if re.search(r"\bpull_request(_target)?\b", triggers_of(t))]
+check("ci.yml" in pr_workflows, "ci.yml must run on pull requests (the offline checks)")
+for name in pr_workflows:
+    problems = pr_access_problems(name)
+    check(not problems, f"{name}: runs on pull requests, so it must not use {problems}")
+
+# The pull-request checks of the Terraform code, all offline.
+terraform_test = jobs_of(all_workflows["ci.yml"]).get("terraform-test", "")
+for needle in ("terraform fmt -check -recursive", "terraform init -backend=false", "terraform validate",
+               "terraform test", "python3 infra/terraform/tests/check_workflows.py"):
+    check(needle in terraform_test, f"ci.yml 'Terraform test' job: must run '{needle}'")
+check("name: Terraform test\n" in terraform_test, "ci.yml: keep the job name 'Terraform test' (a required check)")
+
 triggers = deploy.split("\njobs:\n", 1)[0]
 check(
-    not re.search(r"\n  (push|schedule|pull_request_target|workflow_run):", triggers),
-    "deploy-infrastructure.yml: may be started only by workflow_dispatch and pull_request",
-)
-check(
-    re.search(r"\n  pull_request:\n    paths:\n(?:      .*\n)*?      - 'infra/terraform/\*\*'", triggers),
-    "deploy-infrastructure.yml: must plan on pull requests that touch infra/terraform/**",
+    re.findall(r"\n  (\w+):", "\n" + triggers_of(deploy)) == ["workflow_dispatch"],
+    "deploy-infrastructure.yml: may be started only by workflow_dispatch",
 )
 check(
     "\npermissions: {}\n" in triggers,
@@ -378,32 +412,11 @@ for name, text in all_workflows.items():
         not re.search(r"aws-access-key-id|aws-secret-access-key|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY", text),
         f"{name}: must not use long-lived AWS access keys",
     )
+    check("TF_PLAN_ROLE_ARN" not in text, f"{name}: the pull-request plan role is gone; TF_PLAN_ROLE_ARN must not be read")
 
 deploy_jobs = jobs_of(deploy)
-check(set(deploy_jobs) == {"plan", "apply"}, f"deploy-infrastructure.yml: expected jobs plan and apply, found {sorted(deploy_jobs)}")
-plan_job = deploy_jobs.get("plan", "")
+check(set(deploy_jobs) == {"apply"}, f"deploy-infrastructure.yml: expected the single job apply, found {sorted(deploy_jobs)}")
 apply_job = deploy_jobs.get("apply", "")
-
-# The pull-request plan runs code from the pull request, so it gets a
-# read-only role, no GitHub Environment and no real application secrets.
-check(
-    re.search(r"\n    if: github\.event_name == 'pull_request'\n", "\n" + plan_job),
-    "plan job: must run only on pull_request",
-)
-check(not re.search(TF + r"apply\b", plan_job), "plan job: must never apply")
-plan_secrets = set(re.findall(r"secrets\.(\w+)", plan_job))
-allowed = {"TF_PLAN_ROLE_ARN", "TF_PROJECT_PREFIX"}
-check(
-    plan_secrets <= allowed,
-    f"plan job: may read only {sorted(allowed)}, also reads {sorted(plan_secrets - allowed)}",
-)
-check("configured == 'true'" in plan_job, "plan job: must skip cleanly when its role is not configured")
-for line in deploy.splitlines():
-    if "-lock=false" in line:
-        check(
-            "terraform plan" in line and line in plan_job,
-            f"deploy-infrastructure.yml: -lock=false is allowed only on the pull-request plan: '{line.strip()}'",
-        )
 
 # Applying is a deliberate act by a person, approved through the GitHub
 # Environment of the same name as the stack.
@@ -506,21 +519,10 @@ check(
     "apply job: the deletion check must run whenever the apply runs",
 )
 check(
-    "continue-on-error" not in apply_job and "continue-on-error" not in plan_job,
+    "continue-on-error" not in apply_job,
     "deploy-infrastructure.yml: no step may continue on error",
 )
 
-# An unreadable state bucket is an error, not "never built": skipping the
-# plan would hide every change the pull request makes.
-locate = next((st for st in steps_of(plan_job) if st.startswith("name: Locate Terraform state")), "")
-check(
-    re.search(r'\n {10}aws s3api head-bucket --bucket "\$BUCKET"\n', locate),
-    "plan job: Locate Terraform state must run 'aws s3api head-bucket' on its own line, so any error fails the step",
-)
-check(
-    "(404)" in locate and re.search(r"else\n(?:.*\n)*?\s+exit 1\n", locate),
-    "plan job: only a 404 on the state key may mean 'not built yet'; any other error must exit 1",
-)
 for name, text in infra_workflows.items():
     for line in text.splitlines():
         if "head-object" in line:
@@ -550,14 +552,6 @@ check(
     "deploy and destroy workflows must set TF_VAR_create_github_oidc_provider to false",
 )
 
-# On a pull request without the plan role (or from a fork), every step after
-# the configuration check must skip, not fail.
-plan_steps = steps_of(plan_job)
-for st in plan_steps[1:]:
-    check(
-        re.search(r"\n        if: steps\.(config\.outputs\.configured|state\.outputs\.found) == 'true'\n", st),
-        f"plan job, step '{st.splitlines()[0]}': must be skipped unless the plan role is configured",
-    )
 # The apply job always signs in with its own role.
 creds = [st for st in apply_steps if "aws-actions/configure-aws-credentials" in st]
 check(
@@ -627,16 +621,10 @@ UNTAGGABLE_ACTIONS = {"cloudwatch:PutMetricData"}
 OTHER = {"staging": "production", "production": "staging"}
 BRANCH = {"staging": "refs/heads/staging", "production": "refs/heads/main"}
 # role -> (environment it serves, GitHub Environment it trusts, ref condition)
-ROLES = {
-    # Pull requests plan staging only: until secrets leave the state, no
-    # pull-request code may run with a role that reads production's state.
-    # Production is planned by the apply job (action = plan), from main.
-    "plan-staging": ("staging", "plan-staging", ("StringLike", "refs/pull/*/merge")),
-    **{f"apply-{e}": (e, e, ("StringEquals", BRANCH[e])) for e in ENVIRONMENTS},
-}
+ROLES = {f"apply-{e}": (e, e, ("StringEquals", BRANCH[e])) for e in ENVIRONMENTS}
 
 
-ROLE_PARTS = {"plan": ("permissions",), "apply": ("permissions", "abac", "guardrails")}
+ROLE_PARTS = {"apply": ("permissions", "abac", "guardrails")}
 
 
 def boundary_arn(env_name):
@@ -942,26 +930,10 @@ for name, policy in policies.items():
             f"{fname}.json: must deny everything tagged Environment={other}",
         )
 
-    if kind in ("plan", "apply"):
+    if kind == "apply":
         check(not allows(policy, "s3:GetObject", "arn:aws:s3:::someone-elses-bucket/key"),
               f"{fname}.json: must not read objects in buckets that are not its own")
-    if kind == "plan":
-        own = sample_arns(environment)
-        check(not allows(policy, "s3:GetObject", own["object"]),
-              f"{fname}.json: must not read application data (only its state file)")
-        check(allows(policy, "s3:GetObject", own["state"]), f"{fname}.json: must read its own state file")
-        for st in policy["Statement"]:
-            if st.get("Effect") != "Allow":
-                continue
-            for action in as_list(st.get("Action", [])):
-                check(re.match(r"(Describe|Get|List|Head)", action.split(":", 1)[-1]),
-                      f"{fname}.json: '{action}' is not read-only")
-            for resource in as_list(st.get("Resource", [])):
-                check(
-                    not (resource.startswith("arn:aws:s3:::") and "/" in resource) or resource == own["state"],
-                    f"{fname}.json: may read one S3 object, its own state file; found '{resource}'",
-                )
-    elif kind == "apply":
+    if kind == "apply":
         own = sample_arns(environment)
         for action in ("s3:GetObject", "s3:PutObject", "s3:DeleteObject"):
             check(allows(policy, action, own["state"]), f"{fname}.json: {action} on its own state must be allowed")
@@ -1020,7 +992,7 @@ for name, policy in policies.items():
                        "iam:SetDefaultPolicyVersion"):
             check(denies(policy, action, boundary_arn(environment)) or denies(policy, action, own["role"]),
                   f"{fname}.json: must deny {action} (the boundary must stay in place)")
-        for target in ("role/<PREFIX>-terraform-apply-production", "role/<PREFIX>-terraform-plan-staging",
+        for target in ("role/<PREFIX>-terraform-apply-production", "role/<PREFIX>-terraform-apply-staging",
                        "role/aws-elasticbeanstalk-ec2-role", f"role/<PREFIX>-{other}-github-actions"):
             check(not allows(policy, "iam:PutRolePolicy", f"arn:aws:iam::<ACCOUNT_ID>:{target}"),
                   f"{fname}.json: must not change {target}")
@@ -1056,22 +1028,6 @@ for name, policy in policies.items():
 check(len({json.dumps(v) for v in live_statements.values()}) == 1 and all(len(v) == 3 for v in live_statements.values()),
       "bootstrap/iam: every policy must carry the same three live/OIDC Deny statements")
 
-# The pull-request plan runs only after a reviewer approves it in the
-# plan-<environment> GitHub Environment, the subject its role trusts.
-check(
-    "\n    environment: plan-${{ matrix.environment }}\n" in "\n" + plan_job,
-    "plan job: must run in the 'plan-<environment>' GitHub Environment (required reviewers approve each run)",
-)
-check(
-    re.search(r"\n      matrix:\n        environment: \[staging\]\n", plan_job) and "production" not in plan_job,
-    "plan job: pull requests plan staging only; no pull-request code may get a role that reads production state",
-)
-readme_text = (TERRAFORM / "README.md").read_text()
-check(
-    re.search(r"`plan-staging`[^\n]*\n?[^\n]*\*\*Required reviewers\*\*[^.]*\*\*Prevent self-review\*\*", readme_text)
-    and "plan-production" not in readme_text,
-    "README.md: plan-staging needs required reviewers with Prevent self-review; there is no plan-production",
-)
 # The boundary is mandatory: no switch turns it off.
 for name, text in {**all_workflows, "variables.tf": (TERRAFORM / "variables.tf").read_text()}.items():
     check("use_permissions_boundary" not in text, f"{name}: the permissions boundary must not be optional")
@@ -1081,7 +1037,6 @@ check(
 )
 
 readme = (TERRAFORM / "README.md").read_text()
-check("ReadOnlyAccess" not in readme, "README.md: the plan role must not get ReadOnlyAccess")
 check(":pull_request" not in readme, "README.md: no role may trust the pull_request subject")
 check(
     re.search(r"- `production`: \*\*Required reviewers\*\*, \*\*Prevent self-review\*\* ticked", readme),
