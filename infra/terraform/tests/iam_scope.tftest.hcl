@@ -29,6 +29,9 @@ variables {
   db_password          = "test-password-not-real"
   admin_panel_password = "test-password-not-real"
   domain_name          = "chat.example.org"
+  # As in the workflows: the account's OIDC provider exists already, so its
+  # ARN (and every trust policy naming it) is known at plan time.
+  create_github_oidc_provider = false
 }
 
 run "roles_always_carry_the_boundary" {
@@ -80,5 +83,68 @@ run "certificate_carries_the_environment_tag" {
       aws_acm_certificate.custom_domain[0].tags["Project"] == "chatbotlab",
     ])
     error_message = "The ACM certificate (us-east-1 provider, no default_tags) must carry the Environment and Project tags."
+  }
+}
+
+# The app deploy role (<project>-<environment>-github-actions) can write the
+# frontend bucket and deploy to Elastic Beanstalk. A pull request can add a
+# workflow of its own that asks for an OIDC token, and no text check sees a
+# new file: only the trust policy can refuse it. Production trusts only
+# pushes and manual runs on main (what production.yml presents); the test
+# stack only the `test` GitHub Environment. Never a wildcard subject, never
+# pull_request.
+run "deploy_role_trusts_production_main_only" {
+  command = plan
+
+  variables {
+    environment = "production"
+  }
+
+  assert {
+    condition = alltrue([
+      for st in jsondecode(aws_iam_role.github_actions_deployment.assume_role_policy).Statement :
+      !contains(keys(st.Condition), "StringLike")
+      && toset(st.Condition.StringEquals["token.actions.githubusercontent.com:sub"]) == toset([
+        "repo:wwbp/chatbotlab:ref:refs/heads/main",
+        "repo:wwbp@42522115/chatbotlab@882137210:ref:refs/heads/main",
+      ])
+    ])
+    error_message = "The production deploy role must trust exactly repo:wwbp/chatbotlab:ref:refs/heads/main (both subject forms), with no wildcard."
+  }
+}
+
+run "deploy_role_trusts_test_environment_only" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for st in jsondecode(aws_iam_role.github_actions_deployment.assume_role_policy).Statement :
+      !contains(keys(st.Condition), "StringLike")
+      && toset(st.Condition.StringEquals["token.actions.githubusercontent.com:sub"]) == toset([
+        "repo:wwbp/chatbotlab:environment:test",
+        "repo:wwbp@42522115/chatbotlab@882137210:environment:test",
+      ])
+    ])
+    error_message = "The test deploy role must trust exactly the test GitHub Environment (both subject forms), with no wildcard."
+  }
+}
+
+run "deploy_role_subjects_have_no_wildcard_or_pull_request" {
+  command = plan
+
+  variables {
+    environment = "production"
+  }
+
+  assert {
+    condition = alltrue([
+      for st in jsondecode(aws_iam_role.github_actions_deployment.assume_role_policy).Statement : alltrue([
+        for op, conds in st.Condition : alltrue([
+          for sub in flatten([lookup(conds, "token.actions.githubusercontent.com:sub", [])]) :
+          !endswith(sub, ":*") && !strcontains(sub, "*") && !strcontains(sub, "pull_request")
+        ])
+      ])
+    ])
+    error_message = "No deploy role subject may contain a wildcard or pull_request."
   }
 }
