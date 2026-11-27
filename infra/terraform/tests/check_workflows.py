@@ -1308,7 +1308,7 @@ check(
     "destroy job: the backup must go to <state bucket>/<prefix>/<environment>/backups/<date>/",
 )
 check(
-    "Total Objects" in backup and "Total Size" in backup
+    "o++" in backup and "s+=$3" in backup
     and re.search(r'if \[\[ "\$src" != "\$dst" \]\]; then\n(?:.*\n)*?\s+exit 1\n', backup),
     "destroy job: the backup step must compare object count and total size and exit 1 on a mismatch",
 )
@@ -1317,6 +1317,16 @@ check(
     'aws s3 sync "s3://$DATA" "$BACKUP/"' in backup and '\n          src=$(totals "s3://$DATA")\n' in backup
     and '\n          dst=$(totals "$BACKUP/")\n' in backup,
     "destroy job: the backup must sync s3://$DATA to $BACKUP/, with src from s3://$DATA and dst from $BACKUP/",
+)
+# Participants' raw photos (uploads/) expire after a day in the data bucket;
+# the backup goes to the versioned state bucket, which never expires them.
+check(
+    re.search(r'aws s3 sync "s3://\$DATA" "\$BACKUP/"[^\n]* --exclude \'uploads/\*\'', backup),
+    "destroy job: the backup sync must pass --exclude 'uploads/*' (raw participant photos)",
+)
+check(
+    "--summarize" not in backup and "$4 !~ /^uploads\\//" in backup,
+    "destroy job: the backup totals must leave uploads/ out of the count and size",
 )
 # No state for this environment: stop before anything is emptied.
 locate_state = destroy_step("Locate Terraform state bucket")

@@ -78,13 +78,9 @@ def get_presigned_url(request):
             HttpMethod="PUT",
         )
 
-        return JsonResponse(
-            {
-                "s3_url": url,
-                "file_url": f"https://{os.getenv('AWS_BUCKET_NAME')}.s3.amazonaws.com/uploads/{safe_name}",
-            },
-            status=200,
-        )
+        # The caller names the upload by key (uploads/<name>), never by an
+        # absolute URL: that would embed the bucket name.
+        return JsonResponse({"s3_url": url}, status=200)
     except Exception as e:
         logger.error(f"Error generating presigned URL: {e}")
         return JsonResponse({"error": "Failed to generate upload URL."}, status=500)
