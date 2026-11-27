@@ -1586,6 +1586,29 @@ class BotAdmin(FormulaSafeExportMixin, HistoryAdmin):
                     level="ERROR",
                 )
 
+    def has_delete_permission(self, request, obj=None):
+        # Bots define study conditions: superusers only, and never a bot with
+        # conversations (they name their bot, so they would be orphaned).
+        if not request.user.is_superuser:
+            return False
+        return obj is None or not obj.conversation_count()
+
+    def get_deleted_objects(self, objs, request):
+        """Bulk delete: refuse the whole action if any bot has conversations,
+        naming those bots, rather than Django's generic "no permission"."""
+        deleted, counts, perms_needed, protected = super().get_deleted_objects(
+            objs, request
+        )
+        in_use = [
+            f"{bot.name}: {Bot.in_use_message(n)}"
+            for bot in objs
+            if (n := bot.conversation_count())
+        ]
+        if in_use:
+            perms_needed.discard(Bot._meta.verbose_name)
+            protected = [*protected, *in_use]
+        return deleted, counts, perms_needed, protected
+
     def delete_model(self, request, obj):
         """Clean up avatar files when bot is deleted"""
         try:

@@ -593,6 +593,15 @@ class Bot(models.Model):
     def __str__(self):
         return self.name
 
+    def conversation_count(self):
+        # Conversations name their bot (bot_name), they hold no foreign key.
+        return Conversation.objects.filter(bot_name=self.name).count()
+
+    @staticmethod
+    def in_use_message(n):
+        s = "" if n == 1 else "s"
+        return f"This bot has {n} conversation{s}, so it can't be deleted or renamed."
+
     def get_moderation_threshold(self, category):
         """Threshold for one OpenAI moderation category.
 
