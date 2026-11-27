@@ -90,6 +90,29 @@ resource "aws_s3_bucket_public_access_block" "application_data" {
   restrict_public_buckets = true
 }
 
+# Participants' raw photos (uploads/) are needed only long enough to generate
+# their avatar. The app deletes each one afterwards; this catches every path
+# that does not (a failed generation, an abandoned upload). Same rule as the
+# live production bucket. The bucket is deliberately not versioned: with
+# versioning, this expiry and the app's delete would only add delete markers
+# and the photo would survive as a noncurrent version.
+resource "aws_s3_bucket_lifecycle_configuration" "application_data" {
+  bucket = aws_s3_bucket.application_data.id
+
+  rule {
+    id     = "expire-raw-participant-photos"
+    status = "Enabled"
+
+    filter {
+      prefix = "uploads/"
+    }
+
+    expiration {
+      days = 1
+    }
+  }
+}
+
 resource "aws_s3_bucket_cors_configuration" "application_data" {
   bucket = aws_s3_bucket.application_data.id
 
