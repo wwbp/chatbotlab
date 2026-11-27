@@ -918,6 +918,10 @@ def sample_arns(env_name):
 
 # The master user secret RDS creates for a database (manage_master_user_password).
 RDS_SECRET = "arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:rds!db-0123abcd-AbCdEf"
+# Calls that write, restore, destroy or read a secret's value.
+SECRET_VALUE_CALLS = ("secretsmanager:CreateSecret", "secretsmanager:PutSecretValue", "secretsmanager:UpdateSecret",
+                      "secretsmanager:RestoreSecret", "secretsmanager:DeleteSecret", "secretsmanager:GetSecretValue",
+                      "secretsmanager:UpdateSecretVersionStage", "secretsmanager:ReplicateSecretToRegions")
 
 
 # IAM actions that accept the iam:PermissionsBoundary condition key: every one
@@ -1312,25 +1316,35 @@ for name, policy in policies.items():
                     services = set(as_list(cond.get("StringEquals", {}).get("iam:PassedToService", [])))
                     check(services and services <= {"elasticbeanstalk.amazonaws.com", "ec2.amazonaws.com"},
                           f"{fname}.json: iam:PassRole needs iam:PassedToService = EB / EC2")
-        # Secrets Manager: the role creates and deletes the stack's secrets
-        # (<PREFIX>-<env>/app, and RDS's master user secret through
-        # manage_master_user_password) but never reads or writes a value, so no
-        # value reaches Terraform state or the deploy workflow. UpdateSecret and
-        # PutSecretValue would let it set SECRET_KEY (and forge sessions).
-        for action in ("secretsmanager:CreateSecret", "secretsmanager:DeleteSecret",
-                       "secretsmanager:DescribeSecret", "secretsmanager:TagResource"):
+        # Secrets Manager. The secrets under <PREFIX>-<env>/ are created once by
+        # an administrator, out of band; Terraform only looks them up. Any call
+        # that can set a value (CreateSecret and UpdateSecret take a
+        # SecretString), restore an old one, or destroy one counts as a value
+        # write: allowing it would let a workflow on main replace SECRET_KEY
+        # (and forge sessions) or an API key. Reading a value is refused too.
+        # Each must be explicitly denied, not merely missing.
+        for action in ("secretsmanager:DescribeSecret", "secretsmanager:GetResourcePolicy"):
             check(allows(policy, action, own["secret"]), f"{fname}.json: must allow {action} on its own secrets")
             check(not allows(policy, action, own["secret"].replace(f"<PREFIX>-{environment}", "someone-else")),
                   f"{fname}.json: {action} must be limited to <PREFIX>-{environment}/ secrets")
-        for action in ("secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue",
-                       "secretsmanager:UpdateSecret", "secretsmanager:UpdateSecretVersionStage"):
-            for arn in (own["secret"], RDS_SECRET):
-                check(not matching(policy, "Allow", action, arn), f"{fname}.json: must not allow {action} on {arn}")
-        check(allows(policy, "secretsmanager:CreateSecret", RDS_SECRET)
-              and allows(policy, "secretsmanager:TagResource", RDS_SECRET)
-              and allows(policy, "kms:DescribeKey", "arn:aws:kms:us-east-1:<ACCOUNT_ID>:key/aws-secretsmanager"),
-              f"{fname}.json: manage_master_user_password needs secretsmanager:CreateSecret and TagResource on "
-              "rds!db-* and kms:DescribeKey (RDS user guide, rds-secrets-manager)")
+        for action in SECRET_VALUE_CALLS:
+            check(not matching(policy, "Allow", action, own["secret"]),
+                  f"{fname}.json: must not allow {action} on its own secrets (a value write or read)")
+            check(denies(policy, action, own["secret"]),
+                  f"{fname}.json: must explicitly deny {action} on <PREFIX>-* secrets")
+        # manage_master_user_password: RDS creates and tags rds!db-<id> with
+        # the caller's credentials (a forward access session). Only that way:
+        # directly, the role could tag or touch any project's RDS secret in the
+        # shared account. kms:DescribeKey describes aws/secretsmanager.
+        for action in ("secretsmanager:CreateSecret", "secretsmanager:TagResource"):
+            grants = matching(policy, "Allow", action, RDS_SECRET)
+            check(grants and all(st.get("Condition") == {"Bool": {"aws:ViaAWSService": "true"}} for st in grants),
+                  f"{fname}.json: {action} on rds!db-* only with Bool aws:ViaAWSService = true (through RDS)")
+        for action in ("secretsmanager:DeleteSecret", "secretsmanager:PutSecretValue", "secretsmanager:UpdateSecret",
+                       "secretsmanager:GetSecretValue", "secretsmanager:UntagResource"):
+            check(not matching(policy, "Allow", action, RDS_SECRET), f"{fname}.json: must not allow {action} on rds!db-*")
+        check(allows(policy, "kms:DescribeKey", "arn:aws:kms:us-east-1:<ACCOUNT_ID>:key/aws-secretsmanager"),
+              f"{fname}.json: manage_master_user_password needs kms:DescribeKey (RDS user guide, rds-secrets-manager)")
         check(allows(policy, "iam:CreateRole", own["role"]), f"{fname}.json: must be able to create its own roles")
         check(
             any(st.get("Effect") == "Deny" and "iam:PutRolePermissionsBoundary" in as_list(st.get("Action"))
