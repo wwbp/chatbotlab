@@ -824,7 +824,7 @@ STAR_ALLOWLIST = {
     "elasticache:Describe*", "elasticache:ListTagsForResource", "elasticbeanstalk:DescribeA*",
     "elasticbeanstalk:DescribeE*", "elasticbeanstalk:DescribeI*", "elasticbeanstalk:DescribeP*",
     "elasticbeanstalk:List*", "elasticloadbalancing:Describe*", "iam:Get*", "iam:List*", "logs:Describe*",
-    "rds:Describe*", "rds:ListTagsForResource", "s3:ListAllMyBuckets", "sts:GetCallerIdentity",
+    "rds:Describe*", "rds:ListTagsForResource", "route53:Get*", "route53:List*", "s3:ListAllMyBuckets", "sts:GetCallerIdentity",
     "bedrock:Converse*", "bedrock:InvokeModel*", "cloudwatch:PutMetricData",
 }
 # Statements that may only appear tag-scoped (own aws:ResourceTag or
@@ -1095,7 +1095,7 @@ check(
 # at setup time.
 def iam_size(path):
     text = json.dumps(json.loads(path.read_text()), separators=(",", ":"))
-    return len(text.replace("<PREFIX>", "x" * 24).replace("<SES_FROM_DOMAIN>", "x" * 30))
+    return len(text.replace("<PREFIX>", "x" * 24).replace("<SES_FROM_DOMAIN>", "x" * 30).replace("<SITE_DOMAIN>", "x" * 30))
 
 
 for path in sorted(IAM.glob("*.json")) if IAM.exists() else []:
@@ -1362,6 +1362,70 @@ check(
     "put-role-permissions-boundary" in (TERRAFORM / "README.md").read_text(),
     "README.md: must say to attach the boundary to existing stack roles before granting the apply policy",
 )
+
+
+# --- Edge: DNS records in the shared Route 53 zone, and the web ACL ------------
+# The zone (wwbp.org) holds the live deployment's records, SES's DKIM, MAIL
+# FROM and DMARC records and other projects'. Each apply role may change only
+# its own names: <PREFIX>-<env>-origin.<zone>, production's site name
+# (<SITE_DOMAIN>, at the cutover) and their ACM validation records
+# (_<32 hex>.<name>), and only those record types.
+ACM_LABEL = "_" + "0123456789abcdef" * 2
+ZONE_ARN = "arn:aws:route53:::hostedzone/Z09486261NJRKCTU00NAK"
+
+
+def changes_record(policy, name, rtype="CNAME"):
+    """True when an Allow lets route53:ChangeResourceRecordSets change `name`
+    (NormalizedRecordNames / RecordTypes conditions evaluated; an Allow
+    without them allows every name) and no unconditional Deny refuses it."""
+    for st in matching(policy, "Allow", "route53:ChangeResourceRecordSets", ZONE_ARN):
+        cond = st.get("Condition", {})
+        like = cond.get("ForAllValues:StringLike", {})
+        names = as_list(like.get("route53:ChangeResourceRecordSetsNormalizedRecordNames", ["*"]))
+        types = as_list(cond.get("ForAllValues:StringEquals", {}).get("route53:ChangeResourceRecordSetsRecordTypes", ["*"]))
+        if set(cond) - {"ForAllValues:StringLike", "ForAllValues:StringEquals"}:
+            continue  # unknown condition: treat as not granting (checked below)
+        if any(fnmatchcase(name, n) for n in names) and any(fnmatchcase(rtype, t) for t in types):
+            return not denies(policy, "route53:ChangeResourceRecordSets", ZONE_ARN)
+    return False
+
+
+for role in ROLES:
+    environment = role.split("-", 1)[1]
+    policy = policies[role]
+    fname = f"{role}-permissions"
+    origin = f"<PREFIX>-{environment}-origin.wwbp.org"
+    own = [origin, f"{ACM_LABEL}.{origin}"] + (["<SITE_DOMAIN>", f"{ACM_LABEL}.<SITE_DOMAIN>"] if environment == "production" else [])
+    for name in own:
+        check(changes_record(policy, name), f"{fname}.json: must allow route53:ChangeResourceRecordSets on its own record {name}")
+    check(environment != "production" or changes_record(policy, "<SITE_DOMAIN>", "AAAA"),
+          f"{fname}.json: must allow the site's AAAA alias record")
+    foreign = ["wwbp.org", "dev.bot.wwbp.org", "_dmarc.<SITE_DOMAIN>", "mail.<SITE_DOMAIN>",
+               "gclnjpce._domainkey.<SITE_DOMAIN>", f"x.{origin}", "meetlab.wwbp.org",
+               *(f"<PREFIX>-{o}-origin.wwbp.org" for o in OTHER[environment])]
+    if environment == "test":
+        foreign += ["<SITE_DOMAIN>", f"{ACM_LABEL}.<SITE_DOMAIN>"]
+    for name in foreign:
+        check(not changes_record(policy, name), f"{fname}.json: must not change the record {name} in the shared zone")
+    check(not changes_record(policy, origin, "MX") and not changes_record(policy, origin, "TXT"),
+          f"{fname}.json: route53 changes must be limited to A, AAAA and CNAME records")
+    # Any other route53 write would bypass the name scope.
+    for st in policy["Statement"]:
+        if st.get("Effect") == "Allow":
+            for a in as_list(st.get("Action", [])):
+                if a.startswith("route53:") and not re.match(r"route53:(Get|List)", a):
+                    check(a == "route53:ChangeResourceRecordSets", f"{fname}.json: {a} is not allowed (only record changes)")
+    # The web ACL: its own (<PREFIX>-<env>-edge), using AWS's managed groups,
+    # never the live distributions' ACLs or another environment's.
+    acl = "arn:aws:wafv2:us-east-1:<ACCOUNT_ID>:global/webacl/{}/0000"
+    for action in ("wafv2:CreateWebACL", "wafv2:UpdateWebACL", "wafv2:DeleteWebACL", "wafv2:GetWebACL", "wafv2:TagResource"):
+        check(allows(policy, action, acl.format(f"<PREFIX>-{environment}-edge")),
+              f"{fname}.json: must allow {action} on its own web ACL")
+        for other_acl in ("CreatedByCloudFront-036700af", "meetlab-acl", *(f"<PREFIX>-{o}-edge" for o in OTHER[environment])):
+            check(not allows(policy, action, acl.format(other_acl)),
+                  f"{fname}.json: must not allow {action} on the web ACL {other_acl}")
+    check(allows(policy, "wafv2:CreateWebACL", "arn:aws:wafv2:us-east-1:<ACCOUNT_ID>:global/managedruleset/AWS/AWSManagedRulesCommonRuleSet"),
+          f"{fname}.json: CreateWebACL needs AWS's managed rule groups")
 
 readme = (TERRAFORM / "README.md").read_text()
 check(":pull_request" not in readme, "README.md: no role may trust the pull_request subject")

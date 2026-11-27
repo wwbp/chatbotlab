@@ -297,6 +297,16 @@ isolated by policy:
   controls cannot be tagged, so neither role may update one (any
   distribution in the account could depend on it); creating and deleting
   stay allowed, and deleting fails while one is in use;
+- **DNS and WAF**: the zone (`wwbp.org`) is shared with the live
+  deployment, SES (DKIM, MAIL FROM, DMARC) and other projects. Each apply
+  role may change only A, AAAA and CNAME records named
+  `<PREFIX>-<env>-origin.<zone>`, production also `<SITE_DOMAIN>`, and their
+  ACM validation records (`_` + 32 characters + `.<name>`, which leaves
+  `_dmarc` and `_domainkey` names out); it can read the rest. Web ACLs:
+  only `<PREFIX>-<env>-*`, never the live distributions' `CreatedByCloudFront-*`.
+  The roles' existing policies need this added (re-create them from
+  `bootstrap/iam/` with the `sed` below) before the first apply of this
+  change; the boundaries are unchanged;
 - **email**: the test role and every role the test stack creates (its
   boundary, `<PREFIX>-terraform-boundary-test`) are denied `ses:Send*`, so
   the test stack cannot send real email through the account's SES
@@ -341,13 +351,13 @@ within the test role's limits. Read the branch before you approve.
 ### One-time setup (the owner)
 
 The policies are committed in `bootstrap/iam/` and checked by
-`tests/check_workflows.py`. Replace `<ACCOUNT_ID>` (`TF_AWS_ACCOUNT_ID`), `<PREFIX>` (the value of `TF_PROJECT_PREFIX`) and
-`<SES_FROM_DOMAIN>` before using them, for example:
+`tests/check_workflows.py`. Replace `<ACCOUNT_ID>` (`TF_AWS_ACCOUNT_ID`), `<PREFIX>` (the value of `TF_PROJECT_PREFIX`),
+`<SES_FROM_DOMAIN>` and `<SITE_DOMAIN>` (production's public name, `bot.wwbp.org`) before using them, for example:
 
 ```bash
 for f in bootstrap/iam/*.json; do
   sed -e "s/<ACCOUNT_ID>/$ACCOUNT_ID/g" -e "s/<PREFIX>/$PREFIX/g" \
-      -e "s/<SES_FROM_DOMAIN>/$SES_FROM_DOMAIN/g" "$f" > "/tmp/$(basename "$f")"
+      -e "s/<SES_FROM_DOMAIN>/$SES_FROM_DOMAIN/g" -e "s/<SITE_DOMAIN>/$SITE_DOMAIN/g" "$f" > "/tmp/$(basename "$f")"
 done
 ```
 
