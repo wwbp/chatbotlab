@@ -70,7 +70,7 @@
       "Resource": "*"
     },
     {
-      "Sid": "DenyOtherProductionNames",
+      "Sid": "DenyOtherEnvironmentNames",
       "Effect": "Deny",
       "Action": "*",
       "Resource": [
@@ -84,19 +84,39 @@
         "arn:aws:iam::*:*/<PREFIX>-production-*",
         "arn:aws:logs:*:*:log-group:/aws/elasticbeanstalk/<PREFIX>-production-*",
         "arn:aws:ssm:*:*:parameter/<PREFIX>-production/*",
-        "arn:aws:secretsmanager:*:*:secret:<PREFIX>-production/*"
+        "arn:aws:secretsmanager:*:*:secret:<PREFIX>-production/*",
+        "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>/<PREFIX>/staging/*",
+        "arn:aws:s3:::<PREFIX>-staging-*",
+        "arn:aws:s3:::elasticbeanstalk-*/<PREFIX>-staging/*",
+        "arn:aws:rds:*:*:*:<PREFIX>-staging-*",
+        "arn:aws:elasticache:*:*:*:<PREFIX>-staging-*",
+        "arn:aws:elasticbeanstalk:*:*:*/<PREFIX>-staging",
+        "arn:aws:elasticbeanstalk:*:*:*/<PREFIX>-staging/*",
+        "arn:aws:iam::*:*/<PREFIX>-staging-*",
+        "arn:aws:logs:*:*:log-group:/aws/elasticbeanstalk/<PREFIX>-staging-*",
+        "arn:aws:ssm:*:*:parameter/<PREFIX>-staging/*",
+        "arn:aws:secretsmanager:*:*:secret:<PREFIX>-staging/*"
       ]
     },
     {
-      "Sid": "DenyOtherProductionTags",
+      "Sid": "DenyOtherEnvironmentTags",
       "Effect": "Deny",
       "Action": "*",
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:ResourceTag/Environment": "production"
+          "aws:ResourceTag/Environment": [
+            "production",
+            "staging"
+          ]
         }
       }
+    },
+    {
+      "Sid": "DenySendingEmail",
+      "Effect": "Deny",
+      "Action": "ses:Send*",
+      "Resource": "*"
     }
   ]
 }

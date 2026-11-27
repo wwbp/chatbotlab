@@ -219,17 +219,6 @@
     {
       "Effect": "Allow",
       "Action": [
-        "ses:SendEmail",
-        "ses:SendRawEmail"
-      ],
-      "Resource": [
-        "arn:aws:ses:*:<ACCOUNT_ID>:identity/<SES_FROM_DOMAIN>",
-        "arn:aws:ses:*:<ACCOUNT_ID>:identity/*@<SES_FROM_DOMAIN>"
-      ]
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
         "bedrock:Converse*",
         "bedrock:InvokeModel*",
         "ecr:BatchCheckLayerAvailability",
@@ -312,6 +301,12 @@
       "Sid": "DenyOidcProviderChanges",
       "Effect": "Deny",
       "Action": "iam:*OpenIDConnectProvider*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenySendingEmail",
+      "Effect": "Deny",
+      "Action": "ses:Send*",
       "Resource": "*"
     }
   ]
