@@ -38,6 +38,23 @@ participants' faces. A Config editor still sets a bot's default avatar, from
 the bot's own page. Nothing can be deleted except by a superuser. Keep the
 number of superusers small; the ``admin`` account created at deployment is one.
 
+Bots with conversations
+~~~~~~~~~~~~~~~~~~~~~~~
+
+A bot defines a study condition, and each conversation records its bot by
+name. So:
+
+- Only a superuser can delete a bot, and only if the bot has no
+  conversations.
+- Nobody can rename a bot that has conversations.
+
+The rule applies in the admin panel (the bot's **Delete** button and the
+**Delete selected bots** action), in the bots API (``DELETE`` answers 409, and
+so does a ``PUT`` that changes the name), and in code. A bot's page shows
+"This bot has N conversations, so it can't be deleted or renamed." when this
+applies. To change such a bot for a new study, use **Save as new** and give
+the copy a new name.
+
 The roles are created by a database migration, so they exist as soon as the
 site is deployed. Do not edit their permissions in the admin: change them with
 a new migration so every deployment stays the same.

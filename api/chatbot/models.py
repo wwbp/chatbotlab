@@ -1,7 +1,7 @@
 import secrets
 
 from django.conf import settings
-from django.core.exceptions import FieldDoesNotExist
+from django.core.exceptions import FieldDoesNotExist, ValidationError
 from django.db import models
 from simple_history.models import HistoricalRecords
 
@@ -337,7 +337,31 @@ class ModerationSettings(models.Model):
         return f"Moderation {'Enabled' if self.enabled else 'Disabled'}"
 
 
+def conversations_naming(names):
+    """Conversations that name one of `names` (a list or a values() subquery).
+
+    A bot is named by the conversation (bot_name) and by each of its utterances
+    (Utterance.bot_name). They can differ: a reused conversation_id with another
+    bot_name stamps that bot on the utterances only. Both count.
+    """
+    return Conversation.objects.filter(
+        models.Q(bot_name__in=names) | models.Q(utterances__bot_name__in=names)
+    ).distinct()
+
+
+class BotQuerySet(models.QuerySet):
+    def delete(self):
+        # Bulk deletes skip Bot.delete(), so they get the same guard.
+        used = conversations_naming(self.values("name"))
+        if used.exists():
+            raise models.ProtectedError(
+                "Bots with conversations can't be deleted.", used
+            )
+        return super().delete()
+
+
 class Bot(models.Model):
+    objects = BotQuerySet.as_manager()
     # Make name the unique identifier
     name = models.CharField(max_length=255, unique=True, default="DefaultBotName")
     prompt = models.TextField()  # Bot's prompt
@@ -592,6 +616,39 @@ class Bot(models.Model):
 
     def __str__(self):
         return self.name
+
+    def conversation_count(self):
+        # By the saved name: an unsaved rename must not hide the conversations.
+        return conversations_naming(
+            Bot.objects.filter(pk=self.pk).values("name")
+        ).count()
+
+    @staticmethod
+    def in_use_message(n):
+        s = "" if n == 1 else "s"
+        return f"This bot has {n} conversation{s}, so it can't be deleted or renamed."
+
+    def clean(self):
+        # Conversations name their bot, so a rename detaches them like a delete.
+        old = Bot.objects.filter(pk=self.pk).values_list("name", flat=True).first()
+        if old is not None and old != self.name:
+            n = self.conversation_count()
+            if n:
+                raise ValidationError({"name": self.in_use_message(n)})
+
+    def save(self, *args, **kwargs):
+        self.clean()  # the rename guard, for code paths that skip forms
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        # Last line of defence: no code path may orphan a study's conversations.
+        n = self.conversation_count()
+        if n:
+            raise models.ProtectedError(
+                self.in_use_message(n),
+                conversations_naming(Bot.objects.filter(pk=self.pk).values("name")),
+            )
+        return super().delete(*args, **kwargs)
 
     def get_moderation_threshold(self, category):
         """Threshold for one OpenAI moderation category.

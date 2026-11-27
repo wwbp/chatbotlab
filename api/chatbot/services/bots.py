@@ -1,6 +1,7 @@
 import json
 import logging
 
+from django.core.exceptions import ValidationError
 from django.http import JsonResponse
 from django.utils.decorators import method_decorator
 from django.views import View
@@ -240,6 +241,9 @@ class BotDetailAPIView(View):
             bot.save()
 
             return JsonResponse({"message": "Bot updated successfully."}, status=200)
+        except ValidationError as e:
+            # Bot.save() refuses renaming a bot that has conversations.
+            return JsonResponse({"error": " ".join(e.messages)}, status=409)
         except json.JSONDecodeError:
             return JsonResponse({"error": "Invalid JSON payload."}, status=400)
         except Exception as e:
@@ -247,11 +251,18 @@ class BotDetailAPIView(View):
             return JsonResponse({"error": "An unexpected error occurred."}, status=500)
 
     def delete(self, request, pk, *args, **kwargs):
+        # Superusers only, whatever permissions a staff user was granted.
         forbidden = require_perm(request, "chatbot.delete_bot")
         if forbidden:
             return forbidden
+        if not request.user.is_superuser:
+            return JsonResponse({"error": "Forbidden."}, status=403)
         try:
             bot = Bot.objects.get(pk=pk)
+            # Checked before the avatar clean-up below, which cannot be undone.
+            n = bot.conversation_count()
+            if n:
+                return JsonResponse({"error": Bot.in_use_message(n)}, status=409)
             try:
                 avatars = Avatar.objects.filter(bot=bot)
                 for avatar in avatars:

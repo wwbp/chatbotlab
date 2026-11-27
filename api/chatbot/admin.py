@@ -1293,6 +1293,16 @@ class BotAdmin(FormulaSafeExportMixin, HistoryAdmin):
         ),
     )
 
+    def get_fieldsets(self, request, obj=None):
+        """On a bot with conversations, say why it can't be deleted or renamed."""
+        fieldsets = super().get_fieldsets(request, obj)
+        n = obj.conversation_count() if obj else 0
+        if not n:
+            return fieldsets
+        (title, options), *rest = fieldsets
+        note = format_html("<strong>{}</strong>", Bot.in_use_message(n))
+        return ((title, {**options, "description": note}), *rest)
+
     def save_model(self, request, obj, form, change):
         """Handle avatar image upload and processing"""
         # Save the bot first
@@ -1585,6 +1595,29 @@ class BotAdmin(FormulaSafeExportMixin, HistoryAdmin):
                     f"Error removing avatar: {e!s}",
                     level="ERROR",
                 )
+
+    def has_delete_permission(self, request, obj=None):
+        # Bots define study conditions: superusers only, and never a bot with
+        # conversations (they name their bot, so they would be orphaned).
+        if not request.user.is_superuser:
+            return False
+        return obj is None or not obj.conversation_count()
+
+    def get_deleted_objects(self, objs, request):
+        """Bulk delete: refuse the whole action if any bot has conversations,
+        naming those bots, rather than Django's generic "no permission"."""
+        deleted, counts, perms_needed, protected = super().get_deleted_objects(
+            objs, request
+        )
+        in_use = [
+            f"{bot.name}: {Bot.in_use_message(n)}"
+            for bot in objs
+            if (n := bot.conversation_count())
+        ]
+        if in_use:
+            perms_needed.discard(self.opts.verbose_name)
+            protected = [*protected, *in_use]
+        return deleted, counts, perms_needed, protected
 
     def delete_model(self, request, obj):
         """Clean up avatar files when bot is deleted"""
