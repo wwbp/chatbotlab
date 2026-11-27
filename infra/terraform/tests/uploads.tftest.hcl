@@ -86,3 +86,54 @@ run "data_bucket_is_private_and_encrypted" {
     error_message = "The data bucket must encrypt at rest with SSE-S3 (as live production does)."
   }
 }
+
+# The browser only PUTs a participant photo to a presigned URL
+# (web/src/components/Avatar.js). Avatars are shown with <img src>, which needs
+# no CORS. Nothing in the browser deletes, posts or reads with fetch().
+run "production_cors_is_the_site_only_with_put" {
+  command = plan
+
+  variables {
+    environment = "production"
+    domain_name = "bot.wwbp.org"
+  }
+
+  assert {
+    condition = alltrue([
+      for r in aws_s3_bucket_cors_configuration.application_data.cors_rule :
+      toset(r.allowed_origins) == toset(["https://bot.wwbp.org"])
+      && toset(r.allowed_methods) == toset(["PUT"])
+    ])
+    error_message = "Production CORS must allow only PUT from https://bot.wwbp.org."
+  }
+}
+
+run "cors_never_allows_delete_or_a_wildcard_origin" {
+  command = plan
+
+  variables {
+    environment = "production"
+  }
+
+  assert {
+    condition = alltrue(flatten([
+      for r in aws_s3_bucket_cors_configuration.application_data.cors_rule : [
+        !contains(r.allowed_methods, "DELETE"),
+        alltrue([for o in r.allowed_origins : !strcontains(o, "*")]),
+      ]
+    ]))
+    error_message = "Data bucket CORS must never allow DELETE or a wildcard origin."
+  }
+}
+
+run "without_a_domain_cors_names_the_cloudfront_site" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for r in aws_s3_bucket_cors_configuration.application_data.cors_rule :
+      toset(r.allowed_origins) == toset(["https://d111111abcdef8.cloudfront.net"])
+    ])
+    error_message = "Without a custom domain, CORS must name exactly the CloudFront site."
+  }
+}
