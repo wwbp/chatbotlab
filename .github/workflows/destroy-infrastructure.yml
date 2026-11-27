@@ -428,7 +428,7 @@ jobs:
             echo ""
             echo "### What was deleted"
             echo "- Elastic Beanstalk application and environment (app servers)"
-            echo "- RDS MariaDB database"
+            echo "- RDS MySQL database"
             echo "- ElastiCache Redis cache"
             echo "- CloudFront distribution"
             echo "- S3 frontend and data buckets"

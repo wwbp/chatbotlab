@@ -126,6 +126,25 @@ def test_every_step_succeeds_and_the_copy_verifies(copy):
     ]
 
 
+def test_columns_keep_a_collation_other_than_their_tables(copy):
+    # Live production's shape: 7 utf8mb4_unicode_ci columns on tables whose
+    # default is utf8mb4_0900_ai_ci. Each must keep its own collation.
+    def collations(server, db):
+        return admin(
+            server,
+            "SELECT t.TABLE_COLLATION, c.COLLATION_NAME FROM information_schema.TABLES t"
+            " JOIN information_schema.COLUMNS c USING (TABLE_SCHEMA, TABLE_NAME)"
+            f" WHERE t.TABLE_SCHEMA = '{db}' AND t.TABLE_NAME = 'mig_mixed_collation'"
+            " AND c.COLUMN_NAME = 'name'",
+            db,
+        )
+
+    source = collations(SRC, SRC_DB)
+    assert source
+    assert source[0][1] == "utf8mb4_unicode_ci"
+    assert collations(DST, DST_DB) == source
+
+
 def test_dump_file_checksum_is_recorded_and_true(copy):
     run_dir, _ = copy
     digest = hashlib.sha256((run_dir / "dump.sql").read_bytes()).hexdigest()

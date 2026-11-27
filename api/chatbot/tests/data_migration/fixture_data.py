@@ -80,6 +80,14 @@ CREATE TABLE mig_composite (
 );
 INSERT INTO mig_composite VALUES (1, 'a', 'x'), (1, 'A', 'y'), (2, 'a', NULL);
 CREATE TABLE mig_empty (id INT PRIMARY KEY, note VARCHAR(10) NULL);
+-- Live production's shape: a utf8mb4_unicode_ci column on a table that takes
+-- the database default (utf8mb4_0900_ai_ci on MySQL).
+CREATE TABLE mig_mixed_collation (
+    id INT PRIMARY KEY,
+    name VARCHAR(40) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+    note VARCHAR(40) NULL
+);
+INSERT INTO mig_mixed_collation VALUES (1, 'Ünïcode 😀', 'x'), (2, 'ss', 'ß');
 CREATE TRIGGER mig_child_bi BEFORE INSERT ON mig_child
     FOR EACH ROW SET NEW.parent_id = NEW.parent_id;
 CREATE PROCEDURE mig_proc() SELECT COUNT(*) FROM mig_types;

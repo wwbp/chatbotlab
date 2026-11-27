@@ -30,7 +30,7 @@ openai_api_key = "sk-proj-..."
 # Anthropic API key — used for Claude-based chat models
 anthropic_api_key = "sk-ant-..."
 
-# Password for the MariaDB database user I create on RDS.
+# Password for the MySQL database user I create on RDS.
 # Rules: at least 8 characters, letters and numbers only (no special chars —
 # some chars break the MySQL connection string).
 db_password = "REPLACE_with_strong_password_min8chars"
@@ -68,7 +68,7 @@ github_repo = "chatbotlab"
 # EC2 instance type for the Elastic Beanstalk application servers
 eb_instance_type = "t3.small"
 
-# RDS instance class for the MariaDB database
+# RDS instance class for the MySQL database
 db_instance_class = "db.t3.micro"
 
 # Maximum number of app servers the auto-scaling group may launch

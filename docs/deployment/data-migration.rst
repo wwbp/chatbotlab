@@ -23,12 +23,14 @@ Facts to establish first
 
 Do these days before the window. Each one can stop the plan.
 
-1. **The engines must match.** Terraform creates MariaDB 10.11 (``infra/terraform/rds.tf``). The engine of the existing database is not recorded in this repository. Check both environments::
+1. **The engines must match.** The live database is RDS MySQL 8.0 (database ``ebdb``, master user ``ebroot``); Terraform creates MySQL 8.4 (``infra/terraform/rds.tf``, database ``chatbot_db``, user ``chatbot_user``). Confirm nothing has changed::
 
       aws rds describe-db-instances \
         --query 'DBInstances[].[DBInstanceIdentifier,Engine,EngineVersion,AllocatedStorage]' --output table
 
-   The tool refuses to copy between MySQL and MariaDB (they store JSON differently and share no collations, so the copy could not be proven unchanged). If the old database is MySQL, change the Terraform engine to the same MySQL major version before going further. A MariaDB target older than the source is refused unless ``--allow-version-downgrade`` is passed to ``preflight``.
+   The tool refuses to copy between MySQL and MariaDB (they store JSON differently and share no collations, so the copy could not be proven unchanged). MySQL 8.0 into 8.4 is tested in CI (``Data migration test (mysql:8.0 to mysql:8.4)``), including the cold-start verify after a server restart. A target older than the source is refused unless ``--allow-version-downgrade`` is passed to ``preflight``.
+
+   The database names differ and need not match: set ``MIG_SOURCE_DATABASE=ebdb`` and ``MIG_TARGET_DATABASE=chatbot_db``. The new stack's parameter group sets ``utf8mb4`` / ``utf8mb4_0900_ai_ci``, MySQL's default and what a database on live's default parameter group has. ``preflight``'s ``database_defaults`` line shows both sides; if the source differs, ``restore`` changes the target's default to match before loading.
 
 2. **Where the tool runs.** It needs to reach both databases on port 3306 at the same time, from a machine with Python 3.11+ and the MariaDB client (``mariadb``, ``mariadb-dump``); the backend Docker image has both. Both databases are in private subnets, so this is usually two port-forwards (SSM or SSH) through an instance of each environment. This path is **not** proven by the tests; prove it in the test-stack rehearsal with ``preflight --dry-run``.
 
@@ -123,6 +125,26 @@ Steps 1 to 3 are preparation and can be done ahead of time. The window (app offl
    It prints both servers' versions and character sets, the size, and every table with its row count. The target is not empty yet (the new app created its tables on first boot); that is expected here.
 
    *Gate:* do not continue unless every check is ``ok`` or ``warn`` apart from the expected non-empty target. Note the size and use `Timings`_ to confirm the window is long enough.
+
+   Then check by hand for one thing ``preflight`` does not: foreign keys that reference a non-unique or partial key. MySQL 8.0 allows them; RDS MySQL 8.4 sets ``restrict_fk_on_non_standard_key=ON`` and refuses them, so the restore would fail on that table. On the **source**, connected to ``ebdb``::
+
+      SELECT f.TABLE_NAME, f.CONSTRAINT_NAME, f.REFERENCED_TABLE_NAME, f.cols
+      FROM (SELECT TABLE_NAME, CONSTRAINT_NAME, REFERENCED_TABLE_NAME,
+                   GROUP_CONCAT(REFERENCED_COLUMN_NAME ORDER BY REFERENCED_COLUMN_NAME) AS cols
+            FROM information_schema.KEY_COLUMN_USAGE
+            WHERE TABLE_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME IS NOT NULL
+            GROUP BY TABLE_NAME, CONSTRAINT_NAME, REFERENCED_TABLE_NAME) AS f
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM (SELECT TABLE_NAME, INDEX_NAME,
+                     GROUP_CONCAT(COLUMN_NAME ORDER BY COLUMN_NAME) AS cols,
+                     MAX(SUB_PART IS NOT NULL) AS partial
+              FROM information_schema.STATISTICS
+              WHERE TABLE_SCHEMA = DATABASE() AND NON_UNIQUE = 0
+              GROUP BY TABLE_NAME, INDEX_NAME) AS u
+        WHERE u.TABLE_NAME = f.REFERENCED_TABLE_NAME AND u.cols = f.cols AND NOT u.partial);
+
+   *Gate:* do not continue unless it returns no rows. Django's foreign keys reference primary keys, so any row is a hand-made constraint: fix it on the source (or in a migration) first.
 
 4. **Take the old app offline. The window starts.** Announce it first. Simplest safe option that keeps an instance available for the port-forward: remove the inbound rule on the old load balancer's security group (note the rule so you can put it back). Alternative: scale the old environment to 0 instances, if the tool reaches the database some other way.
 

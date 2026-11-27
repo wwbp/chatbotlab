@@ -59,7 +59,7 @@ run "names_fit_the_apply_role_scope" {
       for name in [
         aws_db_instance.main.identifier,
         aws_db_subnet_group.database.name,
-        aws_db_parameter_group.mariadb.name,
+        aws_db_parameter_group.main.name,
         aws_elasticache_serverless_cache.redis.name,
         aws_s3_bucket.frontend_assets.bucket,
         aws_s3_bucket.application_data.bucket,

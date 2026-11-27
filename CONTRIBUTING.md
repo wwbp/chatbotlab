@@ -39,7 +39,7 @@ make test-web      # frontend
 docker exec chatbotlab-backend-1 pytest chatbot/tests/test_chatbot_view.py -k moderation -v
 ```
 
-Backend tests run against a real MariaDB. Async tests need explicit
+Backend tests run against a real MySQL 8.4. Async tests need explicit
 `@pytest.mark.asyncio` — `api/pytest.ini` sets no `asyncio_mode`. Tests that
 make live API calls are marked `integration` and are deselected by default;
 everything else must pass with no network access and no API keys.

@@ -96,16 +96,16 @@ resource "aws_security_group" "app_instances" {
 
 # -----------------------------------------------------------------------------
 # Database security group
-# Only the application instances can connect to RDS on the MariaDB port.
+# Only the application instances can connect to RDS on the MySQL port.
 # -----------------------------------------------------------------------------
 
 resource "aws_security_group" "database" {
   name        = "${local.name_prefix}-database"
-  description = "I allow MariaDB connections only from the application instances. Nothing else - not the load balancer, not the internet - can reach the database."
+  description = "I allow MySQL connections only from the application instances. Nothing else - not the load balancer, not the internet - can reach the database."
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    description     = "MariaDB port from application instances only"
+    description     = "MySQL port from application instances only"
     from_port       = 3306
     to_port         = 3306
     protocol        = "tcp"

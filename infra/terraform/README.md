@@ -51,7 +51,7 @@ nothing to configure in the AWS console after apply completes.
 | Public subnets | 10.0.1/24, 10.0.2/24 | Load balancer and application instances |
 | Private subnets | 10.0.10/24, 10.0.11/24 | RDS and ElastiCache — no internet route |
 | Security groups | 4 (CloudFront → ALB → EB → RDS/Cache) | Least-privilege firewall chain; the ALB accepts CloudFront only |
-| RDS MariaDB 10.11 | db.t3.micro | Primary database, encrypted, automated backups |
+| RDS MySQL 8.4 | db.t3.micro | Primary database, encrypted, automated backups |
 | ElastiCache Serverless Redis | TLS-only | Django session cache |
 | S3 frontend bucket | Private + CloudFront OAC | Compiled React app |
 | S3 data bucket | Private + CORS | Avatars, uploads, voice audio |
@@ -595,7 +595,7 @@ Not yet done. Suggested baseline before any load test:
 | `vpc.tf` | VPC, subnets, internet gateway, route tables, subnet groups |
 | `security_groups.tf` | Firewall rules — ALB → instances → database/cache chain |
 | `iam.tf` | EB instance profile, EB service role, GitHub OIDC role |
-| `rds.tf` | MariaDB 10.11 database |
+| `rds.tf` | MySQL 8.4 database |
 | `elasticache.tf` | Redis Serverless cache |
 | `s3.tf` | Frontend assets bucket and application data bucket |
 | `cloudfront.tf` | CloudFront distribution with OAC and SPA routing |

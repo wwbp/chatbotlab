@@ -23,7 +23,7 @@ Architecture overview
                                │
                       ┌────────┴────────┐
                       ▼                 ▼
-                 RDS MariaDB      ElastiCache
+                 RDS MySQL        ElastiCache
                  (private subnet) Serverless Redis
                                   (private subnet)
 
@@ -62,7 +62,7 @@ resources is ``{PROJECT_PREFIX}-production``, where ``{PROJECT_PREFIX}`` is the 
      - ALB, auto-scaling, EC2 in public subnets
    * - RDS
      - ``aws_db_instance``
-     - MariaDB 10.11, ``db.t3.micro`` default, 20–100 GB gp3, private subnets only
+     - MySQL 8.4, ``db.t3.micro`` default, 20–100 GB gp3, private subnets only
    * - ElastiCache
      - ``aws_elasticache_serverless_cache``
      - Serverless Redis with TLS (``rediss://``), private subnets only
