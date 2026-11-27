@@ -29,7 +29,7 @@ variable "project_name" {
 }
 
 variable "environment" {
-  description = "Which deployment environment I am provisioning: production (study data, in the production AWS account) or test (the on-demand stack in the lab's separate TEST account, applied and destroyed when needed)."
+  description = "Which deployment environment I am provisioning: production (study data, in the production AWS account) or test (the on-demand stack, applied and destroyed when needed; it shares the production account, with every resource named <project>-test)."
   type        = string
   validation {
     condition     = contains(["test", "production"], var.environment)
@@ -115,9 +115,15 @@ variable "django_secret_key" {
 }
 
 variable "admin_panel_password" {
-  description = "The password for the Django admin panel at /api/admin/. I pass it to the app as DJANGO_SUPERUSER_PASSWORD, which makes api/entrypoint.sh create the 'admin' superuser on first deploy."
+  description = "Test stack only: the password of the 'admin' superuser that api/entrypoint.sh creates in the empty database (DJANGO_SUPERUSER_PASSWORD). Production ignores it: its database has the real admins, and it creates no account at boot."
   type        = string
   sensitive   = true
+  default     = ""
+
+  validation {
+    condition     = var.environment != "test" || var.admin_panel_password != ""
+    error_message = "The test stack needs admin_panel_password: its database starts empty, and the admin account is the only way into /api/admin/."
+  }
 }
 
 # -----------------------------------------------------------------------

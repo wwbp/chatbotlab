@@ -264,8 +264,11 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
 
   # ----- Server --------------------------------------------------------------
   # Read by the Dockerfile CMD. Uvicorn workers are async, so two per vCPU of
-  # a t3.small (2 vCPU, 2 GB) is enough and fits in memory; at 3 instances
-  # that is 12 processes, far below a small RDS instance's connection limit.
+  # a t3.small (2 vCPU, 2 GB) is enough and fits in memory. With ASGI and
+  # CONN_MAX_AGE=0 each in-flight request holds its own database connection,
+  # so connections follow concurrent requests across all instances (1 to 3
+  # in production), not the worker count; watch RDS DatabaseConnections
+  # against max_connections when scaling out.
   setting {
     namespace = "aws:elasticbeanstalk:application:environment"
     name      = "GUNICORN_WORKERS"
@@ -344,22 +347,23 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
   }
 
   # ----- Admin panel ---------------------------------------------------------
-  # DJANGO_SUPERUSER_* env vars trigger superuser creation on first deploy.
-  # api/entrypoint.sh calls `manage.py createsuperuser --noinput` when these
-  # are present. Idempotent — subsequent deploys leave the existing user alone.
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "DJANGO_SUPERUSER_USERNAME"
-    value     = "admin"
-  }
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "DJANGO_SUPERUSER_EMAIL"
-    value     = "admin@example.com"
-  }
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "DJANGO_SUPERUSER_PASSWORD"
-    value     = var.admin_panel_password
+  # api/entrypoint.sh runs `manage.py createsuperuser --noinput` on every
+  # container start while DJANGO_SUPERUSER_PASSWORD is set (an existing user
+  # makes it fail harmlessly). Only the test stack, whose database starts
+  # empty, gets these. Production's database is copied from the live one with
+  # its real admins: creating accounts at boot there would add an 'admin'
+  # superuser whose password sits in Terraform state. If production ever needs
+  # one, run `manage.py createsuperuser` once by hand.
+  dynamic "setting" {
+    for_each = var.environment == "test" ? {
+      DJANGO_SUPERUSER_USERNAME = "admin"
+      DJANGO_SUPERUSER_EMAIL    = "admin@example.com"
+      DJANGO_SUPERUSER_PASSWORD = var.admin_panel_password
+    } : {}
+    content {
+      namespace = "aws:elasticbeanstalk:application:environment"
+      name      = setting.key
+      value     = setting.value
+    }
   }
 }

@@ -22,9 +22,9 @@ DATABASE_USER
 DEBUG
 DEFAULT_FROM_EMAIL
 DJANGO_SETTINGS_MODULE         unset: manage.py, asgi.py and wsgi.py set it
-DJANGO_SUPERUSER_EMAIL
-DJANGO_SUPERUSER_PASSWORD
-DJANGO_SUPERUSER_USERNAME
+DJANGO_SUPERUSER_EMAIL         unset: production never creates accounts at boot; the copied DB has the real admins; use a one-off manage.py createsuperuser if ever needed (the test stack sets all three)
+DJANGO_SUPERUSER_PASSWORD      unset: as DJANGO_SUPERUSER_EMAIL
+DJANGO_SUPERUSER_USERNAME      unset: as DJANGO_SUPERUSER_EMAIL
 EMAIL_BACKEND
 FRONTEND_URL                   unset: CORS_ALLOWED_ORIGINS and CSRF_TRUSTED_ORIGINS already name the front end
 GUNICORN_WORKERS

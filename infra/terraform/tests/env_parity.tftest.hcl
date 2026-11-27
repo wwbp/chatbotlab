@@ -141,8 +141,7 @@ run "production_values" {
     error_message = "CONN_MAX_AGE must be 0."
   }
 
-  # t3.small: 2 vCPU, 2 GB. Async workers, so 2 per vCPU; 3 instances x 4
-  # workers stays well inside a small RDS instance's connection limit.
+  # t3.small: 2 vCPU, 2 GB. Async workers, so 2 per vCPU.
   assert {
     condition     = nonsensitive({ for s in aws_elastic_beanstalk_environment.chatbot_api.setting : s.name => s.value if s.namespace == "aws:elasticbeanstalk:application:environment" })["GUNICORN_WORKERS"] == "4"
     error_message = "GUNICORN_WORKERS must be 4 for small instances."
