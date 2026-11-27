@@ -15,7 +15,7 @@ import uuid
 from unittest.mock import patch
 
 import pytest
-from django.contrib.auth.models import Group, User
+from django.contrib.auth.models import Group, Permission, User
 from django.test import Client
 
 from chatbot.models import Bot
@@ -109,3 +109,51 @@ def test_superuser_bulk_delete_refuses_all_if_any_bot_has_a_conversation(
     assert Bot.objects.filter(pk=used.pk).exists()
     assert Bot.objects.filter(pk=unused.pk).exists()
     assert f"{used.name}: This bot has 1 conversation" in r.content.decode()
+
+
+# ── API: DELETE /api/bots/<pk>/ ──────────────────────────────────────────────
+
+
+def _api_delete(client, bot):
+    with patch("chatbot.services.bots.delete"):
+        return client.delete(f"/api/bots/{bot.pk}/")
+
+
+@pytest.mark.django_db
+def test_api_delete_forbidden_for_staff_with_delete_permission(make_bot):
+    """Only superusers: even a staff user granted delete_bot gets 403."""
+    bot = make_bot()
+    user = User.objects.create_user(
+        username=f"u_{uuid.uuid4().hex[:8]}", password="pass", is_staff=True
+    )
+    user.user_permissions.add(
+        *Permission.objects.filter(codename__in=["delete_bot", "view_bot"])
+    )
+    c = Client()
+    c.force_login(user)
+    assert _api_delete(c, bot).status_code == 403
+    assert Bot.objects.filter(pk=bot.pk).exists()
+
+
+@pytest.mark.django_db
+def test_api_delete_forbidden_for_config_editor(make_bot):
+    bot = make_bot()
+    assert _api_delete(_client("Config editor"), bot).status_code == 403
+    assert Bot.objects.filter(pk=bot.pk).exists()
+
+
+@pytest.mark.django_db
+def test_api_delete_of_a_bot_with_a_conversation_is_409(make_bot, make_conversation):
+    bot = make_bot()
+    make_conversation(bot=bot)
+    r = _api_delete(_client(superuser=True), bot)
+    assert r.status_code == 409
+    assert r.json()["error"] == Bot.in_use_message(1)
+    assert Bot.objects.filter(pk=bot.pk).exists()
+
+
+@pytest.mark.django_db
+def test_api_delete_of_an_unused_bot_is_204(make_bot):
+    bot = make_bot()
+    assert _api_delete(_client(superuser=True), bot).status_code == 204
+    assert not Bot.objects.filter(pk=bot.pk).exists()
