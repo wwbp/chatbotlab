@@ -176,3 +176,15 @@ run "default_tags_name_production" {
     error_message = "local.common_tags (the providers' default_tags) must carry Environment = var.environment and Project = var.project_name."
   }
 }
+
+# A rehearsal copies real participant data into the test stack's database,
+# in the account it shares with production: it must be as private and as
+# encrypted as production's.
+run "test_database_is_private_and_encrypted" {
+  command = plan
+
+  assert {
+    condition     = aws_db_instance.main.storage_encrypted && !aws_db_instance.main.publicly_accessible
+    error_message = "The test database must be encrypted and not publicly accessible, like production's."
+  }
+}

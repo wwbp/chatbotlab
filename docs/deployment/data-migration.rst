@@ -1,11 +1,11 @@
 Data Migration Runbook
 ======================
 
-How to move the live database from the hand-built Elastic Beanstalk environment (with its EB-managed RDS instance) to the Terraform-managed stack without losing or altering study data. **Rehearse it first, end to end, on the test stack**: Deploy Infrastructure with environment ``test`` builds it on demand in the lab's separate TEST AWS account, the source is a restored copy of the production database snapshot, and Destroy Infrastructure removes it afterwards. Only then run it for production.
+How to move the live database from the hand-built Elastic Beanstalk environment (with its EB-managed RDS instance) to the Terraform-managed stack without losing or altering study data. **Rehearse it first, end to end, on the test stack**: Deploy Infrastructure with environment ``test`` builds it on demand in the same AWS account as production, the source is a restored copy of the production database snapshot in that account (see `Rehearsal source`_), and Destroy Infrastructure removes it afterwards. Only then run it for production.
 
 .. warning::
 
-   During a rehearsal the TEST account holds a copy of real participant data. Restrict who can sign in to it, use the test stack's own API keys (never production's), and destroy the stack and delete the copied snapshot when the rehearsal is done.
+   During a rehearsal the test stack, and the restored copy it is fed from, hold real participant data, in the account that also holds production. Keep both private and encrypted like production, use the test stack's own API keys (never production's), and destroy the stack and delete the restored copy and the copied snapshot when the rehearsal is done.
 
 The copy is done and proven by ``scripts/migration/dbcopy.py``. What it guarantees, each backed by a test against real database servers (``api/chatbot/tests/data_migration/``):
 
@@ -92,6 +92,36 @@ Without these, information_schema silently hides objects and the tool would see 
 
 - **Source** (read-only use): ``SELECT, SHOW VIEW, TRIGGER, EVENT, EXECUTE`` on the database, and ``PROCESS`` on ``*.*`` for ``preflight --require-quiesced``. Routine bodies must be readable: the account is their definer, or holds ``SHOW_ROUTINE`` (MySQL) / ``SHOW CREATE ROUTINE`` or ``SELECT`` on ``mysql.proc`` (MariaDB). ``preflight`` checks all of this (``source_privileges``).
 - **Target**: ``ALL PRIVILEGES`` on the database (restore creates tables, triggers, routines and events), and ``PROCESS`` on ``*.*`` for ``reset-target``, which refuses while other sessions are connected and cannot see them without it.
+
+
+Rehearsal source
+~~~~~~~~~~~~~~~~
+
+The rehearsal copies from a restored copy of the live database, never from the live database itself. Everything stays in the same AWS account: no cross-account copy or share. An administrator does these steps by hand (the test role is denied the live ``awseb-e-*`` database and its snapshots). The copy holds real participant data, so it is restored **private and encrypted, like production**, into the test stack's private subnets.
+
+.. code-block:: bash
+
+   SNAP=rehearsal-source-$(date -u +%Y%m%d-%H%M)
+   aws rds create-db-snapshot --db-instance-identifier <old-db-id> --db-snapshot-identifier $SNAP
+   aws rds wait db-snapshot-available --db-snapshot-identifier $SNAP
+   # A restore keeps the snapshot's encryption and cannot add it. The old
+   # database may be unencrypted, so restore from an encrypted copy (for an
+   # already encrypted snapshot the copy is harmless).
+   aws rds describe-db-snapshots --db-snapshot-identifier $SNAP --query 'DBSnapshots[0].Encrypted'
+   aws rds copy-db-snapshot --source-db-snapshot-identifier $SNAP \
+     --target-db-snapshot-identifier $SNAP-encrypted --kms-key-id alias/aws/rds
+   aws rds wait db-snapshot-available --db-snapshot-identifier $SNAP-encrypted
+   aws rds restore-db-instance-from-db-snapshot --db-instance-identifier <PREFIX>-test-rehearsal-source \
+     --db-snapshot-identifier $SNAP-encrypted --db-instance-class db.t3.micro --no-publicly-accessible \
+     --db-subnet-group-name <PREFIX>-test-database-subnet-group --vpc-security-group-ids <test database security group id> \
+     --tags Key=Environment,Value=test Key=Project,Value=<PREFIX>
+   aws rds wait db-instance-available --db-instance-identifier <PREFIX>-test-rehearsal-source
+   aws rds describe-db-instances --db-instance-identifier <PREFIX>-test-rehearsal-source \
+     --query 'DBInstances[0].[StorageEncrypted,PubliclyAccessible]'
+
+*Gate:* the last command prints ``true`` then ``false``. Point ``MIG_SOURCE_*`` at this instance for the rehearsal. The ``<PREFIX>-test-`` name and the ``Environment=test`` tag keep it inside the test role's scope and out of the production role's.
+
+It is not in the test stack's Terraform state, so Destroy Infrastructure does not remove it. Step 13 deletes it by hand.
 
 
 Procedure
@@ -220,7 +250,13 @@ Steps 1 to 3 are preparation and can be done ahead of time. The window (app offl
 
     *Gate:* smoke test passes on the public name; one test conversation works end to end and appears in the admin.
 
-13. **Rehearsal before production.** Production is not touched until the test-stack rehearsal completed with every gate met and the timings recorded. Then destroy the test stack (Destroy Infrastructure, environment ``test``) and delete the copied snapshot from the TEST account.
+13. **Rehearsal before production.** Production is not touched until the test-stack rehearsal completed with every gate met and the timings recorded. Then destroy the test stack (Destroy Infrastructure, environment ``test``), and delete the rehearsal source and its snapshots by hand::
+
+       aws rds delete-db-instance --db-instance-identifier <PREFIX>-test-rehearsal-source --skip-final-snapshot --delete-automated-backups
+       aws rds delete-db-snapshot --db-snapshot-identifier $SNAP-encrypted
+       aws rds delete-db-snapshot --db-snapshot-identifier $SNAP
+
+    Keep production's own step 5 snapshot; delete only the rehearsal's.
 
 14. **Keep the old environment** blocked (or at 0 instances) for 30 days, or one full study cycle if longer. Keep the step 5 snapshot until the study data's retention period ends. Before terminating the old environment, confirm that snapshot still exists and delete ``dump.sql`` from wherever the tool ran.
 

@@ -37,9 +37,10 @@ nothing to configure in the AWS console after apply completes.
 > you also pay for. Migrating the live deployment under Terraform is a separate
 > exercise requiring deliberate `terraform import` of each resource.
 >
-> To validate the IaC, build the on-demand **test stack** in the lab's
-> separate TEST account and destroy it afterwards (see "Running Terraform
-> from GitHub Actions").
+> To validate the IaC, build the on-demand **test stack** and destroy it
+> afterwards (see "Running Terraform from GitHub Actions"). It lives in the
+> same AWS account as production and the live deployment, isolated by name,
+> tags and explicit Denies.
 
 ---
 
@@ -198,8 +199,8 @@ curl $(terraform output -raw backend_api_url)/health/
 |---|---|---|
 | Your laptop | Local containers, the full test suite | None |
 | Pull requests | Offline checks only (`ci.yml`, job **Terraform test**): `terraform fmt -check`, `terraform validate` (`init -backend=false`), the mocked `terraform test`, `tests/check_workflows.py` | None: no OIDC, no role, no GitHub Environment, no secrets |
-| Test stack | Applied on demand in the lab's separate **TEST** AWS account for a rehearsal or a risky change, tested, then destroyed | The test account only |
-| Production | Plan, then apply, by hand from `main`, behind the `production` GitHub Environment | The production account only |
+| Test stack | Applied on demand for a rehearsal or a risky change, tested, then destroyed | The shared account, through `<PREFIX>-terraform-apply-test` only |
+| Production | Plan, then apply, by hand from `main`, behind the `production` GitHub Environment | The shared account, through `<PREFIX>-terraform-apply-production` only |
 
 `.github/workflows/deploy-infrastructure.yml` has one job, started by hand
 (**Actions → Deploy Infrastructure → Run workflow**). Pick `environment`
@@ -213,7 +214,12 @@ leaves everything in place; the workflow never destroys.
 
 - **test**: type `test` and approve the run. Nothing is backed up: the test
   stack's data bucket and database are deleted for good. It holds no study
-  data.
+  data. The account is shared with production, the live deployment and other
+  lab projects: the run signs in as the test role, which is denied all of
+  them, and empties only `<PREFIX>-test-*` buckets. Check the plan's
+  resource names in the log anyway. A rehearsal's restored database copy is
+  not in the test state; delete it by hand (see the data migration
+  runbook).
 - **production**: type `production`, `destroy production` and
   `destroy data`, tick `allow_production`, run from `main`, approve. The data
   bucket is copied to the state bucket and verified first, and the database
@@ -229,47 +235,65 @@ leaves everything in place; the workflow never destroys.
 - **Secrets** are GitHub secrets. Their names are listed at the top of the
   workflow file.
 
-### The two accounts
+### One account, two roles
 
-Each run picks the AWS account from the environment: `TF_PROD_ACCOUNT_ID`
-for production, `TF_TEST_ACCOUNT_ID` for test (the two must differ). It
-assumes `<PREFIX>-terraform-apply-<environment>` in that account and refuses
-credentials from any other account. Each account has its own state bucket,
-`<PREFIX>-tfstate-<account id>`, with the state at
-`<PREFIX>/<environment>/terraform.tfstate`.
+Both stacks live in **one AWS account** (`TF_AWS_ACCOUNT_ID`), the one that
+also holds the hand-built live deployment (EB application `humanlikebot`,
+its `awseb-e-*` RDS instances, the `bot.wwbp.org` / `dev.bot.wwbp.org` /
+`bot-avatar.wwbp.org` / `dev.bot-avatar.wwbp.org` buckets and their two
+CloudFront distributions) and other lab projects (e.g. MeetLab). Each run
+assumes the role of its environment, `<PREFIX>-terraform-apply-production`
+or `<PREFIX>-terraform-apply-test`, and refuses credentials from any other
+account. One state bucket, `<PREFIX>-tfstate-<account id>`, holds one state
+file per environment, `<PREFIX>/<environment>/terraform.tfstate`.
 
-The production account also holds the hand-built live deployment (EB
-application `humanlikebot`, its `awseb-e-*` RDS instances, the
-`bot.wwbp.org` / `dev.bot.wwbp.org` / `bot-avatar.wwbp.org` /
-`dev.bot-avatar.wwbp.org` buckets and their two CloudFront distributions).
-The production role is isolated from it by policy:
+The two roles have the same shape (the test policies are production's with
+`test` in place of `production`, so a rehearsal also tests them), and are
+isolated by policy:
 
-- explicitly denied the live resources, by name and by the tag
-  `elasticbeanstalk:environment-name` = `humanlikebot-env` /
+- **positive scoping**: every Allow names `<PREFIX>-<env>-*` (RDS,
+  ElastiCache, Elastic Beanstalk, logs, S3, IAM roles) or requires the tags
+  `Environment=<env>` and `Project=<PREFIX>` (EC2, load balancing, Auto
+  Scaling, CloudFormation, CloudFront, ACM). That is what keeps other
+  projects' resources out; there is no Deny per project;
+- the **other environment**, explicitly denied: the test role everything
+  named `<PREFIX>-production-*` or tagged `Environment=production`, and
+  production's state key; the production role everything named
+  `<PREFIX>-test-*` or tagged `Environment=test`, and the test state key.
+  Both are also denied the retired `<PREFIX>-staging-*` names and
+  `Environment=staging`;
+- the **live deployment**, explicitly denied to both, by name and by the
+  tag `elasticbeanstalk:environment-name` = `humanlikebot-env` /
   `humanlike-bot-development-env` (the EB-made instances, security groups,
   load balancers, Auto Scaling groups and `awseb-e-*` CloudFormation stacks);
-- denied the retired `<PREFIX>-staging-*` names and anything tagged
-  `Environment=staging`;
-- denied any change to the GitHub OIDC provider (read-only);
-- trusts only the `production` GitHub Environment on `main`, reads only
-  production's state file.
+- **shared account-level resources**: the GitHub OIDC provider is
+  read-only to both; in the account's `elasticbeanstalk-<region>-<account>`
+  storage bucket each role writes only its own `<PREFIX>-<env>/` keys;
+- **email**: the test role and every role the test stack creates (its
+  boundary, `<PREFIX>-terraform-boundary-test`) are denied `ses:Send*`, so
+  the test stack cannot send real email through the account's SES
+  identities. Leave `email_backend` unset in `environments/test.tfvars`:
+  its email goes to the application log;
+- each role trusts one GitHub Environment: production only on `main`, test
+  on `main` or a `test/*` branch (push a risky infrastructure change to
+  `test/<name>` to try it before it merges).
 
-The test role uses the same policies with `test` in place of `production`
-(so a rehearsal also tests them) and trusts only the `test` GitHub
-Environment, on `main` or a `test/*` branch (push a risky infrastructure
-change to `test/<name>` to try it before it merges). It lives in the TEST
-account, so it cannot reach production.
+Shared spend: Bedrock (`bedrock:InvokeModel*` is allowed to both stacks'
+instance roles) bills the one account, and nothing separates the test
+stack's model use from production's in the bill except the cost allocation
+tags. OpenAI and Anthropic usage is separate only if the test Environment
+has its own keys (below).
 
-The TEST account is not a throwaway: during a data-migration rehearsal it
-holds a copy of a production snapshot, with real participant data.
-**Approving a test run trusts that branch's code with the TEST account**,
-and so with that copy. Read the branch before you approve.
+The account is not a throwaway: during a data-migration rehearsal it holds
+a restored copy of a production snapshot, with real participant data, and it
+always holds the live deployment.
+**Approving a test run trusts that branch's code with the shared AWS account**,
+within the test role's limits. Read the branch before you approve.
 
 ### One-time setup (the owner)
 
 The policies are committed in `bootstrap/iam/` and checked by
-`tests/check_workflows.py`. Replace `<ACCOUNT_ID>` (the account the policy
-goes into), `<PREFIX>` (the value of `TF_PROJECT_PREFIX`) and
+`tests/check_workflows.py`. Replace `<ACCOUNT_ID>` (`TF_AWS_ACCOUNT_ID`), `<PREFIX>` (the value of `TF_PROJECT_PREFIX`) and
 `<SES_FROM_DOMAIN>` before using them, for example:
 
 ```bash
@@ -279,8 +303,8 @@ for f in bootstrap/iam/*.json; do
 done
 ```
 
-In **each** account (production with `<env>` = `production`, TEST with
-`<env>` = `test`), as an administrator:
+In the one account, as an administrator, step 1 once and steps 2 and 3
+twice (with `<env>` = `production`, then `<env>` = `test`):
 
 1. **GitHub OIDC provider** `token.actions.githubusercontent.com` (audience
    `sts.amazonaws.com`). Check with `aws iam list-open-id-connect-providers`;
@@ -310,9 +334,13 @@ In **each** account (production with `<env>` = `production`, TEST with
    `-abac.json` and `-guardrails.json`. They scope RDS, ElastiCache, Elastic
    Beanstalk, logs and S3 to `<PREFIX>-<env>` names, and EC2, load
    balancing, Auto Scaling, CloudFormation, CloudFront and ACM to the
-   `Environment=<env>` / `Project=<PREFIX>` tags. If the first test apply
-   fails with AccessDenied, widen the test policy first, then carry the fix
-   to production in a pull request.
+   `Environment=<env>` / `Project=<PREFIX>` tags, and deny the other
+   environment. If the first test apply fails with AccessDenied, fix the
+   test policy narrowly (a name or tag scope, never a broad Allow: the
+   account is shared with production) and carry the same fix to production
+   in a pull request. **Re-apply all three policies of both roles** from
+   this commit: the production guardrails now deny the test stack, and the
+   test guardrails and boundary deny `ses:Send*`.
 
 In GitHub (**Settings**):
 
@@ -330,18 +358,19 @@ In GitHub (**Settings**):
    spending limit), never production's. In `production` only: `GH_PAT`, if
    you use `write_deploy_secrets` (it can write repository secrets, so keep
    it out of the repository secrets, where any workflow run could read it).
-6. **Repository secrets**: `TF_PROJECT_PREFIX`, `TF_PROD_ACCOUNT_ID`,
-   `TF_TEST_ACCOUNT_ID`.
+6. **Repository secrets**: `TF_PROJECT_PREFIX`, `TF_AWS_ACCOUNT_ID` (the
+   one account, 12 digits).
 7. **Delete what is left of the old setup**: the Environments
-   `plan-staging` and `plan-production`, the secrets `TF_PLAN_ROLE_ARN` and
-   `TF_APPLY_ROLE_ARN` (wherever they were set), a repository-level `GH_PAT`, and, in AWS, the role
+   `plan-staging` and `plan-production`, the secrets `TF_PLAN_ROLE_ARN`,
+   `TF_APPLY_ROLE_ARN`, `TF_PROD_ACCOUNT_ID` and `TF_TEST_ACCOUNT_ID`
+   (wherever they were set), a repository-level `GH_PAT`, and, in AWS, the role
    `<PREFIX>-terraform-plan-staging` and any `<PREFIX>-terraform-apply-staging`
    role or `<PREFIX>-terraform-boundary-staging` policy. Keep the plain
    `AWS_*` repository secrets: `staging.yml` still deploys the hand-built dev
    site with them.
 
 Then run the workflow from `main` or a `test/*` branch: environment `test`, action `apply`. The
-first apply creates the test account's state bucket.
+first apply creates the account's state bucket, if production has not.
 
 ### Secrets in the state file
 
@@ -365,7 +394,7 @@ terraform init -backend=false && terraform validate && terraform test
 `tests/check_workflows.py` reads the workflows, the IAM policies and the
 settings files as text and fails if a known hazard comes back (destroy on
 failure, a hardcoded environment, a shared state key, a missing state lock,
-AWS access on a pull request, test and production crossing accounts, a
+AWS access on a pull request, a role reaching the other environment, a
 relaxed production setting). CI runs it in the same job:
 
 ```bash
@@ -374,13 +403,15 @@ python3 infra/terraform/tests/check_workflows.py   # from the repository root
 
 ## The test stack by hand
 
-To build the test stack from your machine instead, sign in to the TEST
-account and run `setup.sh` with `environment = "test"` in
-`terraform.tfvars`:
+Prefer the workflow. By hand, Terraform runs with your own credentials, not
+the test role (it trusts only GitHub), so none of its Denies apply, in the
+account that also holds production and the live deployment. If you must,
+run `setup.sh` with `environment = "test"` in `terraform.tfvars`, and read
+the plan: every resource must be named `<PREFIX>-test-*`.
 
 ```bash
-AWS_PROFILE=test-account bash setup.sh
-AWS_PROFILE=test-account terraform destroy -var-file=terraform.tfvars -var-file=environments/test.tfvars
+bash setup.sh
+terraform destroy -var-file=terraform.tfvars -var-file=environments/test.tfvars
 ```
 
 `environments/test.tfvars` turns deletion protection off and lets the

@@ -1249,7 +1249,8 @@ check("plan-staging" not in reference and "TF_APPLY_ROLE_ARN" not in reference,
 runbook = (ROOT / "docs" / "deployment" / "data-migration.rst").read_text()
 check("test stack" in runbook and "Follow it for **staging first**" not in runbook,
       "data-migration.rst: the rehearsal runs on the test stack, not on a Terraform staging stack")
-check(all(n in runbook for n in ("same AWS account", "--storage-encrypted", "--no-publicly-accessible", "--kms-key-id")),
+check(all(n in runbook for n in ("same AWS account", "copy-db-snapshot", "--kms-key-id", "--no-publicly-accessible",
+                                 "StorageEncrypted", "<PREFIX>-test-database-subnet-group", "delete-db-instance")),
       "data-migration.rst: the rehearsal restores the snapshot in the same AWS account, private and encrypted like "
       "production (re-encrypt an unencrypted snapshot with copy-db-snapshot --kms-key-id)")
 check(
