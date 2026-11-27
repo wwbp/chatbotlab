@@ -32,7 +32,28 @@ Do these days before the window. Each one can stop the plan.
 
 2. **Where the tool runs.** It needs to reach both databases on port 3306 at the same time, from a machine with Python 3.11+ and the MariaDB client (``mariadb``, ``mariadb-dump``); the backend Docker image has both. Both databases are in private subnets, so this is usually two port-forwards (SSM or SSH) through an instance of each environment. This path is **not** proven by the tests; prove it in the test-stack rehearsal with ``preflight --dry-run``.
 
-3. **Uploaded files are not in the database.** Voice audio, avatars and uploads live in the S3 bucket named by ``AWS_BUCKET_NAME``; the database stores only their paths. The new stack has its own bucket. Copy the objects (step 9) or the paths will point at nothing.
+3. **Uploaded files are not in the database.** Voice audio, avatars and uploads live in the S3 bucket named by ``AWS_BUCKET_NAME`` (production: ``bot-avatar.wwbp.org``, staging: ``dev.bot-avatar.wwbp.org``); the new stack has its own bucket (``<prefix>-data``). The database stores **keys relative to the bucket, never URLs**: ``chatbot_avatar.participant_avatar`` and ``chatbot_avatar.chatbot_avatar`` hold a key under ``avatar/`` (with or without the ``avatar/`` prefix; presigned URLs are made when a page is shown), and ``chatbot_utterance.audio_file`` holds ``utterance_audio/<name>`` (Django's S3 storage). So the cutover copies the objects **under the same keys** (step 9) and rewrites nothing. Confirm no row holds an absolute URL or the old bucket name; every count must be 0::
+
+      SELECT 'participant_avatar', COUNT(*) FROM chatbot_avatar
+        WHERE participant_avatar LIKE '%://%' OR participant_avatar LIKE '%bot-avatar%'
+      UNION ALL SELECT 'chatbot_avatar', COUNT(*) FROM chatbot_avatar
+        WHERE chatbot_avatar LIKE '%://%' OR chatbot_avatar LIKE '%bot-avatar%'
+      UNION ALL SELECT 'audio_file', COUNT(*) FROM chatbot_utterance
+        WHERE audio_file LIKE '%://%' OR audio_file LIKE '%bot-avatar%';
+
+   After step 8, ``grep -c 'bot-avatar\.wwbp\.org' <run-dir>/dump.sql`` checks every other column too (a prompt or setting that names the bucket); it must print 0, or each hit must be rewritten by hand. Save the keys the database refers to as ``db.keys``, one per line, for step 9::
+
+      SELECT audio_file FROM chatbot_utterance WHERE audio_file <> ''
+      UNION SELECT IF(k LIKE 'avatar/%', k, CONCAT('avatar/', k)) FROM (
+        SELECT participant_avatar AS k FROM chatbot_avatar
+        UNION SELECT chatbot_avatar FROM chatbot_avatar) a
+      WHERE k <> '';
+
+   ``CHATBOT_CONTROL_IMAGE`` (an environment variable, not a row) is also a key (``avatar/chatbot_control.png``) and is copied with the rest.
+
+   Production has no ``AWS_BUCKET_NAME`` set today, so uploads there may have been failing: expect few or no avatar and audio objects in ``bot-avatar.wwbp.org`` (one, ``avatar/chatbot_control.png``, in November 2026) and rows whose files never reached S3. Those rows point at nothing before and after the cutover.
+
+   **The new bucket only accepts browser uploads from the site's own origin** (CORS, ``infra/terraform/s3.tf``): ``https://<domain_name>``, or the CloudFront URL when ``domain_name`` is empty. Set ``domain_name`` to the public name (``bot.wwbp.org`` for production) before step 11, or participants' photo uploads fail after the switch.
 
 4. **The app has no maintenance or read-only mode.** Taking it offline means stopping requests from reaching it (step 4).
 
@@ -160,13 +181,24 @@ Steps 1 to 3 are preparation and can be done ahead of time. The window (app offl
 
    *Rollback:* as step 4. The new database can simply be left.
 
-9. **Copy the uploaded files.** ::
+9. **Copy the uploaded files, under the same keys.** Skip ``uploads/``: it holds participants' raw photos, which are deleted once their avatar is made and expire after 1 day in both buckets; copying them would only restart that clock. ::
 
-      aws s3 sync s3://<old-data-bucket> s3://<new-data-bucket>
-      aws s3 ls s3://<old-data-bucket> --recursive --summarize | tail -2
-      aws s3 ls s3://<new-data-bucket> --recursive --summarize | tail -2
+      OLD=<old-data-bucket>; NEW=<new-data-bucket>
+      aws s3 sync s3://$OLD s3://$NEW --exclude 'uploads/*'
+      for b in $OLD $NEW; do
+        aws s3api list-objects-v2 --bucket $b --output text \
+          --query 'Contents[?!starts_with(Key, `uploads/`)].[Key,Size,ETag]' | sort > $b.keys
+        wc -l < $b.keys; awk '{s+=$2} END {print s}' $b.keys
+      done
+      diff $OLD.keys $NEW.keys && echo SAME
 
-   *Gate:* do not continue unless object count and total size match.
+   Each line is key, size and ETag. The ETag is the MD5 of the content, except for an object uploaded or copied in parts (over 8 MB), whose ETag contains a ``-`` and can differ between the buckets with the same content: for those lines only, download the object from both buckets and compare ``shasum -a 256``.
+
+   Then list the keys the database refers to that are missing from the new bucket (expected only for files that never reached the old bucket either)::
+
+      cut -f1 $NEW.keys | sort | comm -23 <(sort -u db.keys) -
+
+   *Gate:* do not continue unless ``diff`` prints ``SAME`` (same keys, count, sizes and checksums), or every differing line is a multipart ETag whose SHA-256 matched; and every missing key is also missing from the old bucket.
 
 10. **Start the new app.** Set the new environment back to 1 or more instances. Give it the old environment's ``SECRET_KEY`` if staff should stay logged in. From this moment the new database changes (the app records logins and sessions), so ``verify`` will no longer print ``IDENTICAL``: that is why it comes first.
 
