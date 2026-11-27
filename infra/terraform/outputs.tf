@@ -22,8 +22,8 @@ output "frontend_url" {
 }
 
 output "backend_api_url" {
-  description = "The Elastic Beanstalk CNAME for the Django API. Health check: curl http://<this>/health/"
-  value       = "http://${aws_elastic_beanstalk_environment.chatbot_api.cname}"
+  description = "The load balancer, under the name CloudFront reaches it at (HTTPS only). Its security group admits only CloudFront, so check health through the site: scripts/smoke.sh <frontend_url>."
+  value       = "https://${local.origin_domain_name}"
 }
 
 # -----------------------------------------------------------------------------

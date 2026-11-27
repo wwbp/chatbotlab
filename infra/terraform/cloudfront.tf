@@ -127,16 +127,18 @@ resource "aws_cloudfront_distribution" "frontend" {
     origin_access_control_id = aws_cloudfront_origin_access_control.frontend_assets.id
   }
 
-  # The EB CNAME is the ALB endpoint. CloudFront routes /api/* and /ws/* here.
-  # HTTP-only because the EB CNAME has no TLS cert — traffic is on AWS backbone.
+  # The load balancer, under this stack's own name (dns.tf), over HTTPS: its
+  # listener presents a certificate for that name, as live production's
+  # does for bot.wwbp.org. The record's name (not the CNAME) also makes
+  # CloudFront wait for the record.
   origin {
-    domain_name = aws_elastic_beanstalk_environment.chatbot_api.cname
+    domain_name = aws_route53_record.origin.name
     origin_id   = "EB-${aws_elastic_beanstalk_environment.chatbot_api.name}"
 
     custom_origin_config {
       http_port              = 80
       https_port             = 443
-      origin_protocol_policy = "http-only"
+      origin_protocol_policy = "https-only"
       origin_ssl_protocols   = ["TLSv1.2"]
     }
   }

@@ -182,13 +182,12 @@ deploys the Django backend to Elastic Beanstalk. The first deploy takes about
 When it completes, visit the URLs from terraform output:
 ```bash
 terraform output frontend_url    # https://xxxx.cloudfront.net
-terraform output backend_api_url # http://xxxx.elasticbeanstalk.com
+terraform output backend_api_url # https://<prefix>-origin.wwbp.org (CloudFront only)
 ```
 
-Test the backend health check:
+The load balancer admits only CloudFront, so check the site through it:
 ```bash
-curl $(terraform output -raw backend_api_url)/health/
-# {"status": "ok"}
+scripts/smoke.sh $(terraform output -raw frontend_url)   # from the repository root
 ```
 
 ---

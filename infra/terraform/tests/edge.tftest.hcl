@@ -119,3 +119,67 @@ run "test_stack_may_go_without_a_web_acl" {
     error_message = "With waf_enabled = false the test stack has no web ACL."
   }
 }
+
+# --- CloudFront to the load balancer over HTTPS ---------------------------------
+
+# Live production reaches its load balancer over HTTPS. Here CloudFront
+# connects to <prefix>-origin.<dns_zone_name>, a Route 53 name for the
+# Elastic Beanstalk CNAME, and the load balancer's HTTPS listener presents an
+# ACM certificate for that name.
+run "cloudfront_reaches_the_load_balancer_over_https" {
+  command = plan
+
+  override_resource {
+    target          = aws_acm_certificate.origin
+    override_during = plan
+    values = {
+      arn = "arn:aws:acm:us-east-1:123456789012:certificate/origin"
+      domain_validation_options = [{
+        domain_name           = "chatbotlab-production-origin.wwbp.org"
+        resource_record_name  = "_0123456789abcdef0123456789abcdef.chatbotlab-production-origin.wwbp.org."
+        resource_record_type  = "CNAME"
+        resource_record_value = "_x.acm-validations.aws."
+      }]
+    }
+  }
+
+  assert {
+    condition = alltrue([
+      for o in aws_cloudfront_distribution.frontend.origin :
+      o.domain_name == "chatbotlab-production-origin.wwbp.org"
+      && o.custom_origin_config[0].origin_protocol_policy == "https-only"
+      && o.custom_origin_config[0].origin_ssl_protocols == toset(["TLSv1.2"])
+      if length(o.custom_origin_config) > 0
+    ])
+    error_message = "CloudFront must reach the load balancer https-only, TLS 1.2, at <prefix>-origin.<zone>."
+  }
+
+  assert {
+    condition     = aws_acm_certificate.origin.domain_name == "chatbotlab-production-origin.wwbp.org" && aws_acm_certificate.origin.validation_method == "DNS"
+    error_message = "The load balancer's certificate must be for the origin name, validated by DNS."
+  }
+
+  assert {
+    condition = alltrue([
+      aws_route53_record.origin.name == "chatbotlab-production-origin.wwbp.org",
+      aws_route53_record.origin.type == "CNAME",
+      aws_route53_record.origin.zone_id == "Z0000000000000000000",
+      aws_route53_record.origin_validation.zone_id == "Z0000000000000000000",
+    ])
+    error_message = "The origin name and its certificate's validation record go in the zone Terraform looked up."
+  }
+
+  # The HTTPS listener, and no plain HTTP listener at all.
+  assert {
+    condition = tomap(nonsensitive({
+      for s in aws_elastic_beanstalk_environment.chatbot_api.setting :
+      "${s.namespace}/${s.name}" => s.value if startswith(s.namespace, "aws:elbv2:listener:")
+      })) == tomap({
+      "aws:elbv2:listener:443/Protocol"            = "HTTPS"
+      "aws:elbv2:listener:443/SSLCertificateArns"  = "arn:aws:acm:us-east-1:123456789012:certificate/origin"
+      "aws:elbv2:listener:443/SSLPolicy"           = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+      "aws:elbv2:listener:default/ListenerEnabled" = "false"
+    })
+    error_message = "The load balancer needs an HTTPS listener with the origin certificate and TLS 1.2+, and the port 80 listener disabled."
+  }
+}

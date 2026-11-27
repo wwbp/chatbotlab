@@ -93,6 +93,30 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
     name      = "SecurityGroups"
     value     = aws_security_group.load_balancer.id
   }
+  # HTTPS only, as live production: CloudFront connects https-only to the
+  # origin name (dns.tf) and checks this certificate against it. The port 80
+  # listener is off, so nothing reaches the app in clear text; the load
+  # balancer still forwards to the instances on port 80 inside the VPC.
+  setting {
+    namespace = "aws:elbv2:listener:443"
+    name      = "Protocol"
+    value     = "HTTPS"
+  }
+  setting {
+    namespace = "aws:elbv2:listener:443"
+    name      = "SSLCertificateArns"
+    value     = aws_acm_certificate_validation.origin.certificate_arn
+  }
+  setting {
+    namespace = "aws:elbv2:listener:443"
+    name      = "SSLPolicy"
+    value     = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  }
+  setting {
+    namespace = "aws:elbv2:listener:default"
+    name      = "ListenerEnabled"
+    value     = "false"
+  }
 
   # ----- Instances -----------------------------------------------------------
   # DisableIMDSv1=true is the flag that tells EB to use a launch template

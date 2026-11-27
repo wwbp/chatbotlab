@@ -233,3 +233,9 @@ variable "waf_enabled" {
     error_message = "Only the test stack may turn the web ACL off."
   }
 }
+
+variable "dns_zone_name" {
+  description = "The public Route 53 hosted zone, already in this account, that holds this stack's DNS records: <prefix>-origin.<zone> (CloudFront's name for the load balancer) and, with domain_name, the certificate validation and alias records. Terraform reads the zone and adds only those names; it never manages the zone or its other records."
+  type        = string
+  default     = "wwbp.org"
+}
