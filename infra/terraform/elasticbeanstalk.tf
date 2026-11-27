@@ -322,16 +322,18 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
   }
 
   # ----- Email ---------------------------------------------------------------
-  # Staff invites and password resets (api/chatbot/staff_auth.py). An unset
-  # value is left out rather than sent empty: settings.py reads these with
-  # os.getenv(name, default), and an empty string would replace the default.
-  # The matching SES permission is in iam.tf.
+  # Staff invites and password resets (api/chatbot/staff_auth.py). Production
+  # sends through SES and the test stack prints to its log unless the
+  # variables say otherwise (locals.tf). An unset value is left out rather
+  # than sent empty: settings.py reads these with os.getenv(name, default),
+  # and an empty string would replace the default. The matching SES
+  # permission is in iam.tf.
   dynamic "setting" {
     for_each = {
       for name, value in {
         SITE_URL           = local.site_url
-        EMAIL_BACKEND      = var.email_backend
-        DEFAULT_FROM_EMAIL = var.default_from_email
+        EMAIL_BACKEND      = local.email_backend
+        DEFAULT_FROM_EMAIL = local.default_from_email
       } : name => value if value != ""
     }
     content {
