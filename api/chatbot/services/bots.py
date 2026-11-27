@@ -247,11 +247,18 @@ class BotDetailAPIView(View):
             return JsonResponse({"error": "An unexpected error occurred."}, status=500)
 
     def delete(self, request, pk, *args, **kwargs):
+        # Superusers only, whatever permissions a staff user was granted.
         forbidden = require_perm(request, "chatbot.delete_bot")
         if forbidden:
             return forbidden
+        if not request.user.is_superuser:
+            return JsonResponse({"error": "Forbidden."}, status=403)
         try:
             bot = Bot.objects.get(pk=pk)
+            # Checked before the avatar clean-up below, which cannot be undone.
+            n = bot.conversation_count()
+            if n:
+                return JsonResponse({"error": Bot.in_use_message(n)}, status=409)
             try:
                 avatars = Avatar.objects.filter(bot=bot)
                 for avatar in avatars:
