@@ -673,13 +673,16 @@ check(
 )
 
 # --- IAM roles for Terraform: committed, and checked here ---------------------
-# The production role lives in the same AWS account as the hand-built live
-# deployment; the test role in the lab's separate TEST account, with the same
-# policies so a rehearsal also tests them. Each role trusts one GitHub
-# Environment (production: on main only), reaches
-# only its own environment's state and resources, cannot change IAM beyond its
-# own names (and only under a permissions boundary), cannot change the shared
-# GitHub OIDC provider, and is explicitly denied the live resources.
+# Both roles live in ONE AWS account, with the hand-built live deployment and
+# other lab projects. They have the same shape (the test role's policies are
+# production's with `test` in place of `production`, so a rehearsal also tests
+# them). Each role trusts one GitHub Environment (production: on main only),
+# reaches only its own environment's state and resources, cannot change IAM
+# beyond its own names (and only under a permissions boundary), cannot change
+# the shared GitHub OIDC provider, and is explicitly denied the live
+# resources and the other environment's names, tags and state key. Other
+# projects' resources are excluded by positive scoping: every Allow names
+# <PREFIX>-<env>-* or requires the Environment=<env> / Project=<PREFIX> tags.
 
 IAM = TERRAFORM / "bootstrap" / "iam"
 REPO_SUBJECTS = ("repo:wwbp/chatbotlab", "repo:wwbp@42522115/chatbotlab@882137210")
@@ -720,11 +723,22 @@ ENVIRONMENTS = ("test", "production")
 TAG_SCOPED_SERVICES = {"ec2", "autoscaling", "elasticloadbalancing", "cloudformation", "cloudfront", "acm", "cloudwatch"}
 # Calls with no resource to tag: nothing narrower than "*" exists.
 UNTAGGABLE_ACTIONS = {"cloudwatch:PutMetricData"}
-# The name set each role must be denied. The test role lives in the lab's
-# separate TEST account and is denied production's names anyway. Production's
-# policies keep denying the retired staging names: a stack built under them
-# may still exist in the production account until someone destroys it.
-OTHER = {"test": "production", "production": "staging"}
+# The name sets each role must be denied: the other environment, and the
+# retired staging names (a stack built under them may still exist in the
+# account until someone destroys it).
+OTHER = {"test": ("production", "staging"), "production": ("test", "staging")}
+# Other lab projects in the same account: positive scoping must leave them out.
+OTHER_PROJECT_SAMPLES = [
+    ("rds:DeleteDBInstance", "arn:aws:rds:us-east-1:<ACCOUNT_ID>:db:meetlab-v2-db"),
+    ("s3:DeleteObject", "arn:aws:s3:::meetlab-v2-uploads/x"),
+    ("s3:GetObject", "arn:aws:s3:::ckviz-data/x"),
+    ("elasticbeanstalk:TerminateEnvironment",
+     "arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:environment/meetlab-v2/meetlab-v2-env"),
+    ("iam:PutRolePolicy", "arn:aws:iam::<ACCOUNT_ID>:role/meetlab-v2-role"),
+    ("logs:DeleteLogGroup", "arn:aws:logs:us-east-1:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/meetlab-v2-env"),
+]
+SES_SENDS = ("ses:SendEmail", "ses:SendRawEmail")
+SES_IDENTITY = "arn:aws:ses:us-east-1:<ACCOUNT_ID>:identity/<SES_FROM_DOMAIN>"
 # role -> (environment it serves, GitHub Environment it trusts, ref condition)
 ROLES = {
     # Production: only from main.
@@ -991,7 +1005,7 @@ live_statements = {}
 for name, policy in policies.items():
     environment = name.rsplit("-", 1)[-1]
     fname = name if name.startswith("boundary") else f"{name}-permissions"
-    other = OTHER[environment]
+    others = OTHER[environment]
     kind = name.split("-", 1)[0]
     for st in policy["Statement"]:
         check(
@@ -1033,20 +1047,39 @@ for name, policy in policies.items():
     # tag. The boundary (size-limited to 6144 characters) instead allows
     # nothing that names it: every Allow there is scoped to its own names or
     # its own Environment tag.
-    if kind == "boundary":
-        for what, arn in sample_arns(other).items():
-            named = [r for st in policy["Statement"] if st.get("Effect") == "Allow"
-                     for r in as_list(st.get("Resource", [])) if r != "*" and fnmatchcase(arn, r)]
-            check(not named, f"{fname}.json: an Allow reaches the {other} {what} ({arn}) through {named}")
-    else:
-        for what, arn in sample_arns(other).items():
-            check(denies(policy, "s3:GetObject", arn), f"{fname}.json: must deny the {other} {what} ({arn})")
-        check(
-            any(st.get("Effect") == "Deny" and as_list(st.get("Action")) == ["*"]
-                and as_list(st.get("Condition", {}).get("StringEquals", {}).get("aws:ResourceTag/Environment", [])) == [other]
-                for st in policy["Statement"]),
-            f"{fname}.json: must deny everything tagged Environment={other}",
-        )
+    for other in others:
+        if kind == "boundary":
+            for what, arn in sample_arns(other).items():
+                named = [r for st in policy["Statement"] if st.get("Effect") == "Allow"
+                         for r in as_list(st.get("Resource", [])) if r != "*" and fnmatchcase(arn, r)]
+                check(not named, f"{fname}.json: an Allow reaches the {other} {what} ({arn}) through {named}")
+        else:
+            for what, arn in sample_arns(other).items():
+                for action in ("s3:GetObject", "s3:PutObject"):
+                    check(denies(policy, action, arn), f"{fname}.json: must deny {action} on the {other} {what} ({arn})")
+            check(
+                any(st.get("Effect") == "Deny" and as_list(st.get("Action")) == ["*"] and as_list(st.get("Resource")) == ["*"]
+                    and other in as_list(st.get("Condition", {}).get("StringEquals", {}).get("aws:ResourceTag/Environment", []))
+                    and set(st.get("Condition", {})) == {"StringEquals"}
+                    and set(st["Condition"]["StringEquals"]) == {"aws:ResourceTag/Environment"}
+                    for st in policy["Statement"]),
+                f"{fname}.json: must deny everything tagged Environment={other}",
+            )
+
+    # Other projects in the account: nothing reaches them.
+    for action, arn in OTHER_PROJECT_SAMPLES:
+        check(not allows(policy, action, arn), f"{fname}.json: must not allow {action} on another project's {arn}")
+
+    # The test stack must not send real email: SES sends are explicitly denied
+    # to the test apply role and to every role the test stack creates (its
+    # boundary), and no test policy allows them. Production's boundary allows
+    # sending from the configured domain only.
+    for action in SES_SENDS:
+        if environment == "test":
+            check(denies(policy, action, SES_IDENTITY) and denies(policy, action, "*"),
+                  f"{fname}.json: must explicitly deny {action} (the test stack sends no real email)")
+            check(not matching(policy, "Allow", action, SES_IDENTITY),
+                  f"{fname}.json: no statement may allow {action} in the test stack")
 
     if kind == "apply":
         check(not allows(policy, "s3:GetObject", "arn:aws:s3:::someone-elses-bucket/key"),
@@ -1066,7 +1099,8 @@ for name, policy in policies.items():
             check(not allows(policy, action, own[what].replace(f"<PREFIX>-{environment}", "someone-else")),
                   f"{fname}.json: {action} must be limited to <PREFIX>-{environment} names")
         # The shared Elastic Beanstalk bucket: only this application's keys.
-        for key in ("humanlikebot/app.zip", "resources/environments/e-live/x", f"<PREFIX>-{other}/app.zip"):
+        for key in ("humanlikebot/app.zip", "resources/environments/e-live/x", "meetlab-v2/app.zip",
+                    *(f"<PREFIX>-{o}/app.zip" for o in others)):
             check(not allows(policy, "s3:PutObject", f"{EB_BUCKET}/{key}"),
                   f"{fname}.json: must not write '{key}' in the shared elasticbeanstalk bucket")
         # IAM: only the actions Terraform needs, only on its own names, only
@@ -1111,7 +1145,7 @@ for name, policy in policies.items():
             check(denies(policy, action, boundary_arn(environment)) or denies(policy, action, own["role"]),
                   f"{fname}.json: must deny {action} (the boundary must stay in place)")
         for target in ("role/<PREFIX>-terraform-apply-production", "role/<PREFIX>-terraform-apply-test",
-                       "role/aws-elasticbeanstalk-ec2-role", f"role/<PREFIX>-{other}-github-actions"):
+                       "role/aws-elasticbeanstalk-ec2-role", *(f"role/<PREFIX>-{o}-github-actions" for o in others)):
             check(not allows(policy, "iam:PutRolePolicy", f"arn:aws:iam::<ACCOUNT_ID>:{target}"),
                   f"{fname}.json: must not change {target}")
     else:  # boundary: the most any role the stack creates can ever do
@@ -1127,7 +1161,7 @@ for name, policy in policies.items():
         for action, arn, expected in (
             ("ssm:GetParameter", own["param"], True),
             ("ssm:GetParameter", "arn:aws:ssm:us-east-1:<ACCOUNT_ID>:parameter/someone-else/x", False),
-            ("ses:SendEmail", "arn:aws:ses:us-east-1:<ACCOUNT_ID>:identity/<SES_FROM_DOMAIN>", True),
+            ("ses:SendEmail", SES_IDENTITY, environment == "production"),
             ("ses:SendEmail", "arn:aws:ses:us-east-1:<ACCOUNT_ID>:identity/someone-else.org", False),
             ("s3:GetObject", own["object"], True),
             ("s3:PutObject", own["eb-version"], True),
