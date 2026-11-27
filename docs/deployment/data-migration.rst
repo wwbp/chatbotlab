@@ -104,6 +104,26 @@ Steps 1 to 3 are preparation and can be done ahead of time. The window (app offl
 
    *Gate:* do not continue unless every check is ``ok`` or ``warn`` apart from the expected non-empty target. Note the size and use `Timings`_ to confirm the window is long enough.
 
+   Then check by hand for one thing ``preflight`` does not: foreign keys that reference a non-unique or partial key. MySQL 8.0 allows them; RDS MySQL 8.4 sets ``restrict_fk_on_non_standard_key=ON`` and refuses them, so the restore would fail on that table. On the **source**, connected to ``ebdb``::
+
+      SELECT f.TABLE_NAME, f.CONSTRAINT_NAME, f.REFERENCED_TABLE_NAME, f.cols
+      FROM (SELECT TABLE_NAME, CONSTRAINT_NAME, REFERENCED_TABLE_NAME,
+                   GROUP_CONCAT(REFERENCED_COLUMN_NAME ORDER BY REFERENCED_COLUMN_NAME) AS cols
+            FROM information_schema.KEY_COLUMN_USAGE
+            WHERE TABLE_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME IS NOT NULL
+            GROUP BY TABLE_NAME, CONSTRAINT_NAME, REFERENCED_TABLE_NAME) AS f
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM (SELECT TABLE_NAME, INDEX_NAME,
+                     GROUP_CONCAT(COLUMN_NAME ORDER BY COLUMN_NAME) AS cols,
+                     MAX(SUB_PART IS NOT NULL) AS partial
+              FROM information_schema.STATISTICS
+              WHERE TABLE_SCHEMA = DATABASE() AND NON_UNIQUE = 0
+              GROUP BY TABLE_NAME, INDEX_NAME) AS u
+        WHERE u.TABLE_NAME = f.REFERENCED_TABLE_NAME AND u.cols = f.cols AND NOT u.partial);
+
+   *Gate:* do not continue unless it returns no rows. Django's foreign keys reference primary keys, so any row is a hand-made constraint: fix it on the source (or in a migration) first.
+
 4. **Take the old app offline. The window starts.** Announce it first. Simplest safe option that keeps an instance available for the port-forward: remove the inbound rule on the old load balancer's security group (note the rule so you can put it back). Alternative: scale the old environment to 0 instances, if the tool reaches the database some other way.
 
    *Gate:* do not continue unless ``scripts/smoke.sh <old URL>`` now **fails**.
