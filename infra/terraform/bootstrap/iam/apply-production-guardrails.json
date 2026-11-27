@@ -70,7 +70,7 @@
       "Resource": "*"
     },
     {
-      "Sid": "DenyOtherEnvironmentNames",
+      "Sid": "DenyOtherEnvNames",
       "Effect": "Deny",
       "Action": "*",
       "Resource": [
@@ -99,7 +99,7 @@
       ]
     },
     {
-      "Sid": "DenyOtherEnvironmentTags",
+      "Sid": "DenyOtherEnvTags",
       "Effect": "Deny",
       "Action": "*",
       "Resource": "*",

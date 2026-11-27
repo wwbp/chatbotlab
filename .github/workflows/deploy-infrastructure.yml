@@ -263,6 +263,9 @@ jobs:
       # Deterministic name: "<TF_PROJECT_PREFIX>-tfstate-<ACCOUNT_ID>" — no random
       # suffix. The prefix comes from a secret so the repository does not
       # publish the names of live AWS resources.
+      # The bucket holds both environments' state (and production's backups),
+      # so only production creates it: the test role may not create or
+      # reconfigure it, and may list only <prefix>/test/.
       - name: Bootstrap Terraform state backend
         id: bootstrap
         env:
@@ -276,6 +279,9 @@ jobs:
             echo "State bucket already exists: $BUCKET"
           elif [[ "$ACTION" != "apply" ]]; then
             echo "::error::The state bucket does not exist yet. A plan creates nothing; run with action = apply to build the first environment."
+            exit 1
+          elif [[ "$ENVIRONMENT" != "production" ]]; then
+            echo "::error::The state bucket $BUCKET does not exist yet, and the test role may not create it (it also holds production's state). Create it first: build production once, or have an administrator create it from infra/terraform/bootstrap."
             exit 1
           else
             aws s3api create-bucket --bucket "$BUCKET" --region us-east-1
@@ -296,10 +302,14 @@ jobs:
           # it, so stop until the old state file has been moved.
           # Listing needs only s3:ListBucket, and an error fails the step
           # instead of reading as "no old state".
-          legacy=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "${TF_PROJECT_PREFIX}/terraform.tfstate" --query 'KeyCount' --output text)
-          if [[ "$legacy" != "0" ]]; then
-            echo "::error::Old state file found at s3://<state bucket>/<prefix>/terraform.tfstate. It describes a production stack. Move it to <prefix>/production/terraform.tfstate (aws s3 mv), then run this workflow again."
-            exit 1
+          # Production only: it is production's old state, and the test role may
+          # list only <prefix>/test/.
+          if [[ "$ENVIRONMENT" == "production" ]]; then
+            legacy=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "${TF_PROJECT_PREFIX}/terraform.tfstate" --query 'KeyCount' --output text)
+            if [[ "$legacy" != "0" ]]; then
+              echo "::error::Old state file found at s3://<state bucket>/<prefix>/terraform.tfstate. It describes a production stack. Move it to <prefix>/production/terraform.tfstate (aws s3 mv), then run this workflow again."
+              exit 1
+            fi
           fi
 
           echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"

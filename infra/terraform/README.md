@@ -256,7 +256,8 @@ isolated by policy:
   `Environment=<env>` and `Project=<PREFIX>` (EC2, load balancing, Auto
   Scaling, CloudFormation, CloudFront, ACM). That is what keeps other
   projects' resources out; there is no Deny per project;
-- the **other environment**, explicitly denied: the test role everything
+- the **other environment**, explicitly denied, in the apply policies and
+  in the boundaries (by name and tag): the test role everything
   named `<PREFIX>-production-*` or tagged `Environment=production`, and
   production's state key; the production role everything named
   `<PREFIX>-test-*` or tagged `Environment=test`, and the test state key.
@@ -269,6 +270,20 @@ isolated by policy:
 - **shared account-level resources**: the GitHub OIDC provider is
   read-only to both; in the account's `elasticbeanstalk-<region>-<account>`
   storage bucket each role writes only its own `<PREFIX>-<env>/` keys;
+- **the shared state bucket**: one bucket, so production's existing state
+  stays where it is. The test role reads and writes only `<PREFIX>/test/`,
+  may list no other prefix, may not create, delete or reconfigure the
+  bucket (production's first apply, or an administrator, creates it), and
+  is denied `<PREFIX>/production/`, where production's state and the
+  Destroy workflow's backups live;
+- **account-wide reads** are metadata only: neither role (nor any role a
+  stack creates) may read Elastic Beanstalk configuration settings (the
+  environment variables, which hold database passwords and API keys) or
+  CloudFormation templates of anything but its own environment, so neither
+  can read the live deployment's or another project's secrets. The
+  production cutover needs none of them: `write_deploy_secrets` reads
+  Terraform's own outputs, and the data migration runs with administrator
+  credentials;
 - **email**: the test role and every role the test stack creates (its
   boundary, `<PREFIX>-terraform-boundary-test`) are denied `ses:Send*`, so
   the test stack cannot send real email through the account's SES
@@ -370,7 +385,9 @@ In GitHub (**Settings**):
    site with them.
 
 Then run the workflow from `main` or a `test/*` branch: environment `test`, action `apply`. The
-first apply creates the account's state bucket, if production has not.
+test role cannot create the shared state bucket: if no production apply has
+created it yet, create it first from `bootstrap/` (as an administrator,
+`terraform -chdir=bootstrap apply -var project_name=$PREFIX`).
 
 ### Secrets in the state file
 

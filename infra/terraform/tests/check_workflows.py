@@ -1095,8 +1095,16 @@ for name, policy in policies.items():
                 check(not named, f"{fname}.json: an Allow reaches the {other} {what} ({arn}) through {named}")
         if kind == "boundary" and other == "staging":
             continue  # retired: positive scoping above is enough for the boundary
+        # A boundary (6144 characters at most) that allows nothing but
+        # metadata reads (Describe/List) in a service needs no Deny there: its
+        # implicit deny already caps every change and every data read.
+        allowed_services = {a.split(":")[0] for st in policy["Statement"] if st.get("Effect") == "Allow"
+                            for a in as_list(st.get("Action", []))
+                            if not re.match(r"[\w-]+:(Describe|List)", a)}
         if True:
             for what, arn in sample_arns(other).items():
+                if kind == "boundary" and arn.split(":")[2] not in allowed_services:
+                    continue
                 for action in ("s3:GetObject", "s3:PutObject"):
                     check(denies(policy, action, arn), f"{fname}.json: must deny {action} on the {other} {what} ({arn})")
             check(
