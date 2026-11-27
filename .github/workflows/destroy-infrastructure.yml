@@ -241,8 +241,8 @@ jobs:
             exit 1
           fi
           totals() {
-            aws s3 ls --recursive --summarize "$1" \
-              | awk '/Total Objects:/ {o=$3} /Total Size:/ {s=$3} END {print o+0 " objects, " s+0 " bytes"}'
+            aws s3 ls --recursive "$1" \
+              | awk '$4 !~ /^uploads\// {o++; s+=$3} END {print o+0 " objects, " s+0 " bytes"}'
           }
           src=$(totals "s3://$DATA")
           if [[ "$src" == "0 objects, 0 bytes" ]]; then
@@ -251,7 +251,7 @@ jobs:
             exit 0
           fi
           BACKUP="s3://${STATE_BUCKET}/${PREFIX}/${ENVIRONMENT}/backups/$(date -u +%Y%m%dT%H%M%SZ)/data"
-          aws s3 sync "s3://$DATA" "$BACKUP/" --only-show-errors
+          aws s3 sync "s3://$DATA" "$BACKUP/" --exclude 'uploads/*' --only-show-errors
           dst=$(totals "$BACKUP/")
           if [[ "$src" != "$dst" ]]; then
             echo "::error::The backup does not match the data bucket (source: $src; backup: $dst). Nothing was changed: deletion protection, buckets and resources are as they were."
