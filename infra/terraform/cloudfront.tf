@@ -143,7 +143,12 @@ resource "aws_cloudfront_distribution" "frontend" {
     }
   }
 
-  # /api/* — Django REST API. No caching, all methods, all headers forwarded.
+  # /api/* — Django REST API. No caching, all methods, all headers forwarded
+  # but Host. Live production forwards Host because its load balancer's
+  # certificate is for bot.wwbp.org; this one's is for the origin name, and
+  # CloudFront checks the certificate against the Host it sends. Django needs
+  # no viewer Host: links come from SITE_URL, ALLOWED_HOSTS is "*", and CSRF
+  # checks the Origin against CSRF_TRUSTED_ORIGINS (tests/edge.tftest.hcl).
   # Managed policy IDs from https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-policies.html
   ordered_cache_behavior {
     path_pattern           = "/api/*"

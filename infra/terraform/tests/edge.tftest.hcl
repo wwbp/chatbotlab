@@ -183,3 +183,25 @@ run "cloudfront_reaches_the_load_balancer_over_https" {
     error_message = "The load balancer needs an HTTPS listener with the origin certificate and TLS 1.2+, and the port 80 listener disabled."
   }
 }
+
+# --- Host header ------------------------------------------------------------------
+
+# Live production forwards the viewer's Host (AllViewer) because its load
+# balancer's certificate is for bot.wwbp.org: CloudFront checks the origin's
+# certificate against the Host it sends. Here the certificate is for the
+# origin name, so CloudFront must send that name (AllViewerExceptHostHeader);
+# forwarding bot.wwbp.org, or the cloudfront.net name before the cutover,
+# would fail the TLS check with a 502. Django needs no viewer Host: links are
+# built from SITE_URL (staff_auth.py), ALLOWED_HOSTS is "*", and the CSRF
+# origin check passes through CSRF_TRUSTED_ORIGINS.
+run "the_origin_gets_its_own_name_as_host" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for b in aws_cloudfront_distribution.frontend.ordered_cache_behavior :
+      b.origin_request_policy_id == "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+    ])
+    error_message = "Behaviours to the load balancer must use AllViewerExceptHostHeader: its certificate is for the origin name."
+  }
+}
