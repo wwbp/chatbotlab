@@ -912,8 +912,12 @@ def sample_arns(env_name):
         "eb-env": f"arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:environment/{p}/{p}-env",
         "role": f"arn:aws:iam::<ACCOUNT_ID>:role/{p}-eb-instance-role",
         "param": f"arn:aws:ssm:us-east-1:<ACCOUNT_ID>:parameter/{p}/DJANGO_SECRET_KEY",
-        "secret": f"arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:{p}/database-AbCdEf",
+        "secret": f"arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:{p}/app-AbCdEf",
     }
+
+
+# The master user secret RDS creates for a database (manage_master_user_password).
+RDS_SECRET = "arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:rds!db-0123abcd-AbCdEf"
 
 
 # IAM actions that accept the iam:PermissionsBoundary condition key: every one
@@ -1308,6 +1312,25 @@ for name, policy in policies.items():
                     services = set(as_list(cond.get("StringEquals", {}).get("iam:PassedToService", [])))
                     check(services and services <= {"elasticbeanstalk.amazonaws.com", "ec2.amazonaws.com"},
                           f"{fname}.json: iam:PassRole needs iam:PassedToService = EB / EC2")
+        # Secrets Manager: the role creates and deletes the stack's secrets
+        # (<PREFIX>-<env>/app, and RDS's master user secret through
+        # manage_master_user_password) but never reads or writes a value, so no
+        # value reaches Terraform state or the deploy workflow. UpdateSecret and
+        # PutSecretValue would let it set SECRET_KEY (and forge sessions).
+        for action in ("secretsmanager:CreateSecret", "secretsmanager:DeleteSecret",
+                       "secretsmanager:DescribeSecret", "secretsmanager:TagResource"):
+            check(allows(policy, action, own["secret"]), f"{fname}.json: must allow {action} on its own secrets")
+            check(not allows(policy, action, own["secret"].replace(f"<PREFIX>-{environment}", "someone-else")),
+                  f"{fname}.json: {action} must be limited to <PREFIX>-{environment}/ secrets")
+        for action in ("secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue",
+                       "secretsmanager:UpdateSecret", "secretsmanager:UpdateSecretVersionStage"):
+            for arn in (own["secret"], RDS_SECRET):
+                check(not matching(policy, "Allow", action, arn), f"{fname}.json: must not allow {action} on {arn}")
+        check(allows(policy, "secretsmanager:CreateSecret", RDS_SECRET)
+              and allows(policy, "secretsmanager:TagResource", RDS_SECRET)
+              and allows(policy, "kms:DescribeKey", "arn:aws:kms:us-east-1:<ACCOUNT_ID>:key/aws-secretsmanager"),
+              f"{fname}.json: manage_master_user_password needs secretsmanager:CreateSecret and TagResource on "
+              "rds!db-* and kms:DescribeKey (RDS user guide, rds-secrets-manager)")
         check(allows(policy, "iam:CreateRole", own["role"]), f"{fname}.json: must be able to create its own roles")
         check(
             any(st.get("Effect") == "Deny" and "iam:PutRolePermissionsBoundary" in as_list(st.get("Action"))
@@ -1334,7 +1357,14 @@ for name, policy in policies.items():
                     check(action in BOUNDARY_WILDCARDS_ON_ANY_RESOURCE,
                           f"{fname}.json: '{action}' on '*' is wider than the stack's roles need")
         for action, arn, expected in (
-            ("ssm:GetParameter", own["param"], True),
+            # The application reads Secrets Manager (its own secrets and the
+            # RDS master user secret), and no SSM parameters.
+            ("ssm:GetParameter", own["param"], False),
+            ("secretsmanager:GetSecretValue", own["secret"], True),
+            ("secretsmanager:GetSecretValue", RDS_SECRET, True),
+            ("secretsmanager:GetSecretValue", "arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:someone-else/x-AbCdEf", False),
+            ("secretsmanager:PutSecretValue", own["secret"], False),
+            ("secretsmanager:UpdateSecret", own["secret"], False),
             ("ssm:GetParameter", "arn:aws:ssm:us-east-1:<ACCOUNT_ID>:parameter/someone-else/x", False),
             ("ses:SendEmail", SES_IDENTITY, environment == "production"),
             ("ses:SendEmail", "arn:aws:ses:us-east-1:<ACCOUNT_ID>:identity/someone-else.org", False),
