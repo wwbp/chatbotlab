@@ -1213,10 +1213,26 @@ check(
     "reviewers and deployment branches `main` and `test/*` (as apply-test-trust.json)",
 )
 check(
-    "trusts that branch's code with the TEST account" in readme and "never production's" in readme,
-    "README.md: say that approving a test run trusts that branch's code with the TEST account (which may hold "
-    "a production snapshot), and that the test stack uses its own API keys, never production's",
+    "trusts that branch's code with the shared AWS account" in readme and "never production's" in readme,
+    "README.md: say that approving a test run trusts that branch's code with the shared AWS account, and that "
+    "the test stack uses its own API keys, never production's",
 )
+# One account (the owner's decision, 2026-11-27): no document may still send
+# the test stack to a separate account, or call the test policy safe to widen
+# because of one.
+for doc in (TERRAFORM / "README.md", ROOT / "docs" / "deployment" / "technical-reference.rst",
+            ROOT / "docs" / "deployment" / "data-migration.rst", TERRAFORM / "environments" / "test.tfvars",
+            WORKFLOWS / "deploy-infrastructure.yml", WORKFLOWS / "destroy-infrastructure.yml"):
+    text = doc.read_text()
+    for stale in ("TEST account", "separate account", "different AWS accounts", "cross-account copy", "separate TEST"):
+        check(stale.lower() not in text.lower() or f"no {stale.lower()}" in text.lower(),
+              f"{doc.name}: still says '{stale}'; the test stack lives in the production account")
+for needle in ("TF_AWS_ACCOUNT_ID", "<PREFIX>-terraform-apply-production", "<PREFIX>-terraform-apply-test",
+               "<PREFIX>-terraform-boundary-test", "Environment=production", "positive scoping", "ses:Send*",
+               "Bedrock"):
+    check(needle in readme, f"README.md: the single-account setup must name {needle}")
+check("TF_AWS_ACCOUNT_ID" in reference and "same AWS account" in reference,
+      "technical-reference.rst: describe the one account (TF_AWS_ACCOUNT_ID) both stacks share")
 # The owner approves their own runs: no document may tell them to switch on
 # "Prevent self-review" (it would lock them out of their own deploys).
 for doc in (TERRAFORM / "README.md", ROOT / "docs" / "deployment" / "technical-reference.rst",
@@ -1225,7 +1241,7 @@ for doc in (TERRAFORM / "README.md", ROOT / "docs" / "deployment" / "technical-r
         check("self-review" not in line.lower() or re.search(r"\b(off|not|unticked)\b", line),
               f"{doc.name}: must not tell anyone to enable Prevent self-review: '{line.strip()}'")
 # The owner's one-time setup: the account secrets, and what to delete.
-for needle in ("TF_PROD_ACCOUNT_ID", "TF_TEST_ACCOUNT_ID", "`plan-staging`", "`plan-production`",
+for needle in ("`TF_PROD_ACCOUNT_ID`", "`TF_TEST_ACCOUNT_ID`", "`plan-staging`", "`plan-production`",
                "`TF_PLAN_ROLE_ARN`", "`TF_APPLY_ROLE_ARN`", "bootstrap/iam/apply-test-trust.json"):
     check(needle in readme, f"README.md: the setup steps must name {needle}")
 check("plan-staging" not in reference and "TF_APPLY_ROLE_ARN" not in reference,
@@ -1233,6 +1249,9 @@ check("plan-staging" not in reference and "TF_APPLY_ROLE_ARN" not in reference,
 runbook = (ROOT / "docs" / "deployment" / "data-migration.rst").read_text()
 check("test stack" in runbook and "Follow it for **staging first**" not in runbook,
       "data-migration.rst: the rehearsal runs on the test stack, not on a Terraform staging stack")
+check(all(n in runbook for n in ("same AWS account", "--storage-encrypted", "--no-publicly-accessible", "--kms-key-id")),
+      "data-migration.rst: the rehearsal restores the snapshot in the same AWS account, private and encrypted like "
+      "production (re-encrypt an unencrypted snapshot with copy-db-snapshot --kms-key-id)")
 check(
     not re.search(r"Deployment branches\*\*[^.]*`staging`[^.]*production|production[^.]*Deployment branches\*\*[^.]*`staging`", readme),
     "README.md: production may deploy only from main",
