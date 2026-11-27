@@ -45,6 +45,9 @@ def make_bot(openai_model):
     yield _make
 
     for b in created:
+        # A bot with conversations can't be deleted (Bot.delete); tests that
+        # start conversations through the views leave some behind.
+        Conversation.objects.filter(bot_name=b.name).delete()
         b.delete()
 
 

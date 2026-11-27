@@ -337,7 +337,19 @@ class ModerationSettings(models.Model):
         return f"Moderation {'Enabled' if self.enabled else 'Disabled'}"
 
 
+class BotQuerySet(models.QuerySet):
+    def delete(self):
+        # Bulk deletes skip Bot.delete(), so they get the same guard.
+        used = Conversation.objects.filter(bot_name__in=self.values("name"))
+        if used.exists():
+            raise models.ProtectedError(
+                "Bots with conversations can't be deleted.", used
+            )
+        return super().delete()
+
+
 class Bot(models.Model):
+    objects = BotQuerySet.as_manager()
     # Make name the unique identifier
     name = models.CharField(max_length=255, unique=True, default="DefaultBotName")
     prompt = models.TextField()  # Bot's prompt
@@ -601,6 +613,16 @@ class Bot(models.Model):
     def in_use_message(n):
         s = "" if n == 1 else "s"
         return f"This bot has {n} conversation{s}, so it can't be deleted or renamed."
+
+    def delete(self, *args, **kwargs):
+        # Last line of defence: no code path may orphan a study's conversations.
+        n = self.conversation_count()
+        if n:
+            raise models.ProtectedError(
+                self.in_use_message(n),
+                Conversation.objects.filter(bot_name=self.name),
+            )
+        return super().delete(*args, **kwargs)
 
     def get_moderation_threshold(self, category):
         """Threshold for one OpenAI moderation category.
