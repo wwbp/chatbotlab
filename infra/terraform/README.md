@@ -571,9 +571,10 @@ openai_api_key = "sk-proj-new-key-here"
 Then `terraform apply` — EB picks up the new env var on the next instance refresh.
 
 **The edge (CloudFront, WAF, DNS):**
-- CloudFront has the web ACL in `waf.tf` (live production's rules: AWS
-  anti-DDoS, IP reputation, common, known bad inputs, SQLi, and 300 requests
-  per IP in 5 minutes, all blocking). `waf_enabled` must stay true for
+- CloudFront has the web ACL in `waf.tf`, matched to live production's: AWS
+  anti-DDoS (live's settings), a 300-requests-per-IP-in-5-minutes rule that
+  only counts, then IP reputation, common (8 KB body limit counted, not
+  blocked), known bad inputs and SQLi. `waf_enabled` must stay true for
   production; `environments/test.tfvars` turns it off (about $11 a month).
 - CloudFront reaches the load balancer https-only (TLS 1.2+) at
   `<prefix>-origin.<dns_zone_name>`, a CNAME Terraform writes in the existing

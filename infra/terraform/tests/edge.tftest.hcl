@@ -47,8 +47,10 @@ override_resource {
 
 # --- WAF ----------------------------------------------------------------------
 
-# Live production's web ACL: the same managed rule groups and a per-IP rate
-# limit of 300 requests in 5 minutes, all blocking.
+# Live production's web ACL, read 2026-11-27: the same managed rule groups in
+# the same order, a per-IP rate rule of 300 requests in 5 minutes that only
+# counts, CommonRuleSet's 8 KB body limit counted rather than blocked, and the
+# anti-DDoS group's live settings.
 run "production_has_the_live_web_acl" {
   command = plan
 
@@ -86,12 +88,49 @@ run "production_has_the_live_web_acl" {
   }
 
   assert {
+    condition = { for r in aws_wafv2_web_acl.edge[0].rule : r.name => r.priority } == {
+      AWSManagedRulesAntiDDoSRuleSet        = 0
+      RateLimitPerIp                        = 1
+      AWSManagedRulesAmazonIpReputationList = 2
+      AWSManagedRulesCommonRuleSet          = 3
+      AWSManagedRulesKnownBadInputsRuleSet  = 4
+      AWSManagedRulesSQLiRuleSet            = 5
+    }
+    error_message = "The rules must be in live production's order."
+  }
+
+  # Live counts, it does not block: a lab sharing one IP can pass 300.
+  assert {
     condition = anytrue([
       for r in aws_wafv2_web_acl.edge[0].rule :
       length(r.statement[0].rate_based_statement) > 0
-      && try(r.statement[0].rate_based_statement[0].limit == 300 && r.statement[0].rate_based_statement[0].aggregate_key_type == "IP" && length(r.action[0].block) == 1, false)
+      && try(r.statement[0].rate_based_statement[0].limit == 300 && r.statement[0].rate_based_statement[0].aggregate_key_type == "IP" && r.statement[0].rate_based_statement[0].evaluation_window_sec == 300 && length(r.action[0].count) == 1 && length(r.action[0].block) == 0, false)
     ])
-    error_message = "The web ACL must block an IP after 300 requests in 5 minutes, as live production does."
+    error_message = "The rate rule must count (not block) an IP past 300 requests in 5 minutes, as live production does."
+  }
+
+  # Without this, CommonRuleSet blocks request bodies over 8 KB.
+  assert {
+    condition = anytrue([
+      for r in aws_wafv2_web_acl.edge[0].rule :
+      r.name == "AWSManagedRulesCommonRuleSet"
+      && try([for o in r.statement[0].managed_rule_group_statement[0].rule_action_override : "${o.name}=${length(o.action_to_use[0].count)}"] == ["SizeRestrictions_BODY=1"], false)
+    ])
+    error_message = "CommonRuleSet must count SizeRestrictions_BODY (bodies over 8 KB), as live production does."
+  }
+
+  assert {
+    condition = anytrue([
+      for r in aws_wafv2_web_acl.edge[0].rule :
+      r.name == "AWSManagedRulesAntiDDoSRuleSet"
+      && try(
+        r.statement[0].managed_rule_group_statement[0].managed_rule_group_configs[0].aws_managed_rules_anti_ddos_rule_set[0].sensitivity_to_block == "LOW"
+        && r.statement[0].managed_rule_group_statement[0].managed_rule_group_configs[0].aws_managed_rules_anti_ddos_rule_set[0].client_side_action_config[0].challenge[0].usage_of_action == "ENABLED"
+        && r.statement[0].managed_rule_group_statement[0].managed_rule_group_configs[0].aws_managed_rules_anti_ddos_rule_set[0].client_side_action_config[0].challenge[0].sensitivity == "HIGH"
+        && [for e in r.statement[0].managed_rule_group_statement[0].managed_rule_group_configs[0].aws_managed_rules_anti_ddos_rule_set[0].client_side_action_config[0].challenge[0].exempt_uri_regular_expression : e.regex_string] == ["\\/api\\/|\\/ws\\/|\\/static\\/|\\.(acc|avi|css|gif|ico|jpe?g|js|json|mp[34]|ogg|otf|pdf|png|tiff?|ttf|webm|webp|woff2?|xml)$"],
+      false)
+    ])
+    error_message = "The anti-DDoS group must use live's settings: block sensitivity LOW, challenge ENABLED at HIGH, live's exemptions plus /ws/ and /static/."
   }
 }
 
