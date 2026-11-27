@@ -230,11 +230,6 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
   # ----- Database ------------------------------------------------------------
   setting {
     namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "DATABASE_ENGINE"
-    value     = "django.db.backends.mysql"
-  }
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
     name      = "DATABASE_HOST"
     value     = aws_db_instance.main.address
   }
@@ -257,6 +252,34 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
     namespace = "aws:elasticbeanstalk:application:environment"
     name      = "DATABASE_PASSWORD"
     value     = var.db_password
+  }
+  # Django under ASGI must open a connection per request: a kept connection
+  # is shared across threads and breaks under load (technical reference,
+  # "Known gotchas"). Set explicitly so a hand-set value cannot linger.
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "CONN_MAX_AGE"
+    value     = "0"
+  }
+
+  # ----- Server --------------------------------------------------------------
+  # Read by the Dockerfile CMD. Uvicorn workers are async, so two per vCPU of
+  # a t3.small (2 vCPU, 2 GB) is enough and fits in memory. With ASGI and
+  # CONN_MAX_AGE=0 each in-flight request holds its own database connection,
+  # so connections follow concurrent requests across all instances (1 to 3
+  # in production), not the worker count; watch RDS DatabaseConnections
+  # against max_connections when scaling out.
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "GUNICORN_WORKERS"
+    value     = "4"
+  }
+  # Load-test switch: on, participants get canned replies. Pinned off so a
+  # value set by hand during a load test cannot survive into a study.
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "MOCK_LLM"
+    value     = "false"
   }
 
   # ----- Cache ---------------------------------------------------------------
@@ -302,16 +325,18 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
   }
 
   # ----- Email ---------------------------------------------------------------
-  # Staff invites and password resets (api/chatbot/staff_auth.py). An unset
-  # value is left out rather than sent empty: settings.py reads these with
-  # os.getenv(name, default), and an empty string would replace the default.
-  # The matching SES permission is in iam.tf.
+  # Staff invites and password resets (api/chatbot/staff_auth.py). Production
+  # sends through SES and the test stack prints to its log unless the
+  # variables say otherwise (locals.tf). An unset value is left out rather
+  # than sent empty: settings.py reads these with os.getenv(name, default),
+  # and an empty string would replace the default. The matching SES
+  # permission is in iam.tf.
   dynamic "setting" {
     for_each = {
       for name, value in {
         SITE_URL           = local.site_url
-        EMAIL_BACKEND      = var.email_backend
-        DEFAULT_FROM_EMAIL = var.default_from_email
+        EMAIL_BACKEND      = local.email_backend
+        DEFAULT_FROM_EMAIL = local.default_from_email
       } : name => value if value != ""
     }
     content {
@@ -322,22 +347,23 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
   }
 
   # ----- Admin panel ---------------------------------------------------------
-  # DJANGO_SUPERUSER_* env vars trigger superuser creation on first deploy.
-  # api/entrypoint.sh calls `manage.py createsuperuser --noinput` when these
-  # are present. Idempotent — subsequent deploys leave the existing user alone.
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "DJANGO_SUPERUSER_USERNAME"
-    value     = "admin"
-  }
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "DJANGO_SUPERUSER_EMAIL"
-    value     = "admin@example.com"
-  }
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "DJANGO_SUPERUSER_PASSWORD"
-    value     = var.admin_panel_password
+  # api/entrypoint.sh runs `manage.py createsuperuser --noinput` on every
+  # container start while DJANGO_SUPERUSER_PASSWORD is set (an existing user
+  # makes it fail harmlessly). Only the test stack, whose database starts
+  # empty, gets these. Production's database is copied from the live one with
+  # its real admins: creating accounts at boot there would add an 'admin'
+  # superuser whose password sits in Terraform state. If production ever needs
+  # one, run `manage.py createsuperuser` once by hand.
+  dynamic "setting" {
+    for_each = var.environment == "test" ? {
+      DJANGO_SUPERUSER_USERNAME = "admin"
+      DJANGO_SUPERUSER_EMAIL    = "admin@example.com"
+      DJANGO_SUPERUSER_PASSWORD = var.admin_panel_password
+    } : {}
+    content {
+      namespace = "aws:elasticbeanstalk:application:environment"
+      name      = setting.key
+      value     = setting.value
+    }
   }
 }

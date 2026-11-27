@@ -58,21 +58,30 @@ resource "aws_iam_role_policy" "eb_instance_application_access" {
     Version = "2012-10-17"
     Statement = [
       {
-        # The application reads and writes avatar images, user uploads, and
-        # voice audio recordings to this bucket. ListBucket is needed to
-        # check whether a file exists before uploading.
-        Sid    = "ReadWriteApplicationDataBucket"
+        # Only the three prefixes the application writes: bot and participant
+        # avatars (avatar/, s3_helper.py), participants' raw photos (uploads/,
+        # also presigned for the browser's PUT in upload.py), and voice audio
+        # (utterance_audio/, Utterance.audio_file through S3Storage).
+        Sid    = "ReadWriteApplicationDataObjects"
         Effect = "Allow"
         Action = [
           "s3:GetObject",
           "s3:PutObject",
           "s3:DeleteObject",
-          "s3:ListBucket",
         ]
         Resource = [
-          aws_s3_bucket.application_data.arn,
-          "${aws_s3_bucket.application_data.arn}/*",
+          for prefix in ["avatar", "uploads", "utterance_audio"] :
+          "${aws_s3_bucket.application_data.arn}/${prefix}/*"
         ]
+      },
+      {
+        # get_random_image lists avatar/. S3Storage checks a name is free
+        # with HeadObject, which returns 404 for a missing key only to a
+        # caller that may list the bucket (403 otherwise, and the save fails).
+        Sid      = "ListApplicationDataBucket"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = aws_s3_bucket.application_data.arn
       },
       {
         # The application can call AWS Bedrock to run Llama and Claude models
@@ -105,7 +114,8 @@ resource "aws_iam_role_policy" "eb_instance_application_access" {
 
 # Sending staff invites and password resets through Amazon SES.
 #
-# Created only when the SES backend is selected and a sender is configured. The application
+# Created only when the SES backend is selected and a sender is configured:
+# by default on production, as no-reply@bot.wwbp.org (locals.tf). The application
 # (api/chatbot/email_backend.py) calls the SES v2 SendEmail API with a raw
 # MIME message and passes the sender explicitly, so the one statement here
 # allows sending from exactly that address and from no other. SendRawEmail is
@@ -115,7 +125,7 @@ resource "aws_iam_role_policy" "eb_instance_application_access" {
 # the account to leave the SES sandbox: both need a person (a DNS record or a
 # confirmation email, and a support request). See README, "Email".
 resource "aws_iam_role_policy" "eb_instance_send_email" {
-  count = local.ses_from_address != "" && var.email_backend == "chatbot.email_backend.SESBackend" ? 1 : 0
+  count = local.ses_from_address != "" && local.email_backend == "chatbot.email_backend.SESBackend" ? 1 : 0
 
   name = "${local.name_prefix}-send-email"
   role = aws_iam_role.eb_instance_role.name

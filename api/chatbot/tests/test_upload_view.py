@@ -6,7 +6,7 @@ Coverage:
   - 400 when filename or content_type is missing
   - 415 when content_type is not an allowed image type
   - 400 when filename contains unsafe characters (path traversal etc.)
-  - 200 returns s3_url and file_url when boto3 succeeds (mocked)
+  - 200 returns s3_url, and no absolute file URL naming the bucket (mocked)
   - 500 when boto3 raises an exception
 """
 
@@ -73,7 +73,7 @@ class TestGetPresignedUrl(TestCase):
 
     # ── Happy path ─────────────────────────────────────────────────────────────
 
-    def test_valid_request_returns_s3_url_and_file_url(self):
+    def test_valid_request_returns_s3_url_only(self):
         mock_s3 = MagicMock()
         mock_s3.generate_presigned_url.return_value = "https://s3.example.com/presigned"
         with (
@@ -92,8 +92,9 @@ class TestGetPresignedUrl(TestCase):
             )
         assert r.status_code == 200
         body = r.json()
-        assert "s3_url" in body
-        assert "file_url" in body
+        # Only the presigned URL. The app refers to uploads by key: an absolute
+        # URL embeds the bucket name and breaks when the data moves bucket.
+        assert set(body) == {"s3_url"}
 
     def test_boto3_failure_returns_500(self):
         with (

@@ -36,22 +36,33 @@ locals {
   # CSRF_TRUSTED_ORIGINS and CORS_ALLOWED_ORIGINS. The CloudFront domain is
   # matched by wildcard rather than named directly, because CloudFront's
   # origin is the Elastic Beanstalk environment and naming it here would make
-  # the two resources depend on each other.
-  frontend_origins = join(",", compact([
+  # the two resources depend on each other. The site URL is listed too: before
+  # the domain moves to this stack's CloudFront, production names its URL
+  # in site_url alone.
+  frontend_origins = join(",", distinct(compact([
     var.domain_name != "" ? "https://${var.domain_name}" : "",
+    local.site_url,
     "https://*.cloudfront.net",
-  ]))
+  ])))
 
   # Where invite and password-reset links point. This cannot fall back to the
   # CloudFront domain: CloudFront's origin is the Elastic Beanstalk
   # environment, so naming the distribution in an EB setting is a cycle.
   site_url = var.site_url != "" ? var.site_url : (var.domain_name != "" ? "https://${var.domain_name}" : "")
 
+  # Email, unless the variables say otherwise: production sends through SES
+  # as the sender settings.py also defaults to (no workflow passes these
+  # variables, and a stack that only logs emails loses every invite); the
+  # test stack prints emails to its log so a rehearsal never writes to real
+  # participants (variables.tf refuses any other backend there).
+  email_backend      = var.email_backend != "" ? var.email_backend : (var.environment == "production" ? "chatbot.email_backend.SESBackend" : "django.core.mail.backends.console.EmailBackend")
+  default_from_email = var.default_from_email != "" ? var.default_from_email : (var.environment == "production" ? "ChatbotLab <no-reply@bot.wwbp.org>" : "")
+
   # The bare address out of "Name <address>". api/chatbot/email_backend.py
   # passes exactly this to SES as FromEmailAddress, and the IAM policy in
   # iam.tf conditions on it.
   # The last bracketed group, trimmed, as Python's parseaddr reads it.
-  ses_from_address = trimspace(try(regex("<([^<>]*)>\\s*$", var.default_from_email)[0], var.default_from_email))
+  ses_from_address = trimspace(try(regex("<([^<>]*)>\\s*$", local.default_from_email)[0], local.default_from_email))
 
   # Use the caller-supplied key if provided; otherwise use the auto-generated
   # one from random_password.django_secret_key (stored in state, stable across
