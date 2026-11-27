@@ -19,6 +19,9 @@ deletion_protection     = true
 backup_retention_period = 7
 force_destroy_buckets   = false
 
+# The web ACL in waf.tf (live production's rules). variables.tf refuses false.
+waf_enabled = true
+
 # Custom domain, e.g. "chatbot.mylab.org". Empty: the CloudFront URL is used.
 # Setting it makes the next apply create a certificate and print the DNS
 # record to add.

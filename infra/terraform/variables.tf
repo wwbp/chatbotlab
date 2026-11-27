@@ -219,3 +219,17 @@ variable "create_github_oidc_provider" {
   type        = bool
   default     = true
 }
+
+# -----------------------------------------------------------------------
+# Edge: CloudFront's web ACL and DNS
+# -----------------------------------------------------------------------
+
+variable "waf_enabled" {
+  description = "Put the web ACL in waf.tf (the live production distribution's rules) in front of CloudFront. It costs about $11 a month plus $0.60 per million requests. Must stay true for production; the test stack may turn it off."
+  type        = bool
+  default     = true
+  validation {
+    condition     = var.waf_enabled || var.environment == "test"
+    error_message = "Only the test stack may turn the web ACL off."
+  }
+}

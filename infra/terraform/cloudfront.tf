@@ -117,6 +117,7 @@ resource "aws_cloudfront_distribution" "frontend" {
   price_class         = "PriceClass_100"
   comment             = "${local.name_prefix} frontend — managed by Terraform"
   aliases             = var.domain_name != "" ? [var.domain_name] : []
+  web_acl_id          = var.waf_enabled ? aws_wafv2_web_acl.edge[0].arn : null
 
   origin {
     # I use the regional domain name (not the global one) to avoid redirect
