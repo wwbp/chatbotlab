@@ -63,6 +63,16 @@ run "raw_participant_photos_expire_after_one_day" {
     ]) == 1
     error_message = "The data bucket must expire uploads/ after 1 day (live production's privacy rule)."
   }
+
+  # Avatars and voice audio are study data: no rule may expire them.
+  assert {
+    condition = alltrue([
+      for r in aws_s3_bucket_lifecycle_configuration.application_data.rule :
+      one(r.filter).prefix == "uploads/"
+      if r.status == "Enabled" && length(r.expiration) > 0
+    ])
+    error_message = "Only uploads/ may expire: every enabled rule with an expiration must filter on exactly uploads/."
+  }
 }
 
 run "data_bucket_is_private_and_encrypted" {
