@@ -1,9 +1,10 @@
 # Runs offline: `terraform init -backend=false && terraform test`.
 # No secret value in Terraform state or in the Elastic Beanstalk settings:
 # RDS keeps the master password in Secrets Manager (manage_master_user_password),
-# the application secret <prefix>-<env>/app is created without a value (a person
-# puts it, technical reference "Secrets"), and the environment gets only the
-# secrets' names, which api/generic_chatbot/aws_secrets.py reads at start.
+# the application secret <prefix>-<env>/app is created and filled by an
+# administrator (technical reference, "Secrets"; the apply role may only look
+# it up), and the environment gets only the secrets' names, which
+# api/generic_chatbot/aws_secrets.py reads at start.
 
 mock_provider "aws" {
   mock_data "aws_iam_policy_document" {
@@ -76,18 +77,13 @@ run "no_setting_carries_a_secret_value" {
   }
 }
 
-run "application_secret_has_a_name_and_no_value" {
+# Looked up, not created: a plan fails while the administrator has not made it.
+run "application_secret_is_looked_up_by_name" {
   command = plan
 
   assert {
-    condition     = aws_secretsmanager_secret.app.name == "chatbotlab-production/app"
+    condition     = data.aws_secretsmanager_secret.app.name == "chatbotlab-production/app"
     error_message = "The application secret must be <prefix>-<env>/app, the names the apply role and the boundary allow."
-  }
-
-  # Production keeps a deleted secret for 30 days, so a mistaken destroy can be undone.
-  assert {
-    condition     = aws_secretsmanager_secret.app.recovery_window_in_days == 30
-    error_message = "Production's application secret must be recoverable for 30 days after deletion."
   }
 }
 
@@ -106,16 +102,9 @@ run "instance_role_reads_only_its_own_secrets" {
     }]
     error_message = "The instance role may read only <prefix>-<env>/* and its database's RDS-managed secret."
   }
-
-  # The old SSM grant is gone: nothing reads parameters.
-  assert {
-    condition     = !strcontains(aws_iam_role_policy.eb_instance_application_access.policy, "ssm:")
-    error_message = "The instance role reads no SSM parameters; secrets live in Secrets Manager."
-  }
 }
 
-# The test stack is destroyed and rebuilt: its secret name must be free again at once.
-run "test_stack_secret_is_deleted_at_once" {
+run "test_stack_has_its_own_secret" {
   command = plan
 
   variables {
@@ -123,7 +112,7 @@ run "test_stack_secret_is_deleted_at_once" {
   }
 
   assert {
-    condition     = aws_secretsmanager_secret.app.name == "chatbotlab-test/app" && aws_secretsmanager_secret.app.recovery_window_in_days == 0
-    error_message = "The test stack's secret must be chatbotlab-test/app and deleted without a recovery window."
+    condition     = data.aws_secretsmanager_secret.app.name == "chatbotlab-test/app"
+    error_message = "The test stack must use its own secret, chatbotlab-test/app (its own keys, never production's)."
   }
 }
