@@ -94,7 +94,7 @@ Survey platform (Qualtrics / REDCap / LimeSurvey)
                          ┌───────────────────────────┼──────────────────────────┐
                          ▼                           ▼                          ▼
                  ┌───────────────┐         ┌──────────────────┐        ┌────────────────┐
-                 │ OpenAI        │         │  MariaDB         │        │  Redis         │
+                 │ OpenAI        │         │  MySQL           │        │  Redis         │
                  │ moderation    │         │  bots, convos,   │        │  conversation  │
                  │ + LLM engines │         │  utterances      │        │  history cache │
                  └───────────────┘         └──────────────────┘        └────────────────┘
@@ -152,7 +152,7 @@ make test-web        # frontend (vitest)
 docker exec chatbotlab-backend-1 pytest chatbot/tests/test_chatbot_view.py -k moderation -v
 ```
 
-Backend tests live in `api/chatbot/tests/` and run against a real MariaDB, created as `test_<DATABASE_NAME>`. Tests marked `integration` make live API calls and are **deselected by default** (see `api/pytest.ini`); run them with `-m integration` and real keys.
+Backend tests live in `api/chatbot/tests/` and run against a real MySQL 8.4, created as `test_<DATABASE_NAME>`. Tests marked `integration` make live API calls and are **deselected by default** (see `api/pytest.ini`); run them with `-m integration` and real keys.
 
 ### Database changes
 
@@ -172,7 +172,7 @@ make migrate
 
 ### CI
 
-Every push runs [`ci.yml`](.github/workflows/ci.yml): backend lint (`ruff check`, `ruff format --check`, `isort --check`), backend tests against MariaDB and Redis, frontend lint, and frontend tests. All four must pass before a deploy workflow will run.
+Every push runs [`ci.yml`](.github/workflows/ci.yml): backend lint (`ruff check`, `ruff format --check`, `isort --check`), backend tests against MySQL 8.4 and Redis, frontend lint, and frontend tests. All four must pass before a deploy workflow will run.
 
 ---
 
@@ -187,7 +187,7 @@ All configuration is environment variables, loaded from `api/.env` and `web/.env
 | `SECRET_KEY` | Django secret key. **Required.** |
 | `DEBUG` | `true` locally, never in production |
 | `DATABASE_*` | Connection Django uses |
-| `MYSQL_*` | Credentials the MariaDB container is created with — must agree with `DATABASE_*` |
+| `MYSQL_*` | Credentials the MySQL container is created with — must agree with `DATABASE_*` |
 | `REDIS_URL` | Conversation history cache |
 | `OPENAI_API_KEY` | LLM replies **and moderation** — moderation silently no-ops without it |
 | `ANTHROPIC_API_KEY` | Optional, only for older bots on Anthropic-direct models. New bots get Claude through Bedrock (`AWS_*`) |
@@ -237,7 +237,7 @@ The Compose file claims the fixed names `db`, `redis`, and `react_app`. Another 
 The database user lacks rights to create Django's test database. A fresh volume grants them automatically; an older one may not. Fix in place:
 
 ```bash
-docker exec db mariadb -uroot -p"$MYSQL_ROOT_PASSWORD" \
+docker exec db mysql -uroot -p"$MYSQL_ROOT_PASSWORD" \
   -e "GRANT ALL PRIVILEGES ON \`test\_%\`.* TO '<DATABASE_USER>'@'%'; FLUSH PRIVILEGES;"
 ```
 
@@ -250,8 +250,11 @@ The user probably does not exist — the development image does not create one. 
 **Moderation never blocks anything**
 Either `MOCK_LLM=true`, or `OPENAI_API_KEY` is unset — both make `moderate_message` return before it calls the API. Global moderation can also be switched off in the admin under *Global Moderation Settings*.
 
+**Local data is gone after the switch from MariaDB to MySQL**
+MySQL cannot open a MariaDB data directory, so the database now lives in a new `mysql-data` volume and starts empty (the backend applies migrations on start; run `make superuser` again). The old data is still in the `chatbotlab_mariadb-data` volume; remove it with `docker volume rm chatbotlab_mariadb-data` once you no longer need it.
+
 **Database connection errors after changing `.env`**
-The MariaDB user is created only on first initialisation. Run `make reset` to rebuild the volume — this deletes local data.
+The MySQL user is created only on first initialisation. Run `make reset` to rebuild the volume — this deletes local data.
 
 ---
 

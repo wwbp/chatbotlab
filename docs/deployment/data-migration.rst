@@ -23,12 +23,14 @@ Facts to establish first
 
 Do these days before the window. Each one can stop the plan.
 
-1. **The engines must match.** Terraform creates MariaDB 10.11 (``infra/terraform/rds.tf``). The engine of the existing database is not recorded in this repository. Check both environments::
+1. **The engines must match.** The live database is RDS MySQL 8.0 (database ``ebdb``, master user ``ebroot``); Terraform creates MySQL 8.4 (``infra/terraform/rds.tf``, database ``chatbot_db``, user ``chatbot_user``). Confirm nothing has changed::
 
       aws rds describe-db-instances \
         --query 'DBInstances[].[DBInstanceIdentifier,Engine,EngineVersion,AllocatedStorage]' --output table
 
-   The tool refuses to copy between MySQL and MariaDB (they store JSON differently and share no collations, so the copy could not be proven unchanged). If the old database is MySQL, change the Terraform engine to the same MySQL major version before going further. A MariaDB target older than the source is refused unless ``--allow-version-downgrade`` is passed to ``preflight``.
+   The tool refuses to copy between MySQL and MariaDB (they store JSON differently and share no collations, so the copy could not be proven unchanged). MySQL 8.0 into 8.4 is tested in CI (``Data migration test (mysql:8.0 to mysql:8.4)``), including the cold-start verify after a server restart. A target older than the source is refused unless ``--allow-version-downgrade`` is passed to ``preflight``.
+
+   The database names differ and need not match: set ``MIG_SOURCE_DATABASE=ebdb`` and ``MIG_TARGET_DATABASE=chatbot_db``. The new stack's parameter group sets ``utf8mb4`` / ``utf8mb4_0900_ai_ci``, MySQL's default and what a database on live's default parameter group has. ``preflight``'s ``database_defaults`` line shows both sides; if the source differs, ``restore`` changes the target's default to match before loading.
 
 2. **Where the tool runs.** It needs to reach both databases on port 3306 at the same time, from a machine with Python 3.11+ and the MariaDB client (``mariadb``, ``mariadb-dump``); the backend Docker image has both. Both databases are in private subnets, so this is usually two port-forwards (SSM or SSH) through an instance of each environment. This path is **not** proven by the tests; prove it in the test-stack rehearsal with ``preflight --dry-run``.
 
