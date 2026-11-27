@@ -299,10 +299,14 @@ isolated by policy:
   stay allowed, and deleting fails while one is in use;
 - **DNS and WAF**: the zone (`wwbp.org`) is shared with the live
   deployment, SES (DKIM, MAIL FROM, DMARC) and other projects. Each apply
-  role may change only A, AAAA and CNAME records named
-  `<PREFIX>-<env>-origin.<zone>`, production also `<SITE_DOMAIN>`, and their
-  ACM validation records (`_` + 32 characters + `.<name>`, which leaves
-  `_dmarc` and `_domainkey` names out); it can read the rest. Web ACLs:
+  role may change records only in that one hosted zone (`<ZONE_ID>`), only
+  A, AAAA and CNAME, and only named exactly `<PREFIX>-<env>-origin.<ZONE_NAME>`,
+  production also `<SITE_DOMAIN>`, and their ACM validation records
+  (`_` + 32 characters + `.<name>`; a Deny refuses such a label with a dot
+  in it, so `_dmarc` and `_domainkey` names stay out); it can read the
+  rest. IAM cannot see `cutover_dns`: production's role may change the
+  `<SITE_DOMAIN>` records whenever it applies, and the variable is what
+  holds the change back to the cutover. Web ACLs:
   only `<PREFIX>-<env>-*`, never the live distributions' `CreatedByCloudFront-*`.
   The roles' existing policies need this added (re-create them from
   `bootstrap/iam/` with the `sed` below) before the first apply of this
@@ -352,12 +356,14 @@ within the test role's limits. Read the branch before you approve.
 
 The policies are committed in `bootstrap/iam/` and checked by
 `tests/check_workflows.py`. Replace `<ACCOUNT_ID>` (`TF_AWS_ACCOUNT_ID`), `<PREFIX>` (the value of `TF_PROJECT_PREFIX`),
-`<SES_FROM_DOMAIN>` and `<SITE_DOMAIN>` (production's public name, `bot.wwbp.org`) before using them, for example:
+`<SES_FROM_DOMAIN>`, `<SITE_DOMAIN>` (production's public name, `bot.wwbp.org`), `<ZONE_NAME>` (the Route 53 zone,
+`dns_zone_name`: `wwbp.org`) and `<ZONE_ID>` (its hosted zone ID: `aws route53 list-hosted-zones-by-name --dns-name wwbp.org`) before using them, for example:
 
 ```bash
 for f in bootstrap/iam/*.json; do
   sed -e "s/<ACCOUNT_ID>/$ACCOUNT_ID/g" -e "s/<PREFIX>/$PREFIX/g" \
-      -e "s/<SES_FROM_DOMAIN>/$SES_FROM_DOMAIN/g" -e "s/<SITE_DOMAIN>/$SITE_DOMAIN/g" "$f" > "/tmp/$(basename "$f")"
+      -e "s/<SES_FROM_DOMAIN>/$SES_FROM_DOMAIN/g" -e "s/<SITE_DOMAIN>/$SITE_DOMAIN/g" \
+      -e "s/<ZONE_NAME>/$ZONE_NAME/g" -e "s/<ZONE_ID>/$ZONE_ID/g" "$f" > "/tmp/$(basename "$f")"
 done
 ```
 

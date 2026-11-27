@@ -94,12 +94,12 @@
       "Sid": "OwnDnsRecords",
       "Effect": "Allow",
       "Action": "route53:ChangeResourceRecordSets",
-      "Resource": "arn:aws:route53:::hostedzone/*",
+      "Resource": "arn:aws:route53:::hostedzone/<ZONE_ID>",
       "Condition": {
         "ForAllValues:StringLike": {
           "route53:ChangeResourceRecordSetsNormalizedRecordNames": [
-            "<PREFIX>-production-origin.*",
-            "_????????????????????????????????.<PREFIX>-production-origin.*",
+            "<PREFIX>-production-origin.<ZONE_NAME>",
+            "_????????????????????????????????.<PREFIX>-production-origin.<ZONE_NAME>",
             "<SITE_DOMAIN>",
             "_????????????????????????????????.<SITE_DOMAIN>"
           ]
@@ -109,6 +109,20 @@
             "A",
             "AAAA",
             "CNAME"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyDottedValidationNames",
+      "Effect": "Deny",
+      "Action": "route53:ChangeResourceRecordSets",
+      "Resource": "arn:aws:route53:::hostedzone/<ZONE_ID>",
+      "Condition": {
+        "ForAnyValue:StringLike": {
+          "route53:ChangeResourceRecordSetsNormalizedRecordNames": [
+            "_*.*.<PREFIX>-production-origin.<ZONE_NAME>",
+            "_*.*.<SITE_DOMAIN>"
           ]
         }
       }

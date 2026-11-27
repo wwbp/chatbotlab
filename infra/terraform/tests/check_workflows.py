@@ -1095,7 +1095,8 @@ check(
 # at setup time.
 def iam_size(path):
     text = json.dumps(json.loads(path.read_text()), separators=(",", ":"))
-    return len(text.replace("<PREFIX>", "x" * 24).replace("<SES_FROM_DOMAIN>", "x" * 30).replace("<SITE_DOMAIN>", "x" * 30))
+    return len(text.replace("<PREFIX>", "x" * 24).replace("<SES_FROM_DOMAIN>", "x" * 30).replace("<SITE_DOMAIN>", "x" * 30)
+            .replace("<ZONE_NAME>", "x" * 30).replace("<ZONE_ID>", "x" * 32))
 
 
 for path in sorted(IAM.glob("*.json")) if IAM.exists() else []:
@@ -1371,38 +1372,59 @@ check(
 # (<SITE_DOMAIN>, at the cutover) and their ACM validation records
 # (_<32 hex>.<name>), and only those record types.
 ACM_LABEL = "_" + "0123456789abcdef" * 2
-ZONE_ARN = "arn:aws:route53:::hostedzone/Z09486261NJRKCTU00NAK"
+ZONE_ARN = "arn:aws:route53:::hostedzone/<ZONE_ID>"
+OTHER_ZONE_ARN = "arn:aws:route53:::hostedzone/Z0OTHERPROJECTZONE"
 
 
-def changes_record(policy, name, rtype="CNAME"):
+def _record_condition_matches(cond, name, rtype):
+    """Evaluate the record-name and record-type condition keys for a change of
+    one record. None when the statement has a condition this does not know."""
+    known = {"ForAllValues:StringLike", "ForAnyValue:StringLike", "ForAllValues:StringEquals"}
+    if set(cond) - known:
+        return None
+    ok = True
+    for op, values in cond.items():
+        for key, patterns in values.items():
+            value = {"route53:ChangeResourceRecordSetsNormalizedRecordNames": name,
+                     "route53:ChangeResourceRecordSetsRecordTypes": rtype}.get(key)
+            if value is None:
+                return None
+            ok = ok and any(fnmatchcase(value, x) for x in as_list(patterns))
+    return ok
+
+
+def changes_record(policy, name, rtype="CNAME", zone=ZONE_ARN):
     """True when an Allow lets route53:ChangeResourceRecordSets change `name`
-    (NormalizedRecordNames / RecordTypes conditions evaluated; an Allow
-    without them allows every name) and no unconditional Deny refuses it."""
-    for st in matching(policy, "Allow", "route53:ChangeResourceRecordSets", ZONE_ARN):
-        cond = st.get("Condition", {})
-        like = cond.get("ForAllValues:StringLike", {})
-        names = as_list(like.get("route53:ChangeResourceRecordSetsNormalizedRecordNames", ["*"]))
-        types = as_list(cond.get("ForAllValues:StringEquals", {}).get("route53:ChangeResourceRecordSetsRecordTypes", ["*"]))
-        if set(cond) - {"ForAllValues:StringLike", "ForAllValues:StringEquals"}:
-            continue  # unknown condition: treat as not granting (checked below)
-        if any(fnmatchcase(name, n) for n in names) and any(fnmatchcase(rtype, t) for t in types):
-            return not denies(policy, "route53:ChangeResourceRecordSets", ZONE_ARN)
-    return False
+    in `zone` and no Deny (conditions evaluated) refuses it."""
+    action = "route53:ChangeResourceRecordSets"
+    # A Deny conditioned on other keys (resource tags) does not concern
+    # record names: the shared zone carries none of those tags.
+    if any(_record_condition_matches(st.get("Condition", {}), name, rtype)
+           for st in matching(policy, "Deny", action, zone)):
+        return False
+    return any(_record_condition_matches(st.get("Condition", {}), name, rtype)
+               for st in matching(policy, "Allow", action, zone))
 
 
 for role in ROLES:
     environment = role.split("-", 1)[1]
     policy = policies[role]
     fname = f"{role}-permissions"
-    origin = f"<PREFIX>-{environment}-origin.wwbp.org"
+    origin = f"<PREFIX>-{environment}-origin.<ZONE_NAME>"
     own = [origin, f"{ACM_LABEL}.{origin}"] + (["<SITE_DOMAIN>", f"{ACM_LABEL}.<SITE_DOMAIN>"] if environment == "production" else [])
     for name in own:
         check(changes_record(policy, name), f"{fname}.json: must allow route53:ChangeResourceRecordSets on its own record {name}")
+        check(not changes_record(policy, name, zone=OTHER_ZONE_ARN),
+              f"{fname}.json: route53 changes must be limited to the one hosted zone <ZONE_ID>, not {OTHER_ZONE_ARN}")
     check(environment != "production" or changes_record(policy, "<SITE_DOMAIN>", "AAAA"),
           f"{fname}.json: must allow the site's AAAA alias record")
-    foreign = ["wwbp.org", "dev.bot.wwbp.org", "_dmarc.<SITE_DOMAIN>", "mail.<SITE_DOMAIN>",
-               "gclnjpce._domainkey.<SITE_DOMAIN>", f"x.{origin}", "meetlab.wwbp.org",
-               *(f"<PREFIX>-{o}-origin.wwbp.org" for o in OTHER[environment])]
+    dotted_label = "_0123456789abcdef.0123456789abcde"  # 32 characters after "_", one a dot
+    foreign = ["<ZONE_NAME>", "dev.bot.<ZONE_NAME>", "_dmarc.<SITE_DOMAIN>", "mail.<SITE_DOMAIN>",
+               "gclnjpce._domainkey.<SITE_DOMAIN>", f"x.{origin}", "meetlab.<ZONE_NAME>",
+               f"<PREFIX>-{environment}-origin.<SITE_DOMAIN>", f"<PREFIX>-{environment}-origin.meetlab.<ZONE_NAME>",
+               f"{ACM_LABEL}.<PREFIX>-{environment}-origin.meetlab.<ZONE_NAME>",
+               f"{dotted_label}.{origin}", f"{dotted_label}.<SITE_DOMAIN>",
+               *(f"<PREFIX>-{o}-origin.<ZONE_NAME>" for o in OTHER[environment])]
     if environment == "test":
         foreign += ["<SITE_DOMAIN>", f"{ACM_LABEL}.<SITE_DOMAIN>"]
     for name in foreign:
