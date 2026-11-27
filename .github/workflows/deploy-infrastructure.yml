@@ -43,13 +43,14 @@ name: Deploy Infrastructure
 #     TF_PROJECT_PREFIX     Name prefix for every AWS resource (var.project_name).
 #                           No default: a wrong value points Terraform at the
 #                           wrong state.
-#     TF_PROD_ACCOUNT_ID    AWS account of production.
-#     TF_TEST_ACCOUNT_ID    The lab's separate TEST account, where the test
-#                           stack lives. Must differ from TF_PROD_ACCOUNT_ID.
-#                           The job assumes
-#                           <TF_PROJECT_PREFIX>-terraform-apply-<environment>
-#                           in the account of the chosen environment, and
-#                           refuses credentials from any other account.
+#     TF_AWS_ACCOUNT_ID     The one AWS account that holds both stacks (and
+#                           the hand-built live deployment, and other lab
+#                           projects). The job assumes
+#                           <TF_PROJECT_PREFIX>-terraform-apply-production or
+#                           <TF_PROJECT_PREFIX>-terraform-apply-test, by
+#                           environment, and refuses credentials from any
+#                           other account. Each role is denied the other
+#                           environment's names, tags and state key.
 #
 #   Environment secrets (Settings → Environments → production)
 #     GH_PAT                Token that can write repository secrets. Needed
@@ -226,32 +227,29 @@ jobs:
           terraform_wrapper: false
 
       # ── 4. AWS credentials (short-lived, GitHub OIDC) ─────────────────────────
-      # Production and test live in different AWS accounts. The account comes
-      # from the environment, here and nowhere else, and the credentials
-      # action refuses credentials from any other account.
+      # Production and test live in the same AWS account. The role comes from
+      # the environment, here and nowhere else, and the credentials action
+      # refuses credentials from any other account.
       - name: Choose the AWS account
         id: aws
         env:
-          TF_PROD_ACCOUNT_ID: ${{ secrets.TF_PROD_ACCOUNT_ID }}
-          TF_TEST_ACCOUNT_ID: ${{ secrets.TF_TEST_ACCOUNT_ID }}
-          TF_PROJECT_PREFIX:  ${{ secrets.TF_PROJECT_PREFIX }}
+          TF_AWS_ACCOUNT_ID: ${{ secrets.TF_AWS_ACCOUNT_ID }}
+          TF_PROJECT_PREFIX: ${{ secrets.TF_PROJECT_PREFIX }}
         run: |
+          # One account holds both environments. The role keeps them apart:
+          # each is denied the other's names, tags and state key.
           case "$ENVIRONMENT" in
-            production) ACCOUNT="$TF_PROD_ACCOUNT_ID" ;;
-            test)       ACCOUNT="$TF_TEST_ACCOUNT_ID" ;;
+            production) ROLE="${TF_PROJECT_PREFIX}-terraform-apply-production" ;;
+            test)       ROLE="${TF_PROJECT_PREFIX}-terraform-apply-test" ;;
             *)          echo "::error::Unknown environment '$ENVIRONMENT'"; exit 1 ;;
           esac
-          if [[ ! "$ACCOUNT" =~ ^[0-9]{12}$ ]]; then
-            echo "::error::The AWS account ID of $ENVIRONMENT is not set (repository secret TF_PROD_ACCOUNT_ID or TF_TEST_ACCOUNT_ID, 12 digits)."
-            exit 1
-          fi
-          if [[ "$TF_PROD_ACCOUNT_ID" == "$TF_TEST_ACCOUNT_ID" ]]; then
-            echo "::error::TF_TEST_ACCOUNT_ID equals TF_PROD_ACCOUNT_ID. The test stack must live in the lab's separate TEST account."
+          if [[ ! "$TF_AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
+            echo "::error::The repository secret TF_AWS_ACCOUNT_ID (12 digits) is not set."
             exit 1
           fi
           {
-            echo "account=$ACCOUNT"
-            echo "role=arn:aws:iam::${ACCOUNT}:role/${TF_PROJECT_PREFIX}-terraform-apply-${ENVIRONMENT}"
+            echo "account=$TF_AWS_ACCOUNT_ID"
+            echo "role=arn:aws:iam::${TF_AWS_ACCOUNT_ID}:role/${ROLE}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials

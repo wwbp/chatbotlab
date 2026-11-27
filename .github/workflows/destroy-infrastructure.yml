@@ -9,10 +9,18 @@ name: Destroy Infrastructure
 #
 # Manual only.
 #
-# test (the on-demand stack in the lab's TEST account): type "test" and get
-#   the run approved in the test GitHub Environment. Nothing else is asked,
-#   and NOTHING IS BACKED UP: its data bucket and database are deleted for
-#   good. It holds no study data.
+# test (the on-demand stack): type "test" and get the run approved in the
+#   test GitHub Environment. Nothing else is asked, and NOTHING IS BACKED UP:
+#   its data bucket and database are deleted for good. It holds no study data
+#   (a rehearsal's restored copy is made by hand, outside its state; delete
+#   that by hand too).
+#
+#   The test stack shares its AWS account with production, the hand-built
+#   live deployment and other lab projects. Only the test role signs in for
+#   a test run, and that role is denied everything named or tagged
+#   production, the live resources, and other projects (it is allowed only
+#   <prefix>-test-* names and Environment=test tags). Buckets are emptied
+#   only under <prefix>-test-.
 #
 # production: type "production", "destroy production" and "destroy data",
 #   tick allow_production, run from main, and get the run approved in the
@@ -23,7 +31,7 @@ name: Destroy Infrastructure
 # A wrong or mistyped value stops the run before it signs in to AWS.
 #
 # Secrets: the same ones the apply job of Deploy Infrastructure uses
-# (TF_PROD_ACCOUNT_ID / TF_TEST_ACCOUNT_ID, TF_PROJECT_PREFIX, DB_PASSWORD,
+# (TF_AWS_ACCOUNT_ID, TF_PROJECT_PREFIX, DB_PASSWORD,
 # ADMIN_PANEL_PASSWORD, …).
 # AWS access is by GitHub OIDC; there are no stored AWS keys.
 
@@ -122,33 +130,29 @@ jobs:
           terraform_wrapper: false
 
       # ── 4. AWS credentials (short-lived, GitHub OIDC) ─────────────────────────
-      # The same account choice as Deploy Infrastructure: production and test
-      # live in different AWS accounts, and credentials from any other account
-      # are refused.
+      # The same role choice as Deploy Infrastructure: one account, one role
+      # per environment, and credentials from any other account are refused.
       - name: Choose the AWS account
         id: aws
         env:
-          ENVIRONMENT:        ${{ inputs.environment }}
-          TF_PROD_ACCOUNT_ID: ${{ secrets.TF_PROD_ACCOUNT_ID }}
-          TF_TEST_ACCOUNT_ID: ${{ secrets.TF_TEST_ACCOUNT_ID }}
-          TF_PROJECT_PREFIX:  ${{ secrets.TF_PROJECT_PREFIX }}
+          ENVIRONMENT:       ${{ inputs.environment }}
+          TF_AWS_ACCOUNT_ID: ${{ secrets.TF_AWS_ACCOUNT_ID }}
+          TF_PROJECT_PREFIX: ${{ secrets.TF_PROJECT_PREFIX }}
         run: |
+          # One account holds both environments. The role keeps them apart:
+          # each is denied the other's names, tags and state key.
           case "$ENVIRONMENT" in
-            production) ACCOUNT="$TF_PROD_ACCOUNT_ID" ;;
-            test)       ACCOUNT="$TF_TEST_ACCOUNT_ID" ;;
+            production) ROLE="${TF_PROJECT_PREFIX}-terraform-apply-production" ;;
+            test)       ROLE="${TF_PROJECT_PREFIX}-terraform-apply-test" ;;
             *)          echo "::error::Unknown environment '$ENVIRONMENT'"; exit 1 ;;
           esac
-          if [[ ! "$ACCOUNT" =~ ^[0-9]{12}$ ]]; then
-            echo "::error::The AWS account ID of $ENVIRONMENT is not set (repository secret TF_PROD_ACCOUNT_ID or TF_TEST_ACCOUNT_ID, 12 digits)."
-            exit 1
-          fi
-          if [[ "$TF_PROD_ACCOUNT_ID" == "$TF_TEST_ACCOUNT_ID" ]]; then
-            echo "::error::TF_TEST_ACCOUNT_ID equals TF_PROD_ACCOUNT_ID. The test stack must live in the lab's separate TEST account."
+          if [[ ! "$TF_AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
+            echo "::error::The repository secret TF_AWS_ACCOUNT_ID (12 digits) is not set."
             exit 1
           fi
           {
-            echo "account=$ACCOUNT"
-            echo "role=arn:aws:iam::${ACCOUNT}:role/${TF_PROJECT_PREFIX}-terraform-apply-${ENVIRONMENT}"
+            echo "account=$TF_AWS_ACCOUNT_ID"
+            echo "role=arn:aws:iam::${TF_AWS_ACCOUNT_ID}:role/${ROLE}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials
@@ -423,7 +427,7 @@ jobs:
             else
               echo "- RDS final snapshot: none (the test stack is configured without one)"
             fi
-            echo "- The Terraform state bucket \`${PREFIX}-tfstate-${ACCOUNT_ID}\`. It holds this account's state file and, for production, the backups above."
+            echo "- The Terraform state bucket \`${PREFIX}-tfstate-${ACCOUNT_ID}\`. It holds both environments' state files and, for production, the backups above."
             echo "- The shared GitHub OIDC provider (kept: no Terraform stack owns it)."
             echo ""
             echo "### What was deleted"
