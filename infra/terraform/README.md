@@ -121,7 +121,7 @@ Open `terraform.tfvars` and fill in every value:
 | `openai_api_key` | platform.openai.com → API keys (or leave empty and use Anthropic) |
 | `anthropic_api_key` | console.anthropic.com → API keys (or leave empty and use OpenAI) |
 | `db_password` | Make up a strong password (letters + numbers, min 8 chars) |
-| `admin_panel_password` | Make up a password — you log into `/api/admin/` with it as user `admin` |
+| `admin_panel_password` | Test stack only: make up a password — you log into `/api/admin/` with it as user `admin`. Production creates no account at boot (its database has the real admins) |
 | `project_name` | A short prefix for every AWS resource (must match `TF_PROJECT_PREFIX`) |
 | `environment` | `"test"` or `"production"` |
 

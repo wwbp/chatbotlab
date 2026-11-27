@@ -248,15 +248,15 @@ Terraform sets the application's environment variables on the Elastic Beanstalk 
      -
    * - ``GUNICORN_WORKERS``
      - ``4``
-     - Async workers, two per vCPU of a ``t3.small``
+     - Async workers, two per vCPU of a ``t3.small``. Database connections follow concurrent requests, not workers (``CONN_MAX_AGE = 0``)
    * - ``MOCK_LLM``
      - ``false``
      - Load-test switch, pinned off
    * - ``DJANGO_SUPERUSER_USERNAME``, ``_EMAIL``, ``_PASSWORD``
-     - ``admin``, ``admin@example.com``, ``admin_panel_password``
-     - First boot only (``api/entrypoint.sh``)
+     - not set
+     - Test stack only: ``admin``, ``admin@example.com``, ``admin_panel_password``. ``api/entrypoint.sh`` tries to create this user on every boot while the password is set
 
-**Read by the application, not set on purpose** (the reasons are in ``api/env_vars.txt``): ``AWS_ACCESS_KEY_ID`` and ``AWS_SECRET_ACCESS_KEY`` (the instance role gives AWS access; static keys would override it), ``MOCK_LLM_P50_MS`` and ``MOCK_MODERATION_P50_MS`` (only with ``MOCK_LLM`` on), ``CHATBOT_AVATAR_PROMPT`` and ``CHATBOT_CONTROL_IMAGE`` (live production does not set them either), ``FRONTEND_URL``, ``MODERATION_VALUES_FOR_BLOCKED``, ``DJANGO_SETTINGS_MODULE``.
+**Read by the application, not set on purpose** (the reasons are in ``api/env_vars.txt``): ``AWS_ACCESS_KEY_ID`` and ``AWS_SECRET_ACCESS_KEY`` (the instance role gives AWS access; static keys would override it), ``MOCK_LLM_P50_MS`` and ``MOCK_MODERATION_P50_MS`` (only with ``MOCK_LLM`` on), ``DJANGO_SUPERUSER_*`` (production creates no account at boot; its copied database has the real admins; run ``manage.py createsuperuser`` once if ever needed), ``CHATBOT_AVATAR_PROMPT`` and ``CHATBOT_CONTROL_IMAGE`` (live production does not set them either), ``FRONTEND_URL``, ``MODERATION_VALUES_FOR_BLOCKED``, ``DJANGO_SETTINGS_MODULE``.
 
 **Set on the hand-built environments, dropped on purpose** because no code reads them: ``BASE_URL`` (``SITE_URL`` replaced it), ``CORS_ALLOW_CREDENTIALS``, ``REACT_APP_API_URL`` (the front end reads ``VITE_API_URL`` at build time). Terraform no longer sets ``DATABASE_ENGINE`` for the same reason.
 
