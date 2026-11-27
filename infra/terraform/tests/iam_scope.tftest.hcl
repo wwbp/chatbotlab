@@ -190,7 +190,9 @@ run "test_database_is_private_and_encrypted" {
 }
 
 # The app calls converse/converse_stream (bedrock_engine.py, check_models,
-# validate_bedrock_models), so Converse* must be granted, not just InvokeModel*.
+# validate_bedrock_models). Converse/ConverseStream are authorised by
+# InvokeModel/InvokeModelWithResponseStream; the Converse* entries are kept in
+# case AWS adds them as separate actions. Never drop InvokeModel*.
 # Resources: Anthropic foundation models in any region (a us. cross-region
 # profile routes to us-east-1/us-east-2/us-west-2 and IAM checks the model ARN
 # in the destination region) plus this account's us.anthropic.* inference

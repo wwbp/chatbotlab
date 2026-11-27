@@ -91,7 +91,12 @@ resource "aws_iam_role_policy" "eb_instance_application_access" {
         # inference profiles. A profile call is authorised on the profile ARN
         # (in this region) and on the foundation model in whichever us-*
         # region it routes to, hence the region wildcard on foundation-model.
-        # Model access is an account setting, so no aws-marketplace actions.
+        # Converse/ConverseStream are authorised by InvokeModel/
+        # InvokeModelWithResponseStream; the Converse* entries are kept in
+        # case AWS adds them as separate actions. Never drop InvokeModel*.
+        # Model access is an account setting, so no aws-marketplace actions:
+        # a model never used in this account is enabled by an admin invoking
+        # it once (first-call marketplace subscription), not by this role.
         # A model from another provider needs its family added here.
         Sid    = "InvokeBedrockModels"
         Effect = "Allow"
