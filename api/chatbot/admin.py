@@ -1293,6 +1293,16 @@ class BotAdmin(FormulaSafeExportMixin, HistoryAdmin):
         ),
     )
 
+    def get_fieldsets(self, request, obj=None):
+        """On a bot with conversations, say why it can't be deleted or renamed."""
+        fieldsets = super().get_fieldsets(request, obj)
+        n = obj.conversation_count() if obj else 0
+        if not n:
+            return fieldsets
+        (title, options), *rest = fieldsets
+        note = format_html("<strong>{}</strong>", Bot.in_use_message(n))
+        return ((title, {**options, "description": note}), *rest)
+
     def save_model(self, request, obj, form, change):
         """Handle avatar image upload and processing"""
         # Save the bot first
