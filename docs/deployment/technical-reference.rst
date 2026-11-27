@@ -210,9 +210,9 @@ Terraform sets the application's environment variables on the Elastic Beanstalk 
    * - ``BACKEND_ENVIRONMENT``
      - ``production`` (``test`` on the test stack)
      -
-   * - ``SECRET_KEY``
-     - generated, kept in state
-     - Moves to Secrets Manager in a later change
+   * - ``APP_SECRET_ID``
+     - ``<prefix>-production/app``
+     - The name of the application secret, not a value (see `Secrets`_)
    * - ``ALLOWED_HOSTS``
      - ``*``
      -
@@ -228,9 +228,12 @@ Terraform sets the application's environment variables on the Elastic Beanstalk 
    * - ``DEFAULT_FROM_EMAIL``
      - ``ChatbotLab <no-reply@bot.wwbp.org>``
      - The instance role may send as this address only
-   * - ``DATABASE_HOST``, ``DATABASE_PORT``, ``DATABASE_NAME``, ``DATABASE_USER``, ``DATABASE_PASSWORD``
+   * - ``DATABASE_HOST``, ``DATABASE_PORT``, ``DATABASE_NAME``
      - the Terraform RDS instance
      -
+   * - ``DATABASE_SECRET_ID``
+     - ARN of ``rds!db-<id>``
+     - The secret RDS keeps the master user in; the application reads ``DATABASE_USER`` and ``DATABASE_PASSWORD`` from it
    * - ``CONN_MAX_AGE``
      - ``0``
      - See gotcha 7
@@ -243,9 +246,6 @@ Terraform sets the application's environment variables on the Elastic Beanstalk 
    * - ``AWS_REGION``
      - ``aws_region``
      -
-   * - ``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY``, ``SURVEY_INGEST_TOKEN``
-     - GitHub secrets
-     -
    * - ``GUNICORN_WORKERS``
      - ``4``
      - Async workers, two per vCPU of a ``t3.small``. Database connections follow concurrent requests, not workers (``CONN_MAX_AGE = 0``)
@@ -256,9 +256,53 @@ Terraform sets the application's environment variables on the Elastic Beanstalk 
      - not set
      - Test stack only: ``admin``, ``admin@example.com``, ``admin_panel_password``. ``api/entrypoint.sh`` tries to create this user on every boot while the password is set
 
-**Read by the application, not set on purpose** (the reasons are in ``api/env_vars.txt``): ``AWS_ACCESS_KEY_ID`` and ``AWS_SECRET_ACCESS_KEY`` (the instance role gives AWS access; static keys would override it), ``MOCK_LLM_P50_MS`` and ``MOCK_MODERATION_P50_MS`` (only with ``MOCK_LLM`` on), ``DJANGO_SUPERUSER_*`` (production creates no account at boot; its copied database has the real admins; run ``manage.py createsuperuser`` once if ever needed), ``CHATBOT_AVATAR_PROMPT`` and ``CHATBOT_CONTROL_IMAGE`` (live production does not set them either), ``FRONTEND_URL``, ``MODERATION_VALUES_FOR_BLOCKED``, ``DJANGO_SETTINGS_MODULE``.
+**Read by the application, not set on purpose** (the reasons are in ``api/env_vars.txt``): ``AWS_ACCESS_KEY_ID`` and ``AWS_SECRET_ACCESS_KEY`` (the instance role gives AWS access; static keys would override it), ``MOCK_LLM_P50_MS`` and ``MOCK_MODERATION_P50_MS`` (only with ``MOCK_LLM`` on), ``DJANGO_SUPERUSER_*`` (production creates no account at boot; its copied database has the real admins; run ``manage.py createsuperuser`` once if ever needed), ``CHATBOT_AVATAR_PROMPT`` and ``CHATBOT_CONTROL_IMAGE`` (live production does not set them either), ``FRONTEND_URL``, ``MODERATION_VALUES_FOR_BLOCKED``, ``DJANGO_SETTINGS_MODULE``; and the secrets, ``SECRET_KEY``, ``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY``, ``SURVEY_INGEST_TOKEN``, ``DATABASE_USER`` and ``DATABASE_PASSWORD``, which come from Secrets Manager (`Secrets`_).
 
 **Set on the hand-built environments, dropped on purpose** because no code reads them: ``BASE_URL`` (``SITE_URL`` replaced it), ``CORS_ALLOW_CREDENTIALS``, ``REACT_APP_API_URL`` (the front end reads ``VITE_API_URL`` at build time). Terraform no longer sets ``DATABASE_ENGINE`` for the same reason.
+
+
+Secrets
+-------
+
+No secret value is in Terraform state, the plan, a workflow or the Elastic Beanstalk configuration. The environment gets only the secrets' names, and ``api/generic_chatbot/aws_secrets.py`` reads the values once per process at start, with the instance role:
+
+- ``APP_SECRET_ID`` names ``<prefix>-<environment>/app``, one JSON object with ``SECRET_KEY`` (required) and, when used, ``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY`` and ``SURVEY_INGEST_TOKEN``. Any other key stops the app (a typo would otherwise switch a provider off silently).
+- ``DATABASE_SECRET_ID`` names the secret RDS keeps the master user in (``manage_master_user_password`` in ``rds.tf``). RDS rotates it every 7 days and the old password stops working at once; the app's MySQL backend (``api/generic_chatbot/db/base.py``) reads the secret again when a connection is refused with error 1045.
+
+When a name is set, its secret is required: a missing secret or value, or no permission, stops the app at start (the deploy then fails its health check). Without the names (local development, CI, and the hand-built live environment until the cutover) the same variables are read from the environment.
+
+**Who can do what.** An administrator creates and fills ``<prefix>-<environment>/app``. The Terraform apply roles may only describe it, and are explicitly denied every call that writes, restores, deletes or reads a value (``bootstrap/iam/apply-*-guardrails.json``, ``DenySecretValueCalls``): ``CreateSecret`` and ``UpdateSecret`` take a value, so a workflow allowed them could replace ``SECRET_KEY`` and forge staff sessions. They may create and tag ``rds!db-*`` only through RDS (``aws:ViaAWSService``). The instance role may read ``<prefix>-<environment>/*`` and its own database's RDS secret, nothing else (``iam.tf``; the permissions boundary allows no more). The secret is not part of the stack, so Destroy Infrastructure leaves it, and the test stack keeps its keys between rehearsals.
+
+**The test stack uses its own keys**: ``<prefix>-test/app`` holds its own ``SECRET_KEY`` and LLM keys scoped to it (a separate project or key with a low spending limit), never production's.
+
+Create and fill the secret (once per environment, before its first apply; the plan fails until it exists). As an administrator, in bash, write the values to a file only you can read, outside the repository, so they never appear on a command line or in shell history. Generate a new ``SECRET_KEY`` with ``python3 -c 'import secrets; print(secrets.token_urlsafe(50))'`` (production's comes from the live environment instead: runbook, step 10)::
+
+    umask 077
+    cat > ~/app-secret.json    # paste the JSON below with real values, then Ctrl-D
+    {"SECRET_KEY": "...", "OPENAI_API_KEY": "...", "ANTHROPIC_API_KEY": "...", "SURVEY_INGEST_TOKEN": "..."}
+
+    aws secretsmanager create-secret --name "<prefix>-<environment>/app" \
+      --description "ChatbotLab application secrets (JSON)" \
+      --tags Key=Project,Value=<prefix> Key=Environment,Value=<environment> \
+      --secret-string file://$HOME/app-secret.json
+    rm ~/app-secret.json
+
+Leave out the keys a deployment does not use (no ``SURVEY_INGEST_TOKEN`` means the survey endpoint refuses everything).
+
+Rotate a key (or change any value): rewrite the JSON without printing it, then restart the app so every process reads it again::
+
+    read -rs NEW_VALUE && export NEW_VALUE    # type the new key, Enter
+    aws secretsmanager get-secret-value --secret-id "<prefix>-<environment>/app" \
+        --query SecretString --output text \
+      | jq -c '.OPENAI_API_KEY = env.NEW_VALUE' \
+      | aws secretsmanager put-secret-value --secret-id "<prefix>-<environment>/app" \
+          --secret-string file:///dev/stdin
+    unset NEW_VALUE
+    aws elasticbeanstalk restart-app-server --environment-name <prefix>-<environment>-env
+
+A new ``SECRET_KEY`` signs everyone out and invalidates reset links. The database password needs nothing: ``aws rds modify-db-instance --db-instance-identifier <prefix>-<environment>-database --rotate-master-user-password --apply-immediately`` rotates it now, and the app follows.
+
+Before this change, Terraform state held the database password, a generated ``SECRET_KEY`` and the API keys, and the state bucket keeps old versions. After the first apply with this change, rotate the OpenAI, Anthropic and survey keys that were passed as variables (the database password is replaced by RDS, and production's ``SECRET_KEY`` comes from the live environment, see the runbook, step 10).
 
 
 Security configuration

@@ -184,7 +184,7 @@ All configuration is environment variables, loaded from `api/.env` and `web/.env
 
 | Variable | Purpose |
 |---|---|
-| `SECRET_KEY` | Django secret key. **Required.** |
+| `SECRET_KEY` | Django secret key. **Required.** On a Terraform stack it, the API keys and the database credentials come from AWS Secrets Manager instead (`APP_SECRET_ID`, `DATABASE_SECRET_ID`; see docs/deployment/technical-reference.rst, "Secrets") |
 | `DEBUG` | `true` locally, never in production |
 | `DATABASE_*` | Connection Django uses |
 | `MYSQL_*` | Credentials the MySQL container is created with — must agree with `DATABASE_*` |

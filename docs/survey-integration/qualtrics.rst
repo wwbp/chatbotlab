@@ -169,9 +169,10 @@ trail.
 .. note::
 
    Deployments that would rather manage the secret as infrastructure can set
-   the ``SURVEY_INGEST_TOKEN`` environment variable instead (for Terraform,
-   ``survey_ingest_token`` in ``terraform.tfvars`` or the matching GitHub
-   Actions secret; for local development, ``api/.env``). Both work at the same
+   the ``SURVEY_INGEST_TOKEN`` setting instead (for a Terraform stack, the
+   ``SURVEY_INGEST_TOKEN`` key of its ``<prefix>-<environment>/app`` secret in
+   AWS Secrets Manager, see "Secrets" in the deployment technical reference;
+   for local development, ``api/.env``). Both work at the same
    time, so an environment-managed token and admin-issued tokens can coexist.
 
 Step 2 — Add a Web Service element to your survey flow

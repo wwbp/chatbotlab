@@ -35,13 +35,10 @@ You will need to collect or create five things. Each section below tells you exa
      - ``AWS_SECRET_ACCESS_KEY``
    * - OpenAI API key
      - platform.openai.com
-     - ``OPENAI_API_KEY``
+     - ``OPENAI_API_KEY`` in the AWS secret (Step 5)
    * - Anthropic API key *(optional)*
      - console.anthropic.com
-     - ``ANTHROPIC_API_KEY``
-   * - Database password *(you choose)*
-     - Make one up
-     - ``DB_PASSWORD``
+     - ``ANTHROPIC_API_KEY`` in the AWS secret (Step 5)
    * - Admin panel password *(you choose)*
      - Make one up
      - ``ADMIN_PANEL_PASSWORD``
@@ -126,14 +123,10 @@ older bots that use an Anthropic-direct model.
 
 You only need one. If you set both, the chatbot can use either model.
 
-Step 5: Choose two passwords
------------------------------
+Step 5: Store your keys in AWS, and choose a password
+------------------------------------------------------
 
-These do not need to be retrieved from anywhere. You create them yourself.
-
-**Database password (``DB_PASSWORD``):**
-A password for the internal database. You will rarely need to type this. Rules: letters and numbers only (no special characters), at least 8 characters.
-Example: ``Research2024db``
+Your AI keys and Django's ``SECRET_KEY`` are not GitHub secrets. They go in one AWS Secrets Manager secret, ``<your prefix>-<environment>/app``, so they never appear in Terraform's records or in the workflow logs. Whoever administers your AWS account creates it once per environment, before the first deployment; the exact commands are under "Secrets" in the :doc:`technical-reference`. The test environment gets its own secret with its own keys. You do not choose a database password: AWS generates it and keeps it.
 
 **Admin panel password (``ADMIN_PANEL_PASSWORD``):**
 Only the on-demand **test** stack uses it: it creates an ``admin`` user with this password when it starts. Production creates no account at boot (see Step 10), so you may leave it unset in the ``production`` Environment.
@@ -205,15 +198,6 @@ Add each of the following secrets one at a time:
      - Yes
    * - ``AWS_SECRET_ACCESS_KEY``
      - From Step 3
-     - Yes
-   * - ``OPENAI_API_KEY``
-     - From Step 4
-     - At least one AI key
-   * - ``ANTHROPIC_API_KEY``
-     - From Step 4
-     - At least one AI key
-   * - ``DB_PASSWORD``
-     - Password you chose in Step 5
      - Yes
    * - ``ADMIN_PANEL_PASSWORD``
      - Password you chose in Step 5

@@ -119,17 +119,18 @@ Open `terraform.tfvars` and fill in every value:
 
 | Variable | Where to get it |
 |---|---|
-| `openai_api_key` | platform.openai.com → API keys (or leave empty and use Anthropic) |
-| `anthropic_api_key` | console.anthropic.com → API keys (or leave empty and use OpenAI) |
-| `db_password` | Make up a strong password (letters + numbers, min 8 chars) |
 | `admin_panel_password` | Test stack only: make up a password — you log into `/api/admin/` with it as user `admin`. Production creates no account at boot (its database has the real admins) |
 | `project_name` | A short prefix for every AWS resource (must match `TF_PROJECT_PREFIX`) |
 | `environment` | `"test"` or `"production"` |
 
-`django_secret_key` is not in that list on purpose. Leave it empty and Terraform
-generates one and keeps it in state, so it stays stable across re-deploys and
-active sessions survive. Only set it yourself if you need to pin a specific
-value — then it must be at least 50 characters.
+No secret value goes in `terraform.tfvars`: whatever is there ends up in
+Terraform state in clear text. Before the first apply, create the Secrets
+Manager secret `<project_name>-<environment>/app` holding Django's
+`SECRET_KEY` and your OpenAI and/or Anthropic keys (and `SURVEY_INGEST_TOKEN`
+if a study uses it): see "Secrets" in
+[docs/deployment/technical-reference.rst](../../docs/deployment/technical-reference.rst).
+The plan fails until it exists. RDS generates the database password and keeps
+it in Secrets Manager itself.
 
 ### Step 3 — Deploy everything
 
@@ -387,9 +388,12 @@ twice (with `<env>` = `production`, then `<env>` = `test`):
    environment. If the first test apply fails with AccessDenied, fix the
    test policy narrowly (a name or tag scope, never a broad Allow: the
    account is shared with production) and carry the same fix to production
-   in a pull request. **Re-apply all three policies of both roles** from
-   this commit: the production guardrails now deny the test stack, and the
-   test guardrails and boundary deny `ses:Send*`.
+   in a pull request. **Re-apply all three policies of both roles, and both
+   boundaries,** from this commit: the apply roles look up `<PREFIX>-<env>/*`
+   secrets and let RDS create its master user secret (`rds!db-*`, only
+   through RDS), the guardrails deny every secret value call, and the
+   boundaries let the stack's roles read their own secrets (in place of SSM
+   parameters, which nothing read).
 
 In GitHub (**Settings**):
 
@@ -400,12 +404,15 @@ In GitHub (**Settings**):
    - `test`: **Required reviewers**: the owner; **Deployment branches**: `main` and `test/*`
      (the same refs `apply-test-trust.json` accepts).
    Without required reviewers, anyone who can run workflows can apply.
-5. **Environment secrets**, in `production` and in `test` (different values):
-   `DB_PASSWORD`, `ADMIN_PANEL_PASSWORD` (test only: production creates no
-   admin at boot), and `OPENAI_API_KEY` and/or
-   `ANTHROPIC_API_KEY`. Optional: `SURVEY_INGEST_TOKEN`. The test stack uses
-   its own LLM API keys, scoped to it (a separate project or key with a low
-   spending limit), never production's. In `production` only: `GH_PAT`, if
+5. **Environment secrets**: in `test`, `ADMIN_PANEL_PASSWORD` (production
+   creates no admin at boot). The application's secrets are not GitHub
+   secrets: an administrator creates `<PREFIX>-production/app` and
+   `<PREFIX>-test/app` in Secrets Manager (technical reference, "Secrets"),
+   and the apply roles may only look them up. The test stack uses its own
+   `SECRET_KEY` and LLM API keys, scoped to it (a separate project or key with
+   a low spending limit), never production's. Delete the old `DB_PASSWORD`,
+   `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and `SURVEY_INGEST_TOKEN` Environment
+   secrets: nothing reads them. In `production` only: `GH_PAT`, if
    you use `write_deploy_secrets` (it can write repository secrets, so keep
    it out of the repository secrets, where any workflow run could read it).
 6. **Repository secrets**: `TF_PROJECT_PREFIX`, `TF_AWS_ACCOUNT_ID` (the
@@ -426,12 +433,16 @@ created it yet, create it first from `bootstrap/` (as an administrator,
 
 ### Secrets in the state file
 
-The Terraform state still holds the database password, the admin password,
-the API keys and the Django secret key. Anyone who can run a plan for an
-environment can read its secrets; that is why every run needs an approval in
-that environment's GitHub Environment, and pull requests get no AWS access.
-Moving the secrets out of the state into Secrets Manager is a separate,
-later change.
+No application secret is in the state: RDS keeps the database password and
+the application's keys are in `<PREFIX>-<env>/app`, which the apply roles may
+look up but never read, write, restore or delete (`DenySecretValueCalls` in
+the guardrails). The one value left is the test stack's throwaway
+`admin_panel_password`. Older state versions in the versioned state bucket
+still hold the previous database password, generated `SECRET_KEY` and API
+keys: after the first apply with Secrets Manager, rotate the API keys that
+were passed as variables (technical reference, "Secrets"). Every run still
+needs an approval in its GitHub Environment, and pull requests get no AWS
+access.
 
 ## Offline checks
 
@@ -548,12 +559,9 @@ eb_instance_type = "t3.medium"   # was t3.small
 db_instance_class = "db.t3.small"   # was db.t3.micro
 ```
 
-**Rotate an API key:**
-```hcl
-# terraform.tfvars
-openai_api_key = "sk-proj-new-key-here"
-```
-Then `terraform apply` — EB picks up the new env var on the next instance refresh.
+**Rotate an API key:** change it in the `<project_name>-<environment>/app`
+secret and restart the app (no Terraform run): see "Secrets" in
+docs/deployment/technical-reference.rst.
 
 **Add a custom domain:**
 1. Create an ACM certificate for your domain in us-east-1 (AWS console)
