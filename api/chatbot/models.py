@@ -337,10 +337,22 @@ class ModerationSettings(models.Model):
         return f"Moderation {'Enabled' if self.enabled else 'Disabled'}"
 
 
+def conversations_naming(names):
+    """Conversations that name one of `names` (a list or a values() subquery).
+
+    A bot is named by the conversation (bot_name) and by each of its utterances
+    (Utterance.bot_name). They can differ: a reused conversation_id with another
+    bot_name stamps that bot on the utterances only. Both count.
+    """
+    return Conversation.objects.filter(
+        models.Q(bot_name__in=names) | models.Q(utterances__bot_name__in=names)
+    ).distinct()
+
+
 class BotQuerySet(models.QuerySet):
     def delete(self):
         # Bulk deletes skip Bot.delete(), so they get the same guard.
-        used = Conversation.objects.filter(bot_name__in=self.values("name"))
+        used = conversations_naming(self.values("name"))
         if used.exists():
             raise models.ProtectedError(
                 "Bots with conversations can't be deleted.", used
@@ -606,8 +618,10 @@ class Bot(models.Model):
         return self.name
 
     def conversation_count(self):
-        # Conversations name their bot (bot_name), they hold no foreign key.
-        return Conversation.objects.filter(bot_name=self.name).count()
+        # By the saved name: an unsaved rename must not hide the conversations.
+        return conversations_naming(
+            Bot.objects.filter(pk=self.pk).values("name")
+        ).count()
 
     @staticmethod
     def in_use_message(n):
@@ -618,7 +632,7 @@ class Bot(models.Model):
         # Conversations name their bot, so a rename detaches them like a delete.
         old = Bot.objects.filter(pk=self.pk).values_list("name", flat=True).first()
         if old is not None and old != self.name:
-            n = Conversation.objects.filter(bot_name=old).count()
+            n = self.conversation_count()
             if n:
                 raise ValidationError({"name": self.in_use_message(n)})
 
@@ -632,7 +646,7 @@ class Bot(models.Model):
         if n:
             raise models.ProtectedError(
                 self.in_use_message(n),
-                Conversation.objects.filter(bot_name=self.name),
+                conversations_naming(Bot.objects.filter(pk=self.pk).values("name")),
             )
         return super().delete(*args, **kwargs)
 

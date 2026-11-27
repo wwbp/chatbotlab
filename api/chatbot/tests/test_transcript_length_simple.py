@@ -13,8 +13,9 @@ class TestTranscriptLengthSimple(TestCase):
         cache.clear()
 
         # Clean up any existing test bots first to prevent conflicts
-        Bot.objects.filter(name__startswith="test_bot_").delete()
+        # Conversations first: a bot named in their utterances can't be deleted.
         Conversation.objects.filter(conversation_id__startswith="test_").delete()
+        Bot.objects.filter(name__startswith="test_bot_").delete()
 
         # Get or create default models
         from chatbot.models import Model
@@ -54,15 +55,15 @@ class TestTranscriptLengthSimple(TestCase):
 
         # Clean up database objects to prevent conflicts between tests
         try:
+            # Conversation first: a bot named in its utterances can't be deleted.
+            if hasattr(self, "conversation"):
+                self.conversation.delete()
+
             # Delete bots created in setUp
             if hasattr(self, "bot_no_limit"):
                 self.bot_no_limit.delete()
             if hasattr(self, "bot_limit_5"):
                 self.bot_limit_5.delete()
-
-            # Delete conversation
-            if hasattr(self, "conversation"):
-                self.conversation.delete()
 
             # Delete any other bots created during tests
             Bot.objects.filter(name__startswith="test_bot_").delete()

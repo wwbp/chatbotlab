@@ -184,7 +184,10 @@ class TestChatbotIntegration(TestCase):
 
             await sync_to_async(verify_legacy_bot)()
 
-            # Clean up legacy bot
+            # Clean up legacy bot (its utterances first, or it can't be deleted)
+            await sync_to_async(
+                Utterance.objects.filter(bot_name=legacy_bot.name).delete
+            )()
             await sync_to_async(legacy_bot.delete)()
 
     def test_model_capabilities_integration(self):

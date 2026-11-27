@@ -29,8 +29,9 @@ class TestTranscriptLength:
         cache.clear()
 
         # Clean up any existing test bots first to prevent conflicts
-        Bot.objects.filter(name__startswith="test_bot_").delete()
+        # Conversations first: a bot named in their utterances can't be deleted.
         Conversation.objects.filter(conversation_id__startswith="test_").delete()
+        Bot.objects.filter(name__startswith="test_bot_").delete()
         Persona.objects.filter(name__startswith="Test").delete()
 
         # Get or create default models
@@ -536,6 +537,10 @@ class TestTranscriptLength:
 
         # Clean up database objects to prevent conflicts between tests
         try:
+            # Conversation first: a bot named in its utterances can't be deleted.
+            if hasattr(self, "conversation"):
+                self.conversation.delete()
+
             # Delete bots created in setUp
             if hasattr(self, "bot_no_limit"):
                 self.bot_no_limit.delete()
@@ -543,10 +548,6 @@ class TestTranscriptLength:
                 self.bot_limit_5.delete()
             if hasattr(self, "bot_limit_10"):
                 self.bot_limit_10.delete()
-
-            # Delete conversation
-            if hasattr(self, "conversation"):
-                self.conversation.delete()
 
             # Delete persona
             if hasattr(self, "persona"):

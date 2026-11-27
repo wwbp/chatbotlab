@@ -317,9 +317,7 @@ def test_staff_holding_delete_bot_cannot_delete_in_the_admin(make_bot):
 
 
 @pytest.mark.django_db
-def test_api_409_happens_before_any_avatar_or_s3_clean_up(
-    make_bot, make_conversation
-):
+def test_api_409_happens_before_any_avatar_or_s3_clean_up(make_bot, make_conversation):
     bot = make_bot()
     make_conversation(bot=bot)
     avatar = Avatar.objects.create(bot=bot, chatbot_avatar="x.png")
