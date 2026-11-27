@@ -140,7 +140,8 @@ def test_columns_keep_a_collation_other_than_their_tables(copy):
         )
 
     source = collations(SRC, SRC_DB)
-    assert source and source[0][1] == "utf8mb4_unicode_ci"
+    assert source
+    assert source[0][1] == "utf8mb4_unicode_ci"
     assert collations(DST, DST_DB) == source
 
 
