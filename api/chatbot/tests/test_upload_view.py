@@ -92,10 +92,9 @@ class TestGetPresignedUrl(TestCase):
             )
         assert r.status_code == 200
         body = r.json()
-        assert "s3_url" in body
-        # The app refers to uploads by key. An absolute URL embeds the bucket
-        # name and breaks when the data moves to another bucket.
-        assert "file_url" not in body
+        # Only the presigned URL. The app refers to uploads by key: an absolute
+        # URL embeds the bucket name and breaks when the data moves bucket.
+        assert set(body) == {"s3_url"}
 
     def test_boto3_failure_returns_500(self):
         with (
