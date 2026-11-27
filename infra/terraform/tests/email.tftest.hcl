@@ -194,6 +194,18 @@ run "test_stack_refuses_ses" {
   expect_failures = [var.email_backend]
 }
 
+# Any real backend is refused on the test stack, not only SES.
+run "test_stack_refuses_smtp" {
+  command = plan
+
+  variables {
+    environment   = "test"
+    email_backend = "django.core.mail.backends.smtp.EmailBackend"
+  }
+
+  expect_failures = [var.email_backend]
+}
+
 # The address is taken the way Python's parseaddr takes it in
 # email_backend.py: the last bracketed group, without surrounding spaces.
 run "a_bracketed_display_name_does_not_fool_the_parser" {

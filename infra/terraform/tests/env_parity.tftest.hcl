@@ -153,3 +153,63 @@ run "production_values" {
     error_message = "MOCK_LLM must be explicitly off in production: on, participants get canned replies."
   }
 }
+
+# api/entrypoint.sh runs createsuperuser on EVERY start while
+# DJANGO_SUPERUSER_PASSWORD is set. Production's database is the copied one
+# with the real admins, so production must never create accounts at boot.
+run "production_creates_no_account_at_boot" {
+  command = plan
+
+  assert {
+    condition = length(setintersection(
+      nonsensitive([for s in aws_elastic_beanstalk_environment.chatbot_api.setting : s.name]),
+      ["DJANGO_SUPERUSER_USERNAME", "DJANGO_SUPERUSER_EMAIL", "DJANGO_SUPERUSER_PASSWORD"],
+    )) == 0
+    error_message = "Production must not set DJANGO_SUPERUSER_*: the entrypoint would create an 'admin' superuser in the real database on every start."
+  }
+}
+
+run "test_stack_creates_its_admin" {
+  command = plan
+
+  variables {
+    environment = "test"
+  }
+
+  assert {
+    condition = nonsensitive(toset([for s in aws_elastic_beanstalk_environment.chatbot_api.setting : s.name if startswith(s.name, "DJANGO_SUPERUSER_")])) == toset([
+      "DJANGO_SUPERUSER_USERNAME", "DJANGO_SUPERUSER_EMAIL", "DJANGO_SUPERUSER_PASSWORD",
+    ])
+    error_message = "The test stack's empty database needs the admin account the entrypoint creates."
+  }
+}
+
+run "test_stack_needs_an_admin_password" {
+  command = plan
+
+  variables {
+    environment          = "test"
+    admin_panel_password = ""
+  }
+
+  expect_failures = [var.admin_panel_password]
+}
+
+# Production starts at one instance and scales to three
+# (environments/production.tfvars; check_workflows.py checks the file).
+run "production_scales_from_one_to_three" {
+  command = plan
+
+  variables {
+    eb_max_instances = 3
+  }
+
+  assert {
+    condition = alltrue([
+      for s in aws_elastic_beanstalk_environment.chatbot_api.setting :
+      s.value == { MinSize = "1", MaxSize = "3" }[s.name]
+      if s.namespace == "aws:autoscaling:asg" && contains(["MinSize", "MaxSize"], s.name)
+    ])
+    error_message = "Production's auto-scaling group must run 1 to 3 instances."
+  }
+}
