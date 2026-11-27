@@ -205,6 +205,21 @@ run "instance_role_bedrock_is_converse_on_anthropic_only" {
     values          = { arn = "arn:aws:s3:::chatbotlab-test-data" }
   }
 
+  # A Deny, or a Condition such as aws:RequestedRegion (which would break
+  # cross-region inference profiles), would leave the actions and resources
+  # intact but stop every chat.
+  assert {
+    condition = alltrue([
+      for st in jsondecode(aws_iam_role_policy.eb_instance_application_access.policy).Statement :
+      st.Effect == "Allow" && try(st.Condition, null) == null
+      if try(st.Sid, "") == "InvokeBedrockModels"
+      ]) && length([
+      for st in jsondecode(aws_iam_role_policy.eb_instance_application_access.policy).Statement :
+      st if try(st.Sid, "") == "InvokeBedrockModels"
+    ]) == 1
+    error_message = "InvokeBedrockModels must be a single unconditioned Allow."
+  }
+
   assert {
     condition = toset(flatten([
       for st in jsondecode(aws_iam_role_policy.eb_instance_application_access.policy).Statement :
