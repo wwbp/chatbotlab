@@ -276,14 +276,28 @@ isolated by policy:
   bucket (production's first apply, or an administrator, creates it), and
   is denied `<PREFIX>/production/`, where production's state and the
   Destroy workflow's backups live;
-- **account-wide reads** are metadata only: neither role (nor any role a
-  stack creates) may read Elastic Beanstalk configuration settings (the
-  environment variables, which hold database passwords and API keys) or
-  CloudFormation templates of anything but its own environment, so neither
-  can read the live deployment's or another project's secrets. The
-  production cutover needs none of them: `write_deploy_secrets` reads
-  Terraform's own outputs, and the data migration runs with administrator
-  credentials;
+- **account-wide reads** are metadata only, from an allowlist that
+  `tests/check_workflows.py` enforces: neither role (nor any role a stack
+  creates) may read Elastic Beanstalk configuration settings (the
+  environment variables, which hold database passwords and API keys),
+  CloudFormation stacks (an EB stack's `AWSEBBeanstalkMetadata` holds the
+  same settings) or CloudFront functions of anything but its own
+  environment, and the apply roles may read instance user data and launch
+  template data only on their own environment's resources. Elastic
+  Beanstalk names are matched as `application/<PREFIX>-<env>` (a bare
+  `*/<PREFIX>-<env>` would also match a template or environment of that name
+  in another project's application), and configuration templates, which
+  copy another environment's settings, are denied. So neither role can read
+  the live deployment's or another project's secrets. The production
+  cutover needs none of them: `write_deploy_secrets` reads Terraform's own
+  outputs, and the data migration runs with administrator credentials;
+- **EC2 inputs**: instances start only from Amazon-owned AMIs and
+  snapshots, the apply roles place them only in subnets and security groups
+  tagged with their own environment, and no role creates a volume by itself
+  (no volume from another project's snapshot). CloudFront origin access
+  controls cannot be tagged, so neither role may update one (any
+  distribution in the account could depend on it); creating and deleting
+  stay allowed, and deleting fails while one is in use;
 - **email**: the test role and every role the test stack creates (its
   boundary, `<PREFIX>-terraform-boundary-test`) are denied `ses:Send*`, so
   the test stack cannot send real email through the account's SES
@@ -292,6 +306,26 @@ isolated by policy:
 - each role trusts one GitHub Environment: production only on `main`, test
   on `main` or a `test/*` branch (push a risky infrastructure change to
   `test/<name>` to try it before it merges).
+
+Residual risks, accepted for now:
+
+- **`iam:CreateRole`**: each apply role may create `<PREFIX>-<env>-*` roles,
+  always under its boundary, but IAM cannot limit the trust policy of a new
+  role. A malicious approved run could leave a role that an outside account
+  can assume, with the boundary's permissions (its own environment's
+  resources, Bedrock spend, metadata reads). Turn on **IAM Access Analyzer**
+  (external access, account zone of trust) in the account and act on its
+  findings. Removing `iam:CreateRole` means an administrator pre-creates the
+  stack's three roles per environment outside Terraform; that restructures
+  `iam.tf` and is a separate change.
+- The boundaries (at the 6144-character limit) do not restrict which subnets
+  and security groups the stack's own roles launch instances into; the
+  apply roles do. Production/test crossing is still refused by the tag Deny.
+- RDS actions that name a source (`CopyDBSnapshot`,
+  `RestoreDBInstanceToPointInTime`, `CreateDBInstanceReadReplica`) are
+  authorised on the source ARN too: confirm with
+  `aws iam simulate-principal-policy` at the first apply that neither role
+  can use another project's database or snapshot as a source.
 
 Shared spend: Bedrock (`bedrock:InvokeModel*` is allowed to both stacks'
 instance roles) bills the one account, and nothing separates the test

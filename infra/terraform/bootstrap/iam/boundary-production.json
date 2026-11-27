@@ -10,7 +10,6 @@
         "ec2:CreateLaunchTemplate",
         "ec2:CreateNetworkInterface",
         "ec2:CreateSecurityGroup",
-        "ec2:CreateVolume",
         "ec2:RunInstances",
         "elasticloadbalancing:CreateListener",
         "elasticloadbalancing:CreateLoadBalancer",
@@ -52,6 +51,8 @@
         "cloudformation:CancelUpdateStack",
         "cloudformation:ContinueUpdateRollback",
         "cloudformation:Delete*",
+        "cloudformation:Describe*",
+        "cloudformation:List*",
         "cloudformation:SignalResource",
         "cloudformation:Update*",
         "cloudfront:CreateInvalidation",
@@ -144,7 +145,21 @@
       ],
       "Resource": [
         "arn:aws:ec2:*::image/*",
-        "arn:aws:ec2:*::snapshot/*",
+        "arn:aws:ec2:*::snapshot/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "ec2:Owner": "amazon"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateLaunchTemplateVersion",
+        "ec2:RunInstances"
+      ],
+      "Resource": [
         "arn:aws:ec2:*:<ACCOUNT_ID>:subnet/*",
         "arn:aws:ec2:*:<ACCOUNT_ID>:security-group/*",
         "arn:aws:ec2:*:<ACCOUNT_ID>:network-interface/*",
@@ -184,7 +199,7 @@
         "ssm:GetParametersByPath"
       ],
       "Resource": [
-        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:*/<PREFIX>-production",
+        "arn:aws:elasticbeanstalk:*:*:application/<PREFIX>-production",
         "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:*/<PREFIX>-production/*",
         "arn:aws:elasticbeanstalk:*::solutionstack/*",
         "arn:aws:elasticbeanstalk:*::platform/*",
@@ -203,14 +218,8 @@
         "autoscaling:Describe*",
         "bedrock:Converse*",
         "bedrock:InvokeModel*",
-        "cloudformation:Describe*",
-        "cloudformation:List*",
         "cloudwatch:PutMetricData",
         "ec2:Describe*",
-        "ecr:BatchCheckLayerAvailability",
-        "ecr:BatchGetImage",
-        "ecr:GetAuthorizationToken",
-        "ecr:GetDownloadUrlForLayer",
         "elasticache:Describe*",
         "elasticbeanstalk:DescribeA*",
         "elasticbeanstalk:DescribeE*",
@@ -218,8 +227,7 @@
         "elasticbeanstalk:DescribeP*",
         "elasticbeanstalk:List*",
         "elasticloadbalancing:Describe*",
-        "rds:Describe*",
-        "sts:GetCallerIdentity"
+        "rds:Describe*"
       ],
       "Resource": "*"
     },

@@ -97,11 +97,13 @@ Without these, information_schema silently hides objects and the tool would see 
 Rehearsal source
 ~~~~~~~~~~~~~~~~
 
-The rehearsal copies from a restored copy of the live database, never from the live database itself. Everything stays in the same AWS account: no cross-account copy or share. An administrator does these steps by hand (the test role is denied the live ``awseb-e-*`` database and its snapshots). The copy holds real participant data, so it is restored **private and encrypted, like production**, into the test stack's private subnets.
+The rehearsal copies from a restored copy of the live database, never from the live database itself. Everything stays in the same AWS account: no cross-account copy or share. An administrator does these steps by hand (the test role is denied the live ``awseb-e-*`` database and its snapshots). The copy holds real participant data, so it is restored **private and encrypted, like production**, into the test stack's private subnets, under a name outside the test role's scope (``rehearsal-source-<YYYYMMDD>``, no ``Environment`` tag): only the administrator running the copy can touch it.
+
+**During a rehearsal**, set the ``test`` GitHub Environment's deployment branches to ``main`` only. The test stack's database then holds the copied data, and the test role manages that database: a ``test/*`` branch must not be able to run against it until the stack is destroyed.
 
 .. code-block:: bash
 
-   SNAP=rehearsal-source-$(date -u +%Y%m%d-%H%M)
+   SNAP=rehearsal-snap-$(date -u +%Y%m%d-%H%M)
    aws rds create-db-snapshot --db-instance-identifier <old-db-id> --db-snapshot-identifier $SNAP
    aws rds wait db-snapshot-available --db-snapshot-identifier $SNAP
    # A restore keeps the snapshot's encryption and cannot add it. The old
@@ -111,17 +113,16 @@ The rehearsal copies from a restored copy of the live database, never from the l
    aws rds copy-db-snapshot --source-db-snapshot-identifier $SNAP \
      --target-db-snapshot-identifier $SNAP-encrypted --kms-key-id alias/aws/rds
    aws rds wait db-snapshot-available --db-snapshot-identifier $SNAP-encrypted
-   aws rds restore-db-instance-from-db-snapshot --db-instance-identifier <PREFIX>-test-rehearsal-source \
+   aws rds restore-db-instance-from-db-snapshot --db-instance-identifier rehearsal-source-<YYYYMMDD> \
      --db-snapshot-identifier $SNAP-encrypted --db-instance-class db.t3.micro --no-publicly-accessible \
-     --db-subnet-group-name <PREFIX>-test-database-subnet-group --vpc-security-group-ids <test database security group id> \
-     --tags Key=Environment,Value=test Key=Project,Value=<PREFIX>
-   aws rds wait db-instance-available --db-instance-identifier <PREFIX>-test-rehearsal-source
-   aws rds describe-db-instances --db-instance-identifier <PREFIX>-test-rehearsal-source \
+     --db-subnet-group-name <PREFIX>-test-database-subnet-group --vpc-security-group-ids <test database security group id>
+   aws rds wait db-instance-available --db-instance-identifier rehearsal-source-<YYYYMMDD>
+   aws rds describe-db-instances --db-instance-identifier rehearsal-source-<YYYYMMDD> \
      --query 'DBInstances[0].[StorageEncrypted,PubliclyAccessible]'
 
-*Gate:* the last command prints ``true`` then ``false``. Point ``MIG_SOURCE_*`` at this instance for the rehearsal. The ``<PREFIX>-test-`` name and the ``Environment=test`` tag keep it inside the test role's scope and out of the production role's.
+*Gate:* the last command prints ``true`` then ``false``. Point ``MIG_SOURCE_*`` at this instance for the rehearsal.
 
-It is not in the test stack's Terraform state, so Destroy Infrastructure does not remove it. Step 13 deletes it by hand.
+It is not in the test stack's Terraform state, but it sits in the test stack's subnet group and security group: delete it **before** Destroy Infrastructure, or the destroy stops half-way (step 13).
 
 
 Procedure
@@ -250,13 +251,14 @@ Steps 1 to 3 are preparation and can be done ahead of time. The window (app offl
 
     *Gate:* smoke test passes on the public name; one test conversation works end to end and appears in the admin.
 
-13. **Rehearsal before production.** Production is not touched until the test-stack rehearsal completed with every gate met and the timings recorded. Then destroy the test stack (Destroy Infrastructure, environment ``test``), and delete the rehearsal source and its snapshots by hand::
+13. **Rehearsal before production.** Production is not touched until the test-stack rehearsal completed with every gate met and the timings recorded. First delete the rehearsal source and its snapshots by hand (it sits in the test stack's subnet group, so the destroy cannot finish while it exists)::
 
-       aws rds delete-db-instance --db-instance-identifier <PREFIX>-test-rehearsal-source --skip-final-snapshot --delete-automated-backups
+       aws rds delete-db-instance --db-instance-identifier rehearsal-source-<YYYYMMDD> --skip-final-snapshot --delete-automated-backups
+       aws rds wait db-instance-deleted --db-instance-identifier rehearsal-source-<YYYYMMDD>
        aws rds delete-db-snapshot --db-snapshot-identifier $SNAP-encrypted
        aws rds delete-db-snapshot --db-snapshot-identifier $SNAP
 
-    Keep production's own step 5 snapshot; delete only the rehearsal's.
+    Then destroy the test stack (Destroy Infrastructure, environment ``test``) and set the ``test`` Environment's deployment branches back to ``main`` and ``test/*``. Keep production's own step 5 snapshot; delete only the rehearsal's.
 
 14. **Keep the old environment** blocked (or at 0 instances) for 30 days, or one full study cycle if longer. Keep the step 5 snapshot until the study data's retention period ends. Before terminating the old environment, confirm that snapshot still exists and delete ``dump.sql`` from wherever the tool ran.
 

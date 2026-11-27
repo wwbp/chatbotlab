@@ -67,7 +67,7 @@
       "Effect": "Allow",
       "Action": "elasticbeanstalk:*",
       "Resource": [
-        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:*/<PREFIX>-test",
+        "arn:aws:elasticbeanstalk:*:*:application/<PREFIX>-test",
         "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:*/<PREFIX>-test/*",
         "arn:aws:elasticbeanstalk:*::solutionstack/*",
         "arn:aws:elasticbeanstalk:*::platform/*"
@@ -86,10 +86,6 @@
         "acm:Describe*",
         "acm:List*",
         "autoscaling:Describe*",
-        "cloudformation:Describe*",
-        "cloudformation:List*",
-        "cloudfront:Describe*",
-        "cloudfront:Get*",
         "cloudfront:List*",
         "ec2:Describe*",
         "elasticache:Describe*",

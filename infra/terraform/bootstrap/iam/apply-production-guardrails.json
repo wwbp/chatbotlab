@@ -111,6 +111,26 @@
           ]
         }
       }
+    },
+    {
+      "Sid": "DenyConfigurationTemplates",
+      "Effect": "Deny",
+      "Action": "elasticbeanstalk:CreateConfigurationTemplate",
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyUserDataReads",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:DescribeInstanceAttribute",
+        "ec2:DescribeLaunchTemplateVersions"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:ResourceTag/Environment": "production"
+        }
+      }
     }
   ]
 }
