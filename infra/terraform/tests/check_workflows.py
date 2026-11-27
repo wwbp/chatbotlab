@@ -164,6 +164,17 @@ for path in (TERRAFORM / "setup.sh", TERRAFORM / "README.md", TERRAFORM / "boots
     )
 
 
+# --- No application secret value passes through Terraform -------------------
+# They live in Secrets Manager (secrets.tf, rds.tf). An undeclared TF_VAR_ is
+# silently ignored, so a stale one would go unnoticed while still handing the
+# value to every step of the job.
+for name, text in all_workflows.items():
+    for var in ("db_password", "django_secret_key", "openai_api_key", "anthropic_api_key", "survey_ingest_token"):
+        check(f"TF_VAR_{var}" not in text, f"{name}: TF_VAR_{var} passes a secret value to Terraform; it lives in Secrets Manager")
+    for secret in ("DB_PASSWORD", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "SURVEY_INGEST_TOKEN"):
+        check(f"secrets.{secret}" not in text, f"{name}: reads secrets.{secret}; the value lives in Secrets Manager")
+
+
 # --- Deploy secrets: only the chosen environment's, only when asked ----------
 
 staging_yml = all_workflows["staging.yml"]

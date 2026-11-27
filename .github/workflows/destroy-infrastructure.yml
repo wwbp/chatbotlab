@@ -31,8 +31,9 @@ name: Destroy Infrastructure
 # A wrong or mistyped value stops the run before it signs in to AWS.
 #
 # Secrets: the same ones the apply job of Deploy Infrastructure uses
-# (TF_AWS_ACCOUNT_ID, TF_PROJECT_PREFIX, DB_PASSWORD,
-# ADMIN_PANEL_PASSWORD, …).
+# (TF_AWS_ACCOUNT_ID, TF_PROJECT_PREFIX, ADMIN_PANEL_PASSWORD, …). The
+# <prefix>-<environment>/app secret is not destroyed: the apply role may not
+# delete it, and the next stack reuses it.
 # AWS access is by GitHub OIDC; there are no stored AWS keys.
 
 on:
@@ -367,9 +368,6 @@ jobs:
           TF_VAR_environment:                 ${{ inputs.environment }}
           TF_VAR_github_org:                  ${{ github.repository_owner }}
           TF_VAR_github_repo:                 ${{ github.event.repository.name }}
-          TF_VAR_openai_api_key:              ${{ secrets.OPENAI_API_KEY }}
-          TF_VAR_anthropic_api_key:           ${{ secrets.ANTHROPIC_API_KEY }}
-          TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}
           TF_VAR_admin_panel_password:        ${{ secrets.ADMIN_PANEL_PASSWORD }}
           TF_VAR_create_github_oidc_provider: false
           ENVIRONMENT:                        ${{ inputs.environment }}
