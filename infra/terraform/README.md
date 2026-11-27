@@ -396,17 +396,20 @@ the instance role. Three variables control it:
 
 | Variable | Sets | Value |
 |---|---|---|
-| `site_url` | `SITE_URL` | The public URL, e.g. `https://chatbot.mylab.org`. Empty: `https://<domain_name>` if a custom domain is set, otherwise unset (invites then fail with a warning in the admin) |
-| `email_backend` | `EMAIL_BACKEND` | `chatbot.email_backend.SESBackend` to send. Empty by default: Terraform then leaves the setting alone (a value set by hand on the environment is kept) and the application prints emails to its log |
-| `default_from_email` | `DEFAULT_FROM_EMAIL` | The sender, e.g. `"ChatbotLab <no-reply@mylab.org>"` |
+| `site_url` | `SITE_URL` | The public URL, e.g. `https://chatbot.mylab.org`. Empty: `https://<domain_name>` if a custom domain is set, otherwise unset (invites then fail with a warning in the admin). Production: `https://bot.wwbp.org` in `environments/production.tfvars` |
+| `email_backend` | `EMAIL_BACKEND` | Empty for the default: `chatbot.email_backend.SESBackend` on production; on the test stack `django.core.mail.backends.console.EmailBackend` (emails go to the log), the only backend the test stack accepts, so a rehearsal never writes to real participants |
+| `default_from_email` | `DEFAULT_FROM_EMAIL` | The sender. Empty for the default: `ChatbotLab <no-reply@bot.wwbp.org>` on production, none on the test stack |
 
-When `default_from_email` is set, Terraform also gives the instance role one
-permission: `ses:SendEmail` / `ses:SendRawEmail` on SES identities in this
-account and region, only when the From address equals the address in
-`default_from_email`. With it empty the role gets no SES permission.
+With the SES backend, Terraform also gives the instance role one permission:
+`ses:SendEmail` / `ses:SendRawEmail` on the sender's address and domain
+identities only (on production `identity/no-reply@bot.wwbp.org` and
+`identity/bot.wwbp.org`), only when the From address equals the sender.
+Otherwise the role gets no SES permission.
 
 **Terraform does not verify the sender or leave the SES sandbox. Do both by
-hand, once per AWS account and region, before you set `email_backend` to SES:**
+hand, once per AWS account and region, before the first production apply.**
+`bot.wwbp.org` is already verified (Easy DKIM, MAIL FROM `mail.bot.wwbp.org`)
+and the production account is out of the sandbox; a new account needs:
 
 1. In the SES console (same region as `aws_region`), open **Identities →
    Create identity**. Choose the domain of the sender (e.g. `mylab.org`), or

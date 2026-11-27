@@ -192,6 +192,75 @@ Application stack
 **Database connection pooling is disabled (``CONN_MAX_AGE = 0``).** Django's async (ASGI) stack with MySQL is thread-sensitive: all ORM calls are serialized through a single shared thread per worker. Reusing connections across requests causes state corruption under concurrent load. See the comment in ``api/generic_chatbot/settings.py`` for details.
 
 
+Environment variables
+---------------------
+
+Terraform sets the application's environment variables on the Elastic Beanstalk environment (``infra/terraform/elasticbeanstalk.tf``). ``api/env_vars.txt`` lists every variable the application reads; a test keeps the list in step with the code, and ``infra/terraform/tests/env_parity.tftest.hcl`` fails if production leaves one out without a reason.
+
+.. list-table:: Set by Terraform
+   :header-rows: 1
+   :widths: 30 35 35
+
+   * - Variable
+     - Production value
+     - Notes
+   * - ``DEBUG``
+     - ``False``
+     -
+   * - ``BACKEND_ENVIRONMENT``
+     - ``production`` (``test`` on the test stack)
+     -
+   * - ``SECRET_KEY``
+     - generated, kept in state
+     - Moves to Secrets Manager in a later change
+   * - ``ALLOWED_HOSTS``
+     - ``*``
+     -
+   * - ``CORS_ALLOWED_ORIGINS``, ``CSRF_TRUSTED_ORIGINS``
+     - ``https://bot.wwbp.org,https://*.cloudfront.net``
+     - Also ``https://<domain_name>`` when set
+   * - ``SITE_URL``
+     - ``https://bot.wwbp.org``
+     - ``site_url`` in ``environments/production.tfvars``; links in emails
+   * - ``EMAIL_BACKEND``
+     - ``chatbot.email_backend.SESBackend``
+     - Test stack: ``django.core.mail.backends.console.EmailBackend`` (the log), and nothing else
+   * - ``DEFAULT_FROM_EMAIL``
+     - ``ChatbotLab <no-reply@bot.wwbp.org>``
+     - The instance role may send as this address only
+   * - ``DATABASE_HOST``, ``DATABASE_PORT``, ``DATABASE_NAME``, ``DATABASE_USER``, ``DATABASE_PASSWORD``
+     - the Terraform RDS instance
+     -
+   * - ``CONN_MAX_AGE``
+     - ``0``
+     - See gotcha 7
+   * - ``REDIS_URL``
+     - the Terraform ElastiCache, ``rediss://``
+     -
+   * - ``AWS_BUCKET_NAME``
+     - the Terraform data bucket
+     - Uploads and avatars
+   * - ``AWS_REGION``
+     - ``aws_region``
+     -
+   * - ``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY``, ``SURVEY_INGEST_TOKEN``
+     - GitHub secrets
+     -
+   * - ``GUNICORN_WORKERS``
+     - ``4``
+     - Async workers, two per vCPU of a ``t3.small``
+   * - ``MOCK_LLM``
+     - ``false``
+     - Load-test switch, pinned off
+   * - ``DJANGO_SUPERUSER_USERNAME``, ``_EMAIL``, ``_PASSWORD``
+     - ``admin``, ``admin@example.com``, ``admin_panel_password``
+     - First boot only (``api/entrypoint.sh``)
+
+**Read by the application, not set on purpose** (the reasons are in ``api/env_vars.txt``): ``AWS_ACCESS_KEY_ID`` and ``AWS_SECRET_ACCESS_KEY`` (the instance role gives AWS access; static keys would override it), ``MOCK_LLM_P50_MS`` and ``MOCK_MODERATION_P50_MS`` (only with ``MOCK_LLM`` on), ``CHATBOT_AVATAR_PROMPT`` and ``CHATBOT_CONTROL_IMAGE`` (live production does not set them either), ``FRONTEND_URL``, ``MODERATION_VALUES_FOR_BLOCKED``, ``DJANGO_SETTINGS_MODULE``.
+
+**Set on the hand-built environments, dropped on purpose** because no code reads them: ``BASE_URL`` (``SITE_URL`` replaced it), ``CORS_ALLOW_CREDENTIALS``, ``REACT_APP_API_URL`` (the front end reads ``VITE_API_URL`` at build time). Terraform no longer sets ``DATABASE_ENGINE`` for the same reason.
+
+
 Security configuration
 -----------------------
 
