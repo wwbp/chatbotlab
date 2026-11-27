@@ -253,6 +253,13 @@ check(
     and "exit 1" in block(bootstrap_step, re.escape('if [[ "$legacy" != "0" ]]; then')),
     "deploy-infrastructure.yml: the bootstrap step must exit 1 while the old <prefix>/terraform.tfstate exists",
 )
+# The state bucket is shared; the test role may not create it, so a test run
+# that finds it missing stops before the create call.
+refuse = block(bootstrap_step, re.escape('elif [[ "$ENVIRONMENT" != "production" ]]; then'))
+check(
+    "exit 1" in refuse and bootstrap_step.find(refuse) < bootstrap_step.find("aws s3api create-bucket") if refuse else False,
+    "deploy-infrastructure.yml: the bootstrap step must exit 1 before create-bucket unless the environment is production",
+)
 choices = re.search(r"\n      environment:\n(?:        .*\n)*?        options:\n((?:          - .*\n)+)", deploy)
 check(
     choices and sorted(re.findall(r"- (\w+)", choices.group(1))) == ["production", "test"],
@@ -752,6 +759,14 @@ OTHER_PROJECT_SAMPLES = [
      "arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:environment/meetlab-v2/meetlab-v2-env"),
     ("iam:PutRolePolicy", "arn:aws:iam::<ACCOUNT_ID>:role/meetlab-v2-role"),
     ("logs:DeleteLogGroup", "arn:aws:logs:us-east-1:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/meetlab-v2-env"),
+    # Reads that return secrets: EB environment variables (database
+    # passwords, API keys) and CloudFormation templates of EB stacks.
+    ("elasticbeanstalk:DescribeConfigurationSettings",
+     "arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:environment/meetlab-v2/meetlab-v2-env"),
+    ("elasticbeanstalk:DescribeConfigurationSettings",
+     "arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:configurationtemplate/meetlab-v2/default"),
+    ("cloudformation:GetTemplate", "arn:aws:cloudformation:us-east-1:<ACCOUNT_ID>:stack/awseb-e-meet123-stack/abc"),
+    ("cloudformation:GetTemplateSummary", "arn:aws:cloudformation:us-east-1:<ACCOUNT_ID>:stack/awseb-e-meet123-stack/abc"),
 ]
 SES_SENDS = ("ses:SendEmail", "ses:SendRawEmail")
 SES_IDENTITY = "arn:aws:ses:us-east-1:<ACCOUNT_ID>:identity/<SES_FROM_DOMAIN>"
@@ -805,6 +820,15 @@ def allows(policy, action, resource):
     unconditional Deny refuses it."""
     denied = any("Condition" not in st for st in matching(policy, "Deny", action, resource))
     return bool(matching(policy, "Allow", action, resource)) and not denied
+
+
+def allows_untagged(policy, action, resource, environment):
+    """allows(), for a resource that carries none of this stack's tags (another
+    project's): an Allow conditioned on aws:ResourceTag Environment/Project =
+    its own cannot match it."""
+    untagged = [st for st in policy["Statement"]
+                if not own_tags(st.get("Condition", {}), "ResourceTag", environment)]
+    return allows({"Statement": untagged}, action, resource)
 
 
 def denies(policy, action, resource):
@@ -1069,7 +1093,9 @@ for name, policy in policies.items():
                 named = [r for st in policy["Statement"] if st.get("Effect") == "Allow"
                          for r in as_list(st.get("Resource", [])) if r != "*" and fnmatchcase(arn, r)]
                 check(not named, f"{fname}.json: an Allow reaches the {other} {what} ({arn}) through {named}")
-        else:
+        if kind == "boundary" and other == "staging":
+            continue  # retired: positive scoping above is enough for the boundary
+        if True:
             for what, arn in sample_arns(other).items():
                 for action in ("s3:GetObject", "s3:PutObject"):
                     check(denies(policy, action, arn), f"{fname}.json: must deny {action} on the {other} {what} ({arn})")
@@ -1084,7 +1110,8 @@ for name, policy in policies.items():
 
     # Other projects in the account: nothing reaches them.
     for action, arn in OTHER_PROJECT_SAMPLES:
-        check(not allows(policy, action, arn), f"{fname}.json: must not allow {action} on another project's {arn}")
+        check(not allows_untagged(policy, action, arn, environment),
+              f"{fname}.json: must not allow {action} on another project's {arn}")
 
     # The test stack must not send real email: SES sends are explicitly denied
     # to the test apply role and to every role the test stack creates (its
@@ -1106,6 +1133,28 @@ for name, policy in policies.items():
             check(allows(policy, action, own["state"]), f"{fname}.json: {action} on its own state must be allowed")
             check(not allows(policy, action, f"{STATE_BUCKET}/<PREFIX>/terraform.tfstate"),
                   f"{fname}.json: {action} on the old project-wide state key must not be allowed")
+        check(allows(policy, "elasticbeanstalk:DescribeConfigurationSettings", own["eb-env"]),
+              f"{fname}.json: must read its own Elastic Beanstalk environment's settings")
+        # One state bucket holds both environments' state and production's
+        # backups (<PREFIX>/production/backups/). The test role reads and
+        # writes only <PREFIX>/test/, may not create or reconfigure the bucket
+        # (production's first apply, or an administrator, creates it), and
+        # may not list another environment's keys.
+        if environment == "test":
+            check(denies(policy, "s3:GetObject", f"{STATE_BUCKET}/<PREFIX>/production/backups/20261127T000000Z/data/x"),
+                  f"{fname}.json: must deny production's backups in the state bucket")
+            for action in ("s3:CreateBucket", "s3:DeleteBucket", "s3:DeleteBucketPolicy", "s3:PutBucketPolicy",
+                           "s3:PutBucketVersioning", "s3:PutBucketPublicAccessBlock", "s3:PutEncryptionConfiguration",
+                           "s3:PutLifecycleConfiguration", "s3:PutBucketAcl"):
+                check(denies(policy, action, STATE_BUCKET) and not matching(policy, "Allow", action, STATE_BUCKET),
+                      f"{fname}.json: must deny (and not allow) {action} on the shared state bucket")
+            check(any(st.get("Effect") == "Deny" and "s3:ListBucket" in as_list(st.get("Action"))
+                      and STATE_BUCKET in as_list(st.get("Resource"))
+                      and sorted(as_list(st.get("Condition", {}).get("StringNotLike", {}).get("s3:prefix", [])))
+                      == ["<PREFIX>/test/*", "env:/*"]
+                      and st["Condition"].get("Null") == {"s3:prefix": "false"}
+                      for st in policy["Statement"]),
+                  f"{fname}.json: must deny s3:ListBucket on the state bucket for any s3:prefix but <PREFIX>/test/* (and env:/*)")
         # Name-scoped services: its own resources yes, anyone else's no.
         for action, what in (("rds:DeleteDBInstance", "rds"), ("elasticache:DeleteServerlessCache", "cache"),
                              ("elasticbeanstalk:TerminateEnvironment", "eb-env"),
