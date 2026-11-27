@@ -154,11 +154,15 @@ resource "aws_s3_bucket_cors_configuration" "application_data" {
     # presigned URL from /api/avatar-upload/ (web/src/components/Avatar.js).
     # That is the only cross-origin call: avatars are shown with <img src>,
     # which needs no CORS, and nothing in the browser deletes or posts here.
-    # Only the site itself, never a wildcard (live production allows only
-    # https://bot.wwbp.org).
+    # Only the site itself, never a wildcard: the custom domain (live
+    # production allows only https://bot.wwbp.org) and this stack's own
+    # CloudFront URL, which stays reachable (the rehearsal tests through it).
     allowed_headers = ["*"]
     allowed_methods = ["PUT"]
-    allowed_origins = [var.domain_name != "" ? "https://${var.domain_name}" : "https://${aws_cloudfront_distribution.frontend.domain_name}"]
+    allowed_origins = compact([
+      var.domain_name != "" ? "https://${var.domain_name}" : "",
+      "https://${aws_cloudfront_distribution.frontend.domain_name}",
+    ])
     expose_headers  = ["ETag"]
     max_age_seconds = 3000
   }

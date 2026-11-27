@@ -134,10 +134,10 @@ run "production_cors_is_the_site_only_with_put" {
   assert {
     condition = alltrue([
       for r in aws_s3_bucket_cors_configuration.application_data.cors_rule :
-      toset(r.allowed_origins) == toset(["https://bot.wwbp.org"])
+      toset(r.allowed_origins) == toset(["https://bot.wwbp.org", "https://d111111abcdef8.cloudfront.net"])
       && toset(r.allowed_methods) == toset(["PUT"])
     ])
-    error_message = "Production CORS must allow only PUT from https://bot.wwbp.org."
+    error_message = "Production CORS must allow only PUT, from https://bot.wwbp.org and the stack's own CloudFront URL (still reachable, e.g. in the rehearsal)."
   }
 }
 
