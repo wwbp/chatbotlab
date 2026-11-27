@@ -72,4 +72,14 @@ run "storage_is_encrypted_gp3" {
     condition     = aws_db_instance.main.storage_encrypted && aws_db_instance.main.storage_type == "gp3" && aws_db_instance.main.allocated_storage == 20
     error_message = "The database must be 20 GB of encrypted gp3."
   }
+
+  assert {
+    condition     = aws_db_instance.main.max_allocated_storage == 100
+    error_message = "Storage autoscaling must stay on, up to 100 GB."
+  }
+
+  assert {
+    condition     = !aws_db_instance.main.publicly_accessible
+    error_message = "The database must not be publicly accessible (live production's is; the new stack must not be)."
+  }
 }
