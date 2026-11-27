@@ -1350,6 +1350,32 @@ codeowners = [l.strip() for l in (ROOT / ".github" / "CODEOWNERS").read_text().s
               if l.strip() and not l.lstrip().startswith("#")] if (ROOT / ".github" / "CODEOWNERS").exists() else []
 check(codeowners == ["* @1xabhay"], f".github/CODEOWNERS must be exactly '* @1xabhay', got {codeowners}")
 
+# --- CI databases follow rds.tf ----------------------------------------------
+
+
+def database_engine_problems():
+    """CI must test the engine Terraform deploys, and the copy from live
+    production (MySQL 8.0) into it."""
+    rds = (TERRAFORM / "rds.tf").read_text()
+    engine = re.search(r'^\s*engine\s*=\s*"([^"]+)"', rds, re.M)
+    version = re.search(r'^\s*engine_version\s*=\s*"([^"]+)"', rds, re.M)
+    if not (engine and version):
+        return ["rds.tf: engine / engine_version not found"]
+    image = f"{engine.group(1)}:{version.group(1)}"
+    problems = []
+    backend = jobs_of(all_workflows["ci.yml"]).get("backend-test", "")
+    images = [i for i in re.findall(r"^\s*image:\s*(\S+)", backend, re.M) if not i.startswith("redis")]
+    if images != [image]:
+        problems.append(f"ci.yml 'Backend test': database image must be {image} (rds.tf), found {images}")
+    pair = f'{{source: "mysql:8.0", target: "{image}"}}'
+    if pair not in all_workflows["ci.yml"]:
+        problems.append(f"ci.yml data-migration matrix: must include {pair} (live production into rds.tf's engine)")
+    return problems
+
+
+for problem in database_engine_problems():
+    check(False, problem)
+
 # --- Stale files and statements ----------------------------------------------
 
 check(
