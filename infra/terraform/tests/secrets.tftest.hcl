@@ -67,12 +67,12 @@ run "no_setting_carries_a_secret_value" {
   }
 
   assert {
-    condition = nonsensitive({ for s in aws_elastic_beanstalk_environment.chatbot_api.setting : s.name => s.value if s.namespace == "aws:elasticbeanstalk:application:environment" })["APP_SECRET_ID"] == "chatbotlab-production/app"
+    condition     = nonsensitive({ for s in aws_elastic_beanstalk_environment.chatbot_api.setting : s.name => s.value if s.namespace == "aws:elasticbeanstalk:application:environment" })["APP_SECRET_ID"] == "chatbotlab-production/app"
     error_message = "APP_SECRET_ID must name the application secret, chatbotlab-production/app."
   }
 
   assert {
-    condition = nonsensitive({ for s in aws_elastic_beanstalk_environment.chatbot_api.setting : s.name => s.value if s.namespace == "aws:elasticbeanstalk:application:environment" })["DATABASE_SECRET_ID"] == "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-0123abcd-AbCdEf"
+    condition     = nonsensitive({ for s in aws_elastic_beanstalk_environment.chatbot_api.setting : s.name => s.value if s.namespace == "aws:elasticbeanstalk:application:environment" })["DATABASE_SECRET_ID"] == "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-0123abcd-AbCdEf"
     error_message = "DATABASE_SECRET_ID must be the ARN of the secret RDS keeps the master user in."
   }
 }
@@ -92,9 +92,9 @@ run "instance_role_reads_only_its_own_secrets" {
 
   assert {
     condition = jsondecode(aws_iam_role_policy.eb_instance_read_secrets.policy).Statement == [{
-      Sid      = "ReadOwnSecrets"
-      Effect   = "Allow"
-      Action   = ["secretsmanager:GetSecretValue"]
+      Sid    = "ReadOwnSecrets"
+      Effect = "Allow"
+      Action = ["secretsmanager:GetSecretValue"]
       Resource = [
         "arn:aws:secretsmanager:us-east-1:123456789012:secret:chatbotlab-production/*",
         "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-0123abcd-AbCdEf",

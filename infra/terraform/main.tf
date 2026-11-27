@@ -66,14 +66,3 @@ provider "aws" {
 # I use this data source to look up the current AWS account ID at plan time.
 # Several downstream resources (IAM policies, EB service role ARNs) need it.
 data "aws_caller_identity" "current" {}
-
-# Auto-generated Django secret key. Stored in Terraform state so it is stable
-# across every re-deploy — Django uses it to sign sessions and CSRF tokens, so
-# changing it would log out all active users.
-resource "random_password" "django_secret_key" {
-  length  = 64
-  special = false
-  keepers = {
-    project = var.project_name
-  }
-}

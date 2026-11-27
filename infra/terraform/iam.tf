@@ -6,8 +6,9 @@
 #   1. EB instance role + instance profile
 #      This is the identity that the Elastic Beanstalk EC2 instances assume.
 #      It lets the application read/write the data S3 bucket, call AWS Bedrock
-#      for AI models, and read SSM parameters — all without hardcoding any
-#      AWS credentials in the application code or environment variables.
+#      for AI models, and read its own secrets from Secrets Manager — all
+#      without hardcoding any AWS credentials in the application code or
+#      environment variables.
 #
 #   2. EB service role
 #      This is the identity that the Elastic Beanstalk service itself uses
@@ -30,7 +31,7 @@
 resource "aws_iam_role" "eb_instance_role" {
   name                 = "${local.name_prefix}-eb-instance-role"
   permissions_boundary = local.permissions_boundary_arn
-  description          = "I allow EC2 instances managed by Elastic Beanstalk to access the data S3 bucket, call Bedrock AI models, and read SSM parameters."
+  description          = "I allow EC2 instances managed by Elastic Beanstalk to access the data S3 bucket, call Bedrock AI models, and read their own secrets."
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -95,18 +96,30 @@ resource "aws_iam_role_policy" "eb_instance_application_access" {
         ]
         Resource = "*"
       },
+    ]
+  })
+}
+
+# Reading this environment's secrets at start (api/generic_chatbot/aws_secrets.py):
+# the application secret and any other under <project>-<environment>/
+# (secrets.tf), and the master user secret RDS keeps for this database. Never
+# another environment's, and never a write. A separate policy so the
+# database's ARN, known only after it exists, does not hold up the others.
+resource "aws_iam_role_policy" "eb_instance_read_secrets" {
+  name = "${local.name_prefix}-read-secrets"
+  role = aws_iam_role.eb_instance_role.name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
       {
-        # I allow the application to read SSM parameters under its namespace.
-        # This is a hook for future secrets management — right now secrets come
-        # in as environment variables, but SSM is ready if needed.
-        Sid    = "ReadApplicationSecrets"
+        Sid    = "ReadOwnSecrets"
         Effect = "Allow"
-        Action = [
-          "ssm:GetParameter",
-          "ssm:GetParameters",
-          "ssm:GetParametersByPath",
+        Action = ["secretsmanager:GetSecretValue"]
+        Resource = [
+          "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${local.name_prefix}/*",
+          aws_db_instance.main.master_user_secret[0].secret_arn,
         ]
-        Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${local.name_prefix}/*"
       },
     ]
   })
