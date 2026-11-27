@@ -2,6 +2,9 @@
 # Staff invites and password resets are sent through Amazon SES by the
 # instance role (api/chatbot/email_backend.py). These cases check that a
 # Terraform-built stack gets the settings and the permission, and no more.
+# Production sends through SES as no-reply@bot.wwbp.org unless told otherwise;
+# the test stack only ever prints emails to its log, so a rehearsal cannot
+# write to real participants.
 
 mock_provider "aws" {
   mock_data "aws_iam_policy_document" {
@@ -27,7 +30,7 @@ mock_provider "random" {}
 
 variables {
   project_name         = "chatbotlab"
-  environment          = "test"
+  environment          = "production"
   db_password          = "test-password-not-real"
   admin_panel_password = "test-password-not-real"
 }
@@ -72,7 +75,7 @@ run "instance_role_may_send_from_the_configured_address_only" {
   }
 
   assert {
-    condition     = length(aws_iam_role_policy.eb_instance_send_email) == 1 && aws_iam_role_policy.eb_instance_send_email[0].role == "chatbotlab-test-eb-instance-role"
+    condition     = length(aws_iam_role_policy.eb_instance_send_email) == 1 && aws_iam_role_policy.eb_instance_send_email[0].role == "chatbotlab-production-eb-instance-role"
     error_message = "The SES policy must be attached to the EB instance role."
   }
 
@@ -134,28 +137,58 @@ run "site_url_follows_the_custom_domain" {
   }
 }
 
-run "no_email_by_default" {
+run "production_sends_through_ses_by_default" {
   command = plan
-
-  assert {
-    condition     = length(aws_iam_role_policy.eb_instance_send_email) == 0
-    error_message = "With no sender configured the instance role must get no SES permission."
-  }
 
   assert {
     condition = tomap(nonsensitive({
       for s in aws_elastic_beanstalk_environment.chatbot_api.setting :
-      s.name => s.value if contains(["SITE_URL", "EMAIL_BACKEND", "DEFAULT_FROM_EMAIL"], s.name)
-    })) == tomap({})
-    error_message = "With nothing configured, no email setting may be sent: a stack whose EMAIL_BACKEND was set by hand must not be reset, and the application defaults to the console backend on its own."
+      s.name => s.value if contains(["EMAIL_BACKEND", "DEFAULT_FROM_EMAIL"], s.name)
+      })) == tomap({
+      EMAIL_BACKEND      = "chatbot.email_backend.SESBackend"
+      DEFAULT_FROM_EMAIL = "ChatbotLab <no-reply@bot.wwbp.org>"
+    })
+    error_message = "With no email variables, production must send through SES as ChatbotLab <no-reply@bot.wwbp.org>: no workflow passes the variables, and a stack that only logs its emails loses every invite."
+  }
+
+  assert {
+    condition = (
+      length(aws_iam_role_policy.eb_instance_send_email) == 1 &&
+      jsondecode(aws_iam_role_policy.eb_instance_send_email[0].policy).Statement[0].Condition.StringEquals["ses:FromAddress"] == "no-reply@bot.wwbp.org" &&
+      toset(jsondecode(aws_iam_role_policy.eb_instance_send_email[0].policy).Statement[0].Resource) == toset([
+        "arn:aws:ses:us-east-1:123456789012:identity/no-reply@bot.wwbp.org",
+        "arn:aws:ses:us-east-1:123456789012:identity/bot.wwbp.org",
+      ])
+    )
+    error_message = "Production's instance role must be allowed to send as no-reply@bot.wwbp.org through the bot.wwbp.org identity, and nothing else."
   }
 }
 
-run "ses_backend_needs_a_sender" {
+run "test_stack_prints_emails_to_its_log" {
   command = plan
 
   variables {
-    email_backend = "chatbot.email_backend.SESBackend"
+    environment = "test"
+  }
+
+  assert {
+    condition     = nonsensitive(one([for s in aws_elastic_beanstalk_environment.chatbot_api.setting : s.value if s.name == "EMAIL_BACKEND"])) == "django.core.mail.backends.console.EmailBackend"
+    error_message = "The test stack must set the console backend explicitly, so a backend set by hand cannot send to real people."
+  }
+
+  assert {
+    condition     = length(aws_iam_role_policy.eb_instance_send_email) == 0
+    error_message = "The test stack's instance role must not be allowed to send email."
+  }
+}
+
+run "test_stack_refuses_ses" {
+  command = plan
+
+  variables {
+    environment        = "test"
+    email_backend      = "chatbot.email_backend.SESBackend"
+    default_from_email = "no-reply@example.org"
   }
 
   expect_failures = [var.email_backend]
@@ -208,6 +241,7 @@ run "a_sender_without_the_ses_backend_grants_nothing" {
   command = plan
 
   variables {
+    email_backend      = "django.core.mail.backends.console.EmailBackend"
     default_from_email = "ChatbotLab <no-reply@example.org>"
   }
 
