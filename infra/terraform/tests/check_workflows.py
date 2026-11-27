@@ -594,10 +594,17 @@ check(
     "deploy and destroy workflows must set TF_VAR_create_github_oidc_provider to false",
 )
 
-# Production and test live in different AWS accounts. Each job that signs in
-# picks the account from the environment, in one place: production reads only
-# TF_PROD_ACCOUNT_ID, test only TF_TEST_ACCOUNT_ID, the two must differ, and
-# configure-aws-credentials refuses credentials from any other account.
+# Production and test live in ONE AWS account (the owner's decision,
+# 2026-11-27), next to the hand-built live deployment and other lab projects.
+# One secret names it (two names that must be equal would only add a way to
+# get it wrong). What keeps the environments apart is the role: each job maps
+# its environment to its own apply role in one place, the production) branch
+# naming only the production role and the test) branch only the test role,
+# and configure-aws-credentials refuses credentials from any other account.
+# The roles' policies then deny each other's names, tags and state key.
+ROLE_OF = {"production": "-terraform-apply-production", "test": "-terraform-apply-test"}
+
+
 def account_problems(job):
     steps = steps_of(job)
     choose = [i for i, st in enumerate(steps) if st.startswith("name: Choose the AWS account")]
@@ -608,25 +615,41 @@ def account_problems(job):
     problems = []
     if not re.search(r"\n        id: aws\n", step):
         problems.append("'Choose the AWS account' needs id: aws")
-    for env_name, secret in (("production", "TF_PROD_ACCOUNT_ID"), ("test", "TF_TEST_ACCOUNT_ID")):
-        used = set(re.findall(r"\b(TF_\w*ACCOUNT_ID)\b", block(step, rf"{env_name}\)")))
-        if used != {secret}:
-            problems.append(f"the {env_name}) branch must read only {secret}, reads {sorted(used)}")
+    for env_name, role in ROLE_OF.items():
+        branch = block(step, rf"{env_name}\)")
+        roles = set(re.findall(r"-terraform-apply-\w+", branch))
+        if roles != {role} or f'ROLE="${{TF_PROJECT_PREFIX}}{role}"' not in branch:
+            problems.append(f'the {env_name}) branch must set exactly ROLE="${{TF_PROJECT_PREFIX}}{role}", names {sorted(roles)}')
+    read = set(re.findall(r"secrets\.(\w+)", step))
+    if read != {"TF_AWS_ACCOUNT_ID", "TF_PROJECT_PREFIX"}:
+        problems.append(f"must read exactly the secrets TF_AWS_ACCOUNT_ID and TF_PROJECT_PREFIX, reads {sorted(read)}")
     for var, secret in re.findall(r"\n\s+(\w+):\s*\$\{\{\s*secrets\.(\w+)\s*\}\}", step):
         if var != secret:
             problems.append(f"env {var} is set from secrets.{secret}")
-    if "fail=1" not in block(step, re.escape('if [[ "$TF_PROD_ACCOUNT_ID" == "$TF_TEST_ACCOUNT_ID" ]]; then')) \
-            and "exit 1" not in block(step, re.escape('if [[ "$TF_PROD_ACCOUNT_ID" == "$TF_TEST_ACCOUNT_ID" ]]; then')):
-        problems.append("must stop when TF_PROD_ACCOUNT_ID equals TF_TEST_ACCOUNT_ID")
+    if "exit 1" not in block(step, re.escape('if [[ ! "$TF_AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then')):
+        problems.append("must exit 1 unless TF_AWS_ACCOUNT_ID is 12 digits")
     if not re.search(r"\n\s+\*\)[^\n]*exit 1", step):
         problems.append("an unknown environment must exit 1")
-    if 'echo "role=arn:aws:iam::${ACCOUNT}:role/${TF_PROJECT_PREFIX}-terraform-apply-${ENVIRONMENT}"' not in step:
-        problems.append("the role must be arn:aws:iam::${ACCOUNT}:role/${TF_PROJECT_PREFIX}-terraform-apply-${ENVIRONMENT}")
+    if 'echo "account=$TF_AWS_ACCOUNT_ID"' not in step \
+            or 'echo "role=arn:aws:iam::${TF_AWS_ACCOUNT_ID}:role/${ROLE}"' not in step:
+        problems.append("the outputs must be account=$TF_AWS_ACCOUNT_ID and role=arn:aws:iam::${TF_AWS_ACCOUNT_ID}:role/${ROLE}")
     if "\n        if:" in cred or "role-to-assume: ${{ steps.aws.outputs.role }}\n" not in cred \
             or "allowed-account-ids: ${{ steps.aws.outputs.account }}\n" not in cred:
         problems.append("configure-aws-credentials must be unconditional, assume steps.aws.outputs.role "
                         "and set allowed-account-ids: steps.aws.outputs.account")
     return problems
+
+
+# The role and the state key both follow ENVIRONMENT, so ENVIRONMENT must come
+# from the input everywhere: a literal or a second source would let a test run
+# pick the production role, or production's state key, or the reverse.
+for name, text in infra_workflows.items():
+    for value in re.findall(r"\n\s+ENVIRONMENT:\s*(.+)", text):
+        check(value.strip() == "${{ inputs.environment }}",
+              f"{name}: ENVIRONMENT must be ${{{{ inputs.environment }}}}, got '{value.strip()}'")
+for name, text in all_workflows.items():
+    for old in ("TF_PROD_ACCOUNT_ID", "TF_TEST_ACCOUNT_ID"):
+        check(old not in text, f"{name}: {old} is gone; both environments use TF_AWS_ACCOUNT_ID")
 
 
 for name, text in infra_workflows.items():
