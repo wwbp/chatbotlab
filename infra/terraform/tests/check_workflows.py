@@ -1306,8 +1306,10 @@ check("plan-staging" not in reference and "TF_APPLY_ROLE_ARN" not in reference,
 runbook = (ROOT / "docs" / "deployment" / "data-migration.rst").read_text()
 check("test stack" in runbook and "Follow it for **staging first**" not in runbook,
       "data-migration.rst: the rehearsal runs on the test stack, not on a Terraform staging stack")
-check(all(n in runbook for n in ("same AWS account", "copy-db-snapshot", "--kms-key-id", "--no-publicly-accessible",
-                                 "StorageEncrypted", "<PREFIX>-test-database-subnet-group", "delete-db-instance")),
+rehearsal_source = runbook.split("Rehearsal source\n", 1)[-1].split("\nProcedure\n", 1)[0]
+check("same AWS account" in runbook and "<PREFIX>-test-rehearsal-source --skip-final-snapshot" in runbook
+      and all(n in rehearsal_source for n in ("copy-db-snapshot", "--kms-key-id", "--no-publicly-accessible",
+                                              "StorageEncrypted", "<PREFIX>-test-database-subnet-group")),
       "data-migration.rst: the rehearsal restores the snapshot in the same AWS account, private and encrypted like "
       "production (re-encrypt an unencrypted snapshot with copy-db-snapshot --kms-key-id)")
 check(
@@ -1331,6 +1333,8 @@ check(
     and "production" in env_bullet.group(0),
     "README.md: GH_PAT is a production Environment secret, not a repository secret",
 )
+check(repo_bullet and "`TF_AWS_ACCOUNT_ID`" in repo_bullet.group(0),
+      "README.md: the repository secrets step must name `TF_AWS_ACCOUNT_ID`")
 
 # --- Destroy: manual, one named environment; production needs every yes ----
 # The test stack needs only its typed name and the test Environment's
