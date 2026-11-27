@@ -266,3 +266,26 @@ def test_api_put_refuses_renaming_a_bot_with_conversations(
     assert r.status_code == 409
     assert r.json()["error"] == Bot.in_use_message(1)
     assert Bot.objects.get(pk=bot.pk).name == bot.name
+
+
+# ── Admin note: why the bot can't be deleted or renamed ──────────────────────
+
+
+@pytest.mark.django_db
+def test_bot_page_says_why_a_bot_with_conversations_is_locked(
+    make_bot, make_conversation
+):
+    bot = make_bot()
+    make_conversation(bot=bot)
+    make_conversation(bot=bot)
+    page = _client("Config editor").get(f"{ADMIN_BOTS}{bot.pk}/change/")
+    assert (
+        "This bot has 2 conversations, so it can&#x27;t be deleted or renamed."
+        in page.content.decode()
+    )
+
+
+@pytest.mark.django_db
+def test_bot_page_of_an_unused_bot_has_no_note(make_bot):
+    page = _client("Config editor").get(f"{ADMIN_BOTS}{make_bot().pk}/change/")
+    assert "deleted or renamed" not in page.content.decode()
