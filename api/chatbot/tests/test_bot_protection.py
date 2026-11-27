@@ -25,7 +25,7 @@ from django.core.exceptions import ValidationError
 from django.db.models import ProtectedError
 from django.test import Client
 
-from chatbot.models import Bot
+from chatbot.models import Avatar, Bot, Utterance
 from chatbot.tests.test_iam_roles import _bot_change_post
 
 ADMIN_BOTS = "/api/admin/chatbot/bot/"
@@ -291,3 +291,84 @@ def test_bot_page_says_why_a_bot_with_conversations_is_locked(
 def test_bot_page_of_an_unused_bot_has_no_note(make_bot):
     page = _client("Config editor").get(f"{ADMIN_BOTS}{make_bot().pk}/change/")
     assert "deleted or renamed" not in page.content.decode()
+
+
+# ── Review fixes ─────────────────────────────────────────────────────────────
+
+
+def _staff_with(*codenames):
+    user = User.objects.create_user(
+        username=f"u_{uuid.uuid4().hex[:8]}", password="pass", is_staff=True
+    )
+    user.user_permissions.add(*Permission.objects.filter(codename__in=codenames))
+    c = Client()
+    c.force_login(user)
+    return c
+
+
+@pytest.mark.django_db
+def test_staff_holding_delete_bot_cannot_delete_in_the_admin(make_bot):
+    """Superusers only: holding delete_bot is not enough (page or bulk)."""
+    bot = make_bot()
+    c = _staff_with("view_bot", "change_bot", "delete_bot")
+    assert _page_delete(c, bot).status_code == 403
+    _bulk_delete(c, bot)
+    assert Bot.objects.filter(pk=bot.pk).exists()
+
+
+@pytest.mark.django_db
+def test_api_409_happens_before_any_avatar_or_s3_clean_up(
+    make_bot, make_conversation
+):
+    bot = make_bot()
+    make_conversation(bot=bot)
+    avatar = Avatar.objects.create(bot=bot, chatbot_avatar="x.png")
+    with patch("chatbot.services.bots.delete") as s3:
+        r = _client(superuser=True).delete(f"/api/bots/{bot.pk}/")
+    assert r.status_code == 409
+    s3.assert_not_called()
+    assert Avatar.objects.filter(pk=avatar.pk).exists()
+
+
+@pytest.mark.django_db
+def test_delete_checks_the_saved_name_not_the_one_in_memory(
+    make_bot, make_conversation
+):
+    bot = make_bot()
+    make_conversation(bot=bot)
+    bot.name = f"unsaved_{uuid.uuid4().hex[:6]}"
+    with pytest.raises(ProtectedError):
+        bot.delete()
+    assert Bot.objects.filter(pk=bot.pk).exists()
+
+
+@pytest.fixture
+def bot_named_only_in_utterances(make_bot, make_conversation):
+    """Bot B answered in a conversation started with bot A (a reused
+    conversation_id with another bot_name): B has utterances, no Conversation."""
+    a, b = make_bot(), make_bot()
+    Utterance.objects.create(
+        conversation=make_conversation(bot=a),
+        speaker_id="assistant",
+        bot_name=b.name,
+        text="hi",
+    )
+    yield b
+    Utterance.objects.filter(bot_name=b.name).delete()
+
+
+@pytest.mark.django_db
+def test_a_bot_named_only_in_utterances_is_in_use(bot_named_only_in_utterances):
+    b = bot_named_only_in_utterances
+    assert b.conversation_count() == 1
+    with patch("chatbot.services.bots.delete"):
+        r = _client(superuser=True).delete(f"/api/bots/{b.pk}/")
+    assert r.status_code == 409
+    with pytest.raises(ProtectedError):
+        Bot.objects.get(pk=b.pk).delete()
+    with pytest.raises(ProtectedError):
+        Bot.objects.filter(pk=b.pk).delete()
+    b.name = f"renamed_{uuid.uuid4().hex[:6]}"
+    with pytest.raises(ValidationError, match="can't be deleted or renamed"):
+        b.save()
+    assert Bot.objects.filter(pk=b.pk).exists()
