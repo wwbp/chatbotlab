@@ -23,3 +23,8 @@ force_destroy_buckets   = false
 # Setting it makes the next apply create a certificate and print the DNS
 # record to add.
 domain_name = ""
+
+# Where invite and password-reset links point, and an allowed CORS/CSRF origin.
+# Set apart from domain_name: moving the bot.wwbp.org alias to this stack's
+# CloudFront is a cutover step, and the alias cannot be on two distributions.
+site_url = "https://bot.wwbp.org"

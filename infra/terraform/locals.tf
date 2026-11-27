@@ -36,11 +36,14 @@ locals {
   # CSRF_TRUSTED_ORIGINS and CORS_ALLOWED_ORIGINS. The CloudFront domain is
   # matched by wildcard rather than named directly, because CloudFront's
   # origin is the Elastic Beanstalk environment and naming it here would make
-  # the two resources depend on each other.
-  frontend_origins = join(",", compact([
+  # the two resources depend on each other. The site URL is listed too: before
+  # the domain moves to this stack's CloudFront, production names its URL
+  # in site_url alone.
+  frontend_origins = join(",", distinct(compact([
     var.domain_name != "" ? "https://${var.domain_name}" : "",
+    local.site_url,
     "https://*.cloudfront.net",
-  ]))
+  ])))
 
   # Where invite and password-reset links point. This cannot fall back to the
   # CloudFront domain: CloudFront's origin is the Elastic Beanstalk

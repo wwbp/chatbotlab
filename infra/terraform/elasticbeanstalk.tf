@@ -230,11 +230,6 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
   # ----- Database ------------------------------------------------------------
   setting {
     namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "DATABASE_ENGINE"
-    value     = "django.db.backends.mysql"
-  }
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
     name      = "DATABASE_HOST"
     value     = aws_db_instance.main.address
   }
@@ -257,6 +252,31 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
     namespace = "aws:elasticbeanstalk:application:environment"
     name      = "DATABASE_PASSWORD"
     value     = var.db_password
+  }
+  # Django under ASGI must open a connection per request: a kept connection
+  # is shared across threads and breaks under load (technical reference,
+  # "Known gotchas"). Set explicitly so a hand-set value cannot linger.
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "CONN_MAX_AGE"
+    value     = "0"
+  }
+
+  # ----- Server --------------------------------------------------------------
+  # Read by the Dockerfile CMD. Uvicorn workers are async, so two per vCPU of
+  # a t3.small (2 vCPU, 2 GB) is enough and fits in memory; at 3 instances
+  # that is 12 processes, far below a small RDS instance's connection limit.
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "GUNICORN_WORKERS"
+    value     = "4"
+  }
+  # Load-test switch: on, participants get canned replies. Pinned off so a
+  # value set by hand during a load test cannot survive into a study.
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "MOCK_LLM"
+    value     = "false"
   }
 
   # ----- Cache ---------------------------------------------------------------
