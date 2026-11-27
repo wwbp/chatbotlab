@@ -58,21 +58,30 @@ resource "aws_iam_role_policy" "eb_instance_application_access" {
     Version = "2012-10-17"
     Statement = [
       {
-        # The application reads and writes avatar images, user uploads, and
-        # voice audio recordings to this bucket. ListBucket is needed to
-        # check whether a file exists before uploading.
-        Sid    = "ReadWriteApplicationDataBucket"
+        # Only the three prefixes the application writes: bot and participant
+        # avatars (avatar/, s3_helper.py), participants' raw photos (uploads/,
+        # also presigned for the browser's PUT in upload.py), and voice audio
+        # (utterance_audio/, Utterance.audio_file through S3Storage).
+        Sid    = "ReadWriteApplicationDataObjects"
         Effect = "Allow"
         Action = [
           "s3:GetObject",
           "s3:PutObject",
           "s3:DeleteObject",
-          "s3:ListBucket",
         ]
         Resource = [
-          aws_s3_bucket.application_data.arn,
-          "${aws_s3_bucket.application_data.arn}/*",
+          for prefix in ["avatar", "uploads", "utterance_audio"] :
+          "${aws_s3_bucket.application_data.arn}/${prefix}/*"
         ]
+      },
+      {
+        # get_random_image lists avatar/. S3Storage checks a name is free
+        # with HeadObject, which returns 404 for a missing key only to a
+        # caller that may list the bucket (403 otherwise, and the save fails).
+        Sid      = "ListApplicationDataBucket"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = aws_s3_bucket.application_data.arn
       },
       {
         # The application can call AWS Bedrock to run Llama and Claude models

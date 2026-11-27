@@ -137,3 +137,40 @@ run "without_a_domain_cors_names_the_cloudfront_site" {
     error_message = "Without a custom domain, CORS must name exactly the CloudFront site."
   }
 }
+
+# Object actions on the three prefixes the app writes; listing on the bucket
+# (get_random_image lists avatar/, and S3Storage needs it so a missing key is a
+# 404 rather than a 403). Nothing else, nowhere else.
+run "instance_role_s3_access_is_the_data_bucket_prefixes_only" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for st in jsondecode(aws_iam_role_policy.eb_instance_application_access.policy).Statement :
+      alltrue([for a in flatten([st.Action]) : !startswith(a, "s3:") || contains([
+        "s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket",
+      ], a)])
+    ])
+    error_message = "The instance role may use only s3:GetObject, PutObject, DeleteObject and ListBucket."
+  }
+
+  assert {
+    condition = toset(flatten([
+      for st in jsondecode(aws_iam_role_policy.eb_instance_application_access.policy).Statement :
+      flatten([st.Resource]) if anytrue([for a in flatten([st.Action]) : contains(["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], a)])
+      ])) == toset([
+      "arn:aws:s3:::chatbotlab-test-data/avatar/*",
+      "arn:aws:s3:::chatbotlab-test-data/uploads/*",
+      "arn:aws:s3:::chatbotlab-test-data/utterance_audio/*",
+    ])
+    error_message = "Object actions must cover exactly avatar/, uploads/ and utterance_audio/ in the data bucket."
+  }
+
+  assert {
+    condition = toset(flatten([
+      for st in jsondecode(aws_iam_role_policy.eb_instance_application_access.policy).Statement :
+      flatten([st.Resource]) if contains(flatten([st.Action]), "s3:ListBucket")
+    ])) == toset(["arn:aws:s3:::chatbotlab-test-data"])
+    error_message = "s3:ListBucket must be granted on the data bucket only."
+  }
+}
