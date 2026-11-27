@@ -26,7 +26,6 @@ mock_provider "random" {}
 variables {
   project_name         = "chatbotlab"
   environment          = "test"
-  db_password          = "test-password-not-real"
   admin_panel_password = "test-password-not-real"
   domain_name          = "chat.example.org"
   # As in the workflows: the account's OIDC provider exists already, so its

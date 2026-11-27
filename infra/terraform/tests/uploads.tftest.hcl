@@ -44,7 +44,6 @@ override_resource {
 variables {
   project_name         = "chatbotlab"
   environment          = "test"
-  db_password          = "test-password-not-real"
   admin_panel_password = "test-password-not-real"
 }
 

@@ -24,7 +24,6 @@ mock_provider "random" {}
 
 variables {
   project_name         = "chatbotlab"
-  db_password          = "test-password-not-real"
   admin_panel_password = "test-password-not-real"
 }
 
