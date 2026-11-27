@@ -105,7 +105,8 @@ resource "aws_iam_role_policy" "eb_instance_application_access" {
 
 # Sending staff invites and password resets through Amazon SES.
 #
-# Created only when the SES backend is selected and a sender is configured. The application
+# Created only when the SES backend is selected and a sender is configured:
+# by default on production, as no-reply@bot.wwbp.org (locals.tf). The application
 # (api/chatbot/email_backend.py) calls the SES v2 SendEmail API with a raw
 # MIME message and passes the sender explicitly, so the one statement here
 # allows sending from exactly that address and from no other. SendRawEmail is
@@ -115,7 +116,7 @@ resource "aws_iam_role_policy" "eb_instance_application_access" {
 # the account to leave the SES sandbox: both need a person (a DNS record or a
 # confirmation email, and a support request). See README, "Email".
 resource "aws_iam_role_policy" "eb_instance_send_email" {
-  count = local.ses_from_address != "" && var.email_backend == "chatbot.email_backend.SESBackend" ? 1 : 0
+  count = local.ses_from_address != "" && local.email_backend == "chatbot.email_backend.SESBackend" ? 1 : 0
 
   name = "${local.name_prefix}-send-email"
   role = aws_iam_role.eb_instance_role.name

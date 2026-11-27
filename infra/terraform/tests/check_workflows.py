@@ -501,6 +501,9 @@ check(
     prod.get("backup_retention_period", "").isdigit() and int(prod["backup_retention_period"]) >= 7,
     f"production.tfvars: backup_retention_period must be at least 7, got {prod.get('backup_retention_period')}",
 )
+# Invite and password-reset links, and the CORS/CSRF origin (env_parity.tftest.hcl).
+check(prod.get("site_url") == '"https://bot.wwbp.org"', "production.tfvars: site_url must be \"https://bot.wwbp.org\"")
+check(prod.get("eb_max_instances") == "3", "production.tfvars: eb_max_instances must be 3 (production scales from 1 to 3)")
 test_vars = tfvars("test")
 check(test_vars.get("deletion_protection") == "false" and test_vars.get("force_destroy_buckets") == "true",
       "test.tfvars: the on-demand test stack turns deletion protection off and lets buckets be force-destroyed")
