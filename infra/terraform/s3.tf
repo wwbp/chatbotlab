@@ -90,6 +90,18 @@ resource "aws_s3_bucket_public_access_block" "application_data" {
   restrict_public_buckets = true
 }
 
+# SSE-S3, as on the live production bucket. S3 applies it to new buckets by
+# default; stating it keeps it from depending on that default.
+resource "aws_s3_bucket_server_side_encryption_configuration" "application_data" {
+  bucket = aws_s3_bucket.application_data.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
 # Participants' raw photos (uploads/) are needed only long enough to generate
 # their avatar. The app deletes each one afterwards; this catches every path
 # that does not (a failed generation, an abandoned upload). Same rule as the

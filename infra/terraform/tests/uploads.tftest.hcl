@@ -64,3 +64,25 @@ run "raw_participant_photos_expire_after_one_day" {
     error_message = "The data bucket must expire uploads/ after 1 day (live production's privacy rule)."
   }
 }
+
+run "data_bucket_is_private_and_encrypted" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      aws_s3_bucket_public_access_block.application_data.block_public_acls,
+      aws_s3_bucket_public_access_block.application_data.block_public_policy,
+      aws_s3_bucket_public_access_block.application_data.ignore_public_acls,
+      aws_s3_bucket_public_access_block.application_data.restrict_public_buckets,
+    ])
+    error_message = "The data bucket must block all public access."
+  }
+
+  assert {
+    condition = one([
+      for r in aws_s3_bucket_server_side_encryption_configuration.application_data.rule :
+      one(r.apply_server_side_encryption_by_default).sse_algorithm
+    ]) == "AES256"
+    error_message = "The data bucket must encrypt at rest with SSE-S3 (as live production does)."
+  }
+}
