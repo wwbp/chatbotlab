@@ -1615,7 +1615,7 @@ class BotAdmin(FormulaSafeExportMixin, HistoryAdmin):
             if (n := bot.conversation_count())
         ]
         if in_use:
-            perms_needed.discard(Bot._meta.verbose_name)
+            perms_needed.discard(self.opts.verbose_name)
             protected = [*protected, *in_use]
         return deleted, counts, perms_needed, protected
 

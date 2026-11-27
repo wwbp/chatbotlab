@@ -9,6 +9,10 @@ conversations. Nobody may rename a bot that has conversations.
 Coverage:
   - admin: change-page delete and bulk "delete selected", for a Config editor
     and a superuser, on an unused bot and a bot with a conversation
+  - API: DELETE is superuser-only, 409 for a bot in use, 204 otherwise
+  - model: Bot.delete() and Bot.objects...delete() raise ProtectedError
+  - rename: refused in Bot.clean()/save(), the admin form and the API PUT
+  - the bot's admin page explains why it is locked
 """
 
 import json
@@ -253,9 +257,7 @@ def test_admin_form_renames_an_unused_bot(make_bot):
 
 
 @pytest.mark.django_db
-def test_api_put_refuses_renaming_a_bot_with_conversations(
-    make_bot, make_conversation
-):
+def test_api_put_refuses_renaming_a_bot_with_conversations(make_bot, make_conversation):
     bot = make_bot()
     make_conversation(bot=bot)
     r = _client("Config editor").put(
