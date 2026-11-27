@@ -60,7 +60,10 @@ name: Deploy Infrastructure
 #
 #   Environment secrets (Settings → Environments → test / production)
 #     DB_PASSWORD           Database password (letters + numbers only).
-#     ADMIN_PANEL_PASSWORD  Password of the `admin` user in the admin panel.
+#     ADMIN_PANEL_PASSWORD  Test only: password of the `admin` user the test
+#                           stack creates at boot. Production creates no
+#                           account at boot (its superusers come with the
+#                           copied database) and ignores it.
 #     OPENAI_API_KEY        OpenAI key (or ANTHROPIC_API_KEY, or both).
 #     ANTHROPIC_API_KEY
 #     SURVEY_INGEST_TOKEN   Optional.
@@ -164,7 +167,7 @@ jobs:
           missing() { echo "::error::$1 secret is not set"; fail=1; }
 
           [[ -z "$DB_PASSWORD" ]]          && missing "DB_PASSWORD"
-          [[ -z "$ADMIN_PANEL_PASSWORD" ]] && missing "ADMIN_PANEL_PASSWORD"
+          [[ "$ENVIRONMENT" == "test" && -z "$ADMIN_PANEL_PASSWORD" ]] && missing "ADMIN_PANEL_PASSWORD"
           [[ -z "$TF_PROJECT_PREFIX" ]]    && missing "TF_PROJECT_PREFIX"
 
           if [[ -z "$OPENAI_KEY" && -z "$ANTHROPIC_KEY" ]]; then
@@ -488,7 +491,11 @@ jobs:
             echo "| Chatbot | $FRONTEND_URL |"
             echo "| Admin panel | $FRONTEND_URL/api/admin/ |"
             echo ""
-            echo "Log in to the admin panel with username \`admin\` and the password you set as \`ADMIN_PANEL_PASSWORD\`."
+            if [[ "$ENVIRONMENT" == "test" ]]; then
+              echo "Log in to the admin panel with username \`admin\` and the test Environment's \`ADMIN_PANEL_PASSWORD\`."
+            else
+              echo "Production creates no admin at boot: log in with a superuser from the copied database, or create one once with \`python manage.py createsuperuser\` on an instance."
+            fi
             echo ""
             echo "**Next step:** deploy the application code. Infrastructure and application deploys are separate: this workflow does not start one."
           } >> "$GITHUB_STEP_SUMMARY"

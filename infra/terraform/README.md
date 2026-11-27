@@ -367,7 +367,8 @@ In GitHub (**Settings**):
      (the same refs `apply-test-trust.json` accepts).
    Without required reviewers, anyone who can run workflows can apply.
 5. **Environment secrets**, in `production` and in `test` (different values):
-   `DB_PASSWORD`, `ADMIN_PANEL_PASSWORD`, and `OPENAI_API_KEY` and/or
+   `DB_PASSWORD`, `ADMIN_PANEL_PASSWORD` (test only: production creates no
+   admin at boot), and `OPENAI_API_KEY` and/or
    `ANTHROPIC_API_KEY`. Optional: `SURVEY_INGEST_TOKEN`. The test stack uses
    its own LLM API keys, scoped to it (a separate project or key with a low
    spending limit), never production's. In `production` only: `GH_PAT`, if

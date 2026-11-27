@@ -136,7 +136,7 @@ A password for the internal database. You will rarely need to type this. Rules: 
 Example: ``Research2024db``
 
 **Admin panel password (``ADMIN_PANEL_PASSWORD``):**
-The password you will use to log into the chatbot configuration panel. Choose something you will remember.
+Only the on-demand **test** stack uses it: it creates an ``admin`` user with this password when it starts. Production creates no account at boot (see Step 10), so you may leave it unset in the ``production`` Environment.
 Example: ``MyStudyAdmin99``
 
 Step 6: Create a GitHub Personal Access Token
@@ -217,7 +217,7 @@ Add each of the following secrets one at a time:
      - Yes
    * - ``ADMIN_PANEL_PASSWORD``
      - Password you chose in Step 5
-     - Yes
+     - Test stack only
    * - ``GH_PAT``
      - From Step 6
      - Yes
@@ -282,7 +282,7 @@ When the workflow finishes, click the **Summary** tab inside the completed run. 
    Admin panel:  https://xxxx.cloudfront.net/api/admin/
 
 1. Open the **Admin panel** URL
-2. Log in with username ``admin`` and your ``ADMIN_PANEL_PASSWORD``
+2. Log in. Production creates no admin at boot: after a migration, log in with a superuser from the copied database; on a fresh production database, create one once with ``python manage.py createsuperuser`` (run it on an Elastic Beanstalk instance, inside the app container). On the test stack, log in as ``admin`` with the test Environment's own ``ADMIN_PANEL_PASSWORD``.
 3. Configure your chatbot: system prompt, persona, typing delays, message chunking
 4. Share the **Chatbot** URL with your study participants, or embed it in your Qualtrics/Prolific survey
 
@@ -329,7 +329,7 @@ Troubleshooting
 The workflow leaves the resources it already created in place. It does not delete anything. Fix the issue (usually a missing or incorrect secret) and run the workflow again. It continues from where it stopped.
 
 **The admin panel will not log in.**
-Make sure you are going to ``/api/admin/`` (not just ``/admin/``). The username is ``admin`` and the password is the value you set as ``ADMIN_PANEL_PASSWORD``.
+Make sure you are going to ``/api/admin/`` (not just ``/admin/``). On production, use a superuser from the copied database or one made with ``python manage.py createsuperuser``: there is no boot-created ``admin``. On the test stack, the username is ``admin`` and the password is the test Environment's ``ADMIN_PANEL_PASSWORD``.
 
 **The chatbot URL shows an error after deployment.**
 Application startup takes 5-10 minutes after infrastructure provisioning. Wait a few minutes and refresh. If the error persists, check the **Deploy Humanlike-Bot Client and Server to Production** workflow in the Actions tab.
