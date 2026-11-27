@@ -20,9 +20,6 @@ staticfiles/
 # OS files
 .DS_Store
 
-# Dev container
-.devcontainer/init.sql
-
 # cache
 .pytest_cache
 .ruff_cache

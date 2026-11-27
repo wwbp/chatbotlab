@@ -22,7 +22,6 @@ services:
     volumes:
       # A new volume name: MySQL cannot start on an old MariaDB data volume.
       - mysql-data:/var/lib/mysql
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
       # Grants the app user rights on Django's test_* databases; without it the
       # test suite cannot create its database. See the script for details.
       - ./init-test-db.sh:/docker-entrypoint-initdb.d/init-test-db.sh

@@ -253,6 +253,9 @@ Either `MOCK_LLM=true`, or `OPENAI_API_KEY` is unset — both make `moderate_mes
 **Local data is gone after the switch from MariaDB to MySQL**
 MySQL cannot open a MariaDB data directory, so the database now lives in a new `mysql-data` volume and starts empty (the backend applies migrations on start; run `make superuser` again). The old data is still in the `chatbotlab_mariadb-data` volume; remove it with `docker volume rm chatbotlab_mariadb-data` once you no longer need it.
 
+**`make up` fails to initialise the database, mentioning `init.sql`**
+Older Compose files mounted an untracked `.devcontainer/init.sql`; on a fresh clone Docker created a directory in its place and the first start failed. The mount is gone. If you kept SQL there, it no longer runs: apply it by hand with `docker exec -i db mysql -uroot -p"$MYSQL_ROOT_PASSWORD" < .devcontainer/init.sql`.
+
 **Database connection errors after changing `.env`**
 The MySQL user is created only on first initialisation. Run `make reset` to rebuild the volume — this deletes local data.
 
