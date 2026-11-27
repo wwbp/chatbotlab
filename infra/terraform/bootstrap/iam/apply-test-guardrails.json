@@ -70,7 +70,7 @@
       "Resource": "*"
     },
     {
-      "Sid": "DenyOtherProductionNames",
+      "Sid": "DenyOtherEnvNames",
       "Effect": "Deny",
       "Action": "*",
       "Resource": [
@@ -84,17 +84,87 @@
         "arn:aws:iam::*:*/<PREFIX>-production-*",
         "arn:aws:logs:*:*:log-group:/aws/elasticbeanstalk/<PREFIX>-production-*",
         "arn:aws:ssm:*:*:parameter/<PREFIX>-production/*",
-        "arn:aws:secretsmanager:*:*:secret:<PREFIX>-production/*"
+        "arn:aws:secretsmanager:*:*:secret:<PREFIX>-production/*",
+        "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>/<PREFIX>/staging/*",
+        "arn:aws:s3:::<PREFIX>-staging-*",
+        "arn:aws:s3:::elasticbeanstalk-*/<PREFIX>-staging/*",
+        "arn:aws:rds:*:*:*:<PREFIX>-staging-*",
+        "arn:aws:elasticache:*:*:*:<PREFIX>-staging-*",
+        "arn:aws:elasticbeanstalk:*:*:*/<PREFIX>-staging",
+        "arn:aws:elasticbeanstalk:*:*:*/<PREFIX>-staging/*",
+        "arn:aws:iam::*:*/<PREFIX>-staging-*",
+        "arn:aws:logs:*:*:log-group:/aws/elasticbeanstalk/<PREFIX>-staging-*",
+        "arn:aws:ssm:*:*:parameter/<PREFIX>-staging/*",
+        "arn:aws:secretsmanager:*:*:secret:<PREFIX>-staging/*"
       ]
     },
     {
-      "Sid": "DenyOtherProductionTags",
+      "Sid": "DenyOtherEnvTags",
       "Effect": "Deny",
       "Action": "*",
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:ResourceTag/Environment": "production"
+          "aws:ResourceTag/Environment": [
+            "production",
+            "staging"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenySendingEmail",
+      "Effect": "Deny",
+      "Action": "ses:Send*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyStateBucketConfiguration",
+      "Effect": "Deny",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:DeleteBucket*",
+        "s3:PutBucket*",
+        "s3:PutEncryptionConfiguration",
+        "s3:PutLifecycleConfiguration",
+        "s3:PutReplicationConfiguration"
+      ],
+      "Resource": "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>"
+    },
+    {
+      "Sid": "DenyListingOtherStateKeys",
+      "Effect": "Deny",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>",
+      "Condition": {
+        "StringNotLike": {
+          "s3:prefix": [
+            "<PREFIX>/test/*",
+            "env:/*"
+          ]
+        },
+        "Null": {
+          "s3:prefix": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyConfigurationTemplates",
+      "Effect": "Deny",
+      "Action": "elasticbeanstalk:CreateConfigurationTemplate",
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyUserDataReads",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:DescribeInstanceAttribute",
+        "ec2:DescribeLaunchTemplateVersions"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:ResourceTag/Environment": "test"
         }
       }
     }

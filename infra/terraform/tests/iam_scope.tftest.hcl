@@ -148,3 +148,43 @@ run "deploy_role_subjects_have_no_wildcard_or_pull_request" {
     error_message = "No deploy role subject may contain a wildcard or pull_request."
   }
 }
+
+# Both stacks share one AWS account, so the Environment and Project tags are
+# what the apply roles' ABAC statements and cross-environment Denies key on.
+# Every resource gets them from the providers' default_tags = local.common_tags
+# (main.tf; tests/check_workflows.py checks both providers carry it and that
+# no resource overrides the keys). A mocked plan cannot evaluate default_tags
+# (tags_all stays unknown), so this checks the map they come from.
+run "default_tags_name_the_environment_and_project" {
+  command = plan
+
+  assert {
+    condition     = local.common_tags["Environment"] == "test" && local.common_tags["Project"] == "chatbotlab"
+    error_message = "local.common_tags (the providers' default_tags) must carry Environment = var.environment and Project = var.project_name."
+  }
+}
+
+run "default_tags_name_production" {
+  command = plan
+
+  variables {
+    environment = "production"
+  }
+
+  assert {
+    condition     = local.common_tags["Environment"] == "production" && local.common_tags["Project"] == "chatbotlab"
+    error_message = "local.common_tags (the providers' default_tags) must carry Environment = var.environment and Project = var.project_name."
+  }
+}
+
+# A rehearsal copies real participant data into the test stack's database,
+# in the account it shares with production: it must be as private and as
+# encrypted as production's.
+run "test_database_is_private_and_encrypted" {
+  command = plan
+
+  assert {
+    condition     = aws_db_instance.main.storage_encrypted && !aws_db_instance.main.publicly_accessible
+    error_message = "The test database must be encrypted and not publicly accessible, like production's."
+  }
+}

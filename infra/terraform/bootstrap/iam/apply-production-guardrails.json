@@ -70,10 +70,21 @@
       "Resource": "*"
     },
     {
-      "Sid": "DenyOtherStagingNames",
+      "Sid": "DenyOtherEnvNames",
       "Effect": "Deny",
       "Action": "*",
       "Resource": [
+        "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>/<PREFIX>/test/*",
+        "arn:aws:s3:::<PREFIX>-test-*",
+        "arn:aws:s3:::elasticbeanstalk-*/<PREFIX>-test/*",
+        "arn:aws:rds:*:*:*:<PREFIX>-test-*",
+        "arn:aws:elasticache:*:*:*:<PREFIX>-test-*",
+        "arn:aws:elasticbeanstalk:*:*:*/<PREFIX>-test",
+        "arn:aws:elasticbeanstalk:*:*:*/<PREFIX>-test/*",
+        "arn:aws:iam::*:*/<PREFIX>-test-*",
+        "arn:aws:logs:*:*:log-group:/aws/elasticbeanstalk/<PREFIX>-test-*",
+        "arn:aws:ssm:*:*:parameter/<PREFIX>-test/*",
+        "arn:aws:secretsmanager:*:*:secret:<PREFIX>-test/*",
         "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>/<PREFIX>/staging/*",
         "arn:aws:s3:::<PREFIX>-staging-*",
         "arn:aws:s3:::elasticbeanstalk-*/<PREFIX>-staging/*",
@@ -88,13 +99,36 @@
       ]
     },
     {
-      "Sid": "DenyOtherStagingTags",
+      "Sid": "DenyOtherEnvTags",
       "Effect": "Deny",
       "Action": "*",
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:ResourceTag/Environment": "staging"
+          "aws:ResourceTag/Environment": [
+            "test",
+            "staging"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyConfigurationTemplates",
+      "Effect": "Deny",
+      "Action": "elasticbeanstalk:CreateConfigurationTemplate",
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyUserDataReads",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:DescribeInstanceAttribute",
+        "ec2:DescribeLaunchTemplateVersions"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:ResourceTag/Environment": "production"
         }
       }
     }

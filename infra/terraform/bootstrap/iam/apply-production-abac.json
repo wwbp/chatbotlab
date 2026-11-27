@@ -17,9 +17,7 @@
         "ec2:CreateRouteTable",
         "ec2:CreateSecurityGroup",
         "ec2:CreateSubnet",
-        "ec2:CreateVolume",
         "ec2:CreateVpc",
-        "ec2:RunInstances",
         "elasticloadbalancing:CreateListener",
         "elasticloadbalancing:CreateLoadBalancer",
         "elasticloadbalancing:CreateRule",
@@ -66,10 +64,13 @@
         "cloudformation:CancelUpdateStack",
         "cloudformation:ContinueUpdateRollback",
         "cloudformation:Delete*",
+        "cloudformation:Describe*",
+        "cloudformation:List*",
         "cloudformation:SignalResource",
         "cloudformation:Update*",
         "cloudfront:CreateInvalidation",
         "cloudfront:DeleteDistribution",
+        "cloudfront:Get*",
         "cloudfront:UntagResource",
         "cloudfront:UpdateDistribution",
         "ec2:Associate*",
@@ -197,7 +198,31 @@
       }
     },
     {
-      "Sid": "RunInstancesInputs",
+      "Sid": "RunInstancesTagged",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:*:<ACCOUNT_ID>:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Environment": "production",
+          "aws:RequestTag/Project": "<PREFIX>"
+        },
+        "ForAllValues:StringLike": {
+          "aws:TagKeys": [
+            "Environment",
+            "ManagedBy",
+            "Name",
+            "Project",
+            "Purpose",
+            "Tier",
+            "aws:cloudformation:*",
+            "elasticbeanstalk:*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "RunInstancesAmazonImages",
       "Effect": "Allow",
       "Action": [
         "ec2:CreateLaunchTemplateVersion",
@@ -205,9 +230,40 @@
       ],
       "Resource": [
         "arn:aws:ec2:*::image/*",
-        "arn:aws:ec2:*::snapshot/*",
+        "arn:aws:ec2:*::snapshot/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "ec2:Owner": "amazon"
+        }
+      }
+    },
+    {
+      "Sid": "RunInstancesOwnNetwork",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateLaunchTemplateVersion",
+        "ec2:RunInstances"
+      ],
+      "Resource": [
         "arn:aws:ec2:*:<ACCOUNT_ID>:subnet/*",
-        "arn:aws:ec2:*:<ACCOUNT_ID>:security-group/*",
+        "arn:aws:ec2:*:<ACCOUNT_ID>:security-group/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Environment": "production",
+          "aws:ResourceTag/Project": "<PREFIX>"
+        }
+      }
+    },
+    {
+      "Sid": "RunInstancesInputs",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateLaunchTemplateVersion",
+        "ec2:RunInstances"
+      ],
+      "Resource": [
         "arn:aws:ec2:*:<ACCOUNT_ID>:network-interface/*",
         "arn:aws:ec2:*:<ACCOUNT_ID>:volume/*",
         "arn:aws:ec2:*:<ACCOUNT_ID>:launch-template/*"
@@ -233,8 +289,7 @@
       "Action": [
         "cloudfront:CreateOriginAccessControl",
         "cloudfront:DeleteOriginAccessControl",
-        "cloudfront:GetOriginAccessControl",
-        "cloudfront:UpdateOriginAccessControl"
+        "cloudfront:GetOriginAccessControl"
       ],
       "Resource": "arn:aws:cloudfront::<ACCOUNT_ID>:origin-access-control/*"
     }

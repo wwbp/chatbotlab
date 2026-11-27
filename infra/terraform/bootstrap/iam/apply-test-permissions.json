@@ -11,17 +11,6 @@
       "Resource": "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>"
     },
     {
-      "Sid": "CreateStateBucketOnFirstApply",
-      "Effect": "Allow",
-      "Action": [
-        "s3:CreateBucket",
-        "s3:PutBucketPublicAccessBlock",
-        "s3:PutBucketVersioning",
-        "s3:PutEncryptionConfiguration"
-      ],
-      "Resource": "arn:aws:s3:::<PREFIX>-tfstate-<ACCOUNT_ID>"
-    },
-    {
       "Sid": "ReadWriteOwnStateAndLock",
       "Effect": "Allow",
       "Action": [
@@ -78,7 +67,7 @@
       "Effect": "Allow",
       "Action": "elasticbeanstalk:*",
       "Resource": [
-        "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:*/<PREFIX>-test",
+        "arn:aws:elasticbeanstalk:*:*:application/<PREFIX>-test",
         "arn:aws:elasticbeanstalk:*:<ACCOUNT_ID>:*/<PREFIX>-test/*",
         "arn:aws:elasticbeanstalk:*::solutionstack/*",
         "arn:aws:elasticbeanstalk:*::platform/*"
@@ -97,16 +86,14 @@
         "acm:Describe*",
         "acm:List*",
         "autoscaling:Describe*",
-        "cloudformation:Describe*",
-        "cloudformation:Get*",
-        "cloudformation:List*",
-        "cloudfront:Describe*",
-        "cloudfront:Get*",
         "cloudfront:List*",
         "ec2:Describe*",
         "elasticache:Describe*",
         "elasticache:ListTagsForResource",
-        "elasticbeanstalk:Describe*",
+        "elasticbeanstalk:DescribeA*",
+        "elasticbeanstalk:DescribeE*",
+        "elasticbeanstalk:DescribeI*",
+        "elasticbeanstalk:DescribeP*",
         "elasticbeanstalk:List*",
         "elasticloadbalancing:Describe*",
         "iam:Get*",

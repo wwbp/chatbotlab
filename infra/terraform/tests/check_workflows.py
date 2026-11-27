@@ -231,6 +231,20 @@ check(
     "deploy-infrastructure.yml: 'Check required secrets' must exit 1 when a required secret is missing",
 )
 
+# ADMIN_PANEL_PASSWORD makes the boot-created admin, which only the test
+# stack has: production gets its real superusers with the copied database,
+# and Terraform ignores the value there. Required for test only.
+secrets_step = block(deploy, r"name: Check required secrets")
+check(
+    '[[ "$ENVIRONMENT" == "test" && -z "$ADMIN_PANEL_PASSWORD" ]] && missing "ADMIN_PANEL_PASSWORD"' in secrets_step
+    and not re.search(r'^\s*\[\[ -z "\$ADMIN_PANEL_PASSWORD" \]\]', secrets_step, re.M),
+    "deploy-infrastructure.yml: 'Check required secrets' must require ADMIN_PANEL_PASSWORD for test only",
+)
+for doc in (ROOT / "docs" / "deployment" / "for-researchers.rst",):
+    text = doc.read_text()
+    check("createsuperuser" in text and "Log in with username ``admin`` and your ``ADMIN_PANEL_PASSWORD``" not in text,
+          f"{doc.name}: production has no boot-created admin; say to use the copied superusers or createsuperuser")
+
 # Production may be built only from main: the workflow refuses before it
 # touches AWS (the GitHub Environment's branch rule and the role's trust
 # policy refuse it again).
@@ -252,6 +266,13 @@ check(
     'legacy=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "${TF_PROJECT_PREFIX}/terraform.tfstate"' in bootstrap_step
     and "exit 1" in block(bootstrap_step, re.escape('if [[ "$legacy" != "0" ]]; then')),
     "deploy-infrastructure.yml: the bootstrap step must exit 1 while the old <prefix>/terraform.tfstate exists",
+)
+# The state bucket is shared; the test role may not create it, so a test run
+# that finds it missing stops before the create call.
+refuse = block(bootstrap_step, re.escape('elif [[ "$ENVIRONMENT" != "production" ]]; then'))
+check(
+    "exit 1" in refuse and bootstrap_step.find(refuse) < bootstrap_step.find("aws s3api create-bucket") if refuse else False,
+    "deploy-infrastructure.yml: the bootstrap step must exit 1 before create-bucket unless the environment is production",
 )
 choices = re.search(r"\n      environment:\n(?:        .*\n)*?        options:\n((?:          - .*\n)+)", deploy)
 check(
@@ -519,6 +540,22 @@ for env_name in ("test", "production"):
     )
     secret_like = {n for n in names if re.search(r"password|secret|key|token", n)}
     check(not secret_like, f"environments/{env_name}.tfvars: secrets do not belong in git: {sorted(secret_like)}")
+# The test stack shares the AWS account (and its SES identities) with
+# production: its email goes to the application log, never through SES. The
+# test boundary denies ses:Send* as well.
+check(test_vars.get("email_backend", '""').strip('"') != "chatbot.email_backend.SESBackend",
+      "test.tfvars: the test stack must not send email through SES (it shares the account with production)")
+
+# Every resource carries the Environment and Project tags the roles' ABAC and
+# cross-environment Denies key on: both AWS providers set
+# default_tags = local.common_tags, and no resource overrides those keys.
+providers = re.findall(r'provider "aws" \{(.*?)\n\}', main_tf, re.S)
+check(len(providers) == 2 and all(re.search(r"default_tags \{\s*tags\s*=\s*local\.common_tags\s*\}", p) for p in providers),
+      "main.tf: both aws providers must set default_tags { tags = local.common_tags }")
+for path in sorted(TERRAFORM.glob("*.tf")):
+    for key in re.findall(r"^\s*\"?(Environment|Project)\"?\s*=", uncommented(path), re.M):
+        check(path.name == "locals.tf", f"{path.name}: sets the {key} tag itself; it comes from default_tags only")
+
 for line in deploy.splitlines():
     if re.search(r"terraform\s+plan", line):
         check(
@@ -594,10 +631,17 @@ check(
     "deploy and destroy workflows must set TF_VAR_create_github_oidc_provider to false",
 )
 
-# Production and test live in different AWS accounts. Each job that signs in
-# picks the account from the environment, in one place: production reads only
-# TF_PROD_ACCOUNT_ID, test only TF_TEST_ACCOUNT_ID, the two must differ, and
-# configure-aws-credentials refuses credentials from any other account.
+# Production and test live in ONE AWS account (the owner's decision,
+# 2026-11-27), next to the hand-built live deployment and other lab projects.
+# One secret names it (two names that must be equal would only add a way to
+# get it wrong). What keeps the environments apart is the role: each job maps
+# its environment to its own apply role in one place, the production) branch
+# naming only the production role and the test) branch only the test role,
+# and configure-aws-credentials refuses credentials from any other account.
+# The roles' policies then deny each other's names, tags and state key.
+ROLE_OF = {"production": "-terraform-apply-production", "test": "-terraform-apply-test"}
+
+
 def account_problems(job):
     steps = steps_of(job)
     choose = [i for i, st in enumerate(steps) if st.startswith("name: Choose the AWS account")]
@@ -608,25 +652,41 @@ def account_problems(job):
     problems = []
     if not re.search(r"\n        id: aws\n", step):
         problems.append("'Choose the AWS account' needs id: aws")
-    for env_name, secret in (("production", "TF_PROD_ACCOUNT_ID"), ("test", "TF_TEST_ACCOUNT_ID")):
-        used = set(re.findall(r"\b(TF_\w*ACCOUNT_ID)\b", block(step, rf"{env_name}\)")))
-        if used != {secret}:
-            problems.append(f"the {env_name}) branch must read only {secret}, reads {sorted(used)}")
+    for env_name, role in ROLE_OF.items():
+        branch = block(step, rf"{env_name}\)")
+        roles = set(re.findall(r"-terraform-apply-\w+", branch))
+        if roles != {role} or f'ROLE="${{TF_PROJECT_PREFIX}}{role}"' not in branch:
+            problems.append(f'the {env_name}) branch must set exactly ROLE="${{TF_PROJECT_PREFIX}}{role}", names {sorted(roles)}')
+    read = set(re.findall(r"secrets\.(\w+)", step))
+    if read != {"TF_AWS_ACCOUNT_ID", "TF_PROJECT_PREFIX"}:
+        problems.append(f"must read exactly the secrets TF_AWS_ACCOUNT_ID and TF_PROJECT_PREFIX, reads {sorted(read)}")
     for var, secret in re.findall(r"\n\s+(\w+):\s*\$\{\{\s*secrets\.(\w+)\s*\}\}", step):
         if var != secret:
             problems.append(f"env {var} is set from secrets.{secret}")
-    if "fail=1" not in block(step, re.escape('if [[ "$TF_PROD_ACCOUNT_ID" == "$TF_TEST_ACCOUNT_ID" ]]; then')) \
-            and "exit 1" not in block(step, re.escape('if [[ "$TF_PROD_ACCOUNT_ID" == "$TF_TEST_ACCOUNT_ID" ]]; then')):
-        problems.append("must stop when TF_PROD_ACCOUNT_ID equals TF_TEST_ACCOUNT_ID")
+    if "exit 1" not in block(step, re.escape('if [[ ! "$TF_AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then')):
+        problems.append("must exit 1 unless TF_AWS_ACCOUNT_ID is 12 digits")
     if not re.search(r"\n\s+\*\)[^\n]*exit 1", step):
         problems.append("an unknown environment must exit 1")
-    if 'echo "role=arn:aws:iam::${ACCOUNT}:role/${TF_PROJECT_PREFIX}-terraform-apply-${ENVIRONMENT}"' not in step:
-        problems.append("the role must be arn:aws:iam::${ACCOUNT}:role/${TF_PROJECT_PREFIX}-terraform-apply-${ENVIRONMENT}")
+    if 'echo "account=$TF_AWS_ACCOUNT_ID"' not in step \
+            or 'echo "role=arn:aws:iam::${TF_AWS_ACCOUNT_ID}:role/${ROLE}"' not in step:
+        problems.append("the outputs must be account=$TF_AWS_ACCOUNT_ID and role=arn:aws:iam::${TF_AWS_ACCOUNT_ID}:role/${ROLE}")
     if "\n        if:" in cred or "role-to-assume: ${{ steps.aws.outputs.role }}\n" not in cred \
             or "allowed-account-ids: ${{ steps.aws.outputs.account }}\n" not in cred:
         problems.append("configure-aws-credentials must be unconditional, assume steps.aws.outputs.role "
                         "and set allowed-account-ids: steps.aws.outputs.account")
     return problems
+
+
+# The role and the state key both follow ENVIRONMENT, so ENVIRONMENT must come
+# from the input everywhere: a literal or a second source would let a test run
+# pick the production role, or production's state key, or the reverse.
+for name, text in infra_workflows.items():
+    for value in re.findall(r"\n\s+ENVIRONMENT:\s*(.+)", text):
+        check(value.strip() == "${{ inputs.environment }}",
+              f"{name}: ENVIRONMENT must be ${{{{ inputs.environment }}}}, got '{value.strip()}'")
+for name, text in all_workflows.items():
+    for old in ("TF_PROD_ACCOUNT_ID", "TF_TEST_ACCOUNT_ID"):
+        check(old not in text, f"{name}: {old} is gone; both environments use TF_AWS_ACCOUNT_ID")
 
 
 for name, text in infra_workflows.items():
@@ -650,13 +710,16 @@ check(
 )
 
 # --- IAM roles for Terraform: committed, and checked here ---------------------
-# The production role lives in the same AWS account as the hand-built live
-# deployment; the test role in the lab's separate TEST account, with the same
-# policies so a rehearsal also tests them. Each role trusts one GitHub
-# Environment (production: on main only), reaches
-# only its own environment's state and resources, cannot change IAM beyond its
-# own names (and only under a permissions boundary), cannot change the shared
-# GitHub OIDC provider, and is explicitly denied the live resources.
+# Both roles live in ONE AWS account, with the hand-built live deployment and
+# other lab projects. They have the same shape (the test role's policies are
+# production's with `test` in place of `production`, so a rehearsal also tests
+# them). Each role trusts one GitHub Environment (production: on main only),
+# reaches only its own environment's state and resources, cannot change IAM
+# beyond its own names (and only under a permissions boundary), cannot change
+# the shared GitHub OIDC provider, and is explicitly denied the live
+# resources and the other environment's names, tags and state key. Other
+# projects' resources are excluded by positive scoping: every Allow names
+# <PREFIX>-<env>-* or requires the Environment=<env> / Project=<PREFIX> tags.
 
 IAM = TERRAFORM / "bootstrap" / "iam"
 REPO_SUBJECTS = ("repo:wwbp/chatbotlab", "repo:wwbp@42522115/chatbotlab@882137210")
@@ -697,11 +760,79 @@ ENVIRONMENTS = ("test", "production")
 TAG_SCOPED_SERVICES = {"ec2", "autoscaling", "elasticloadbalancing", "cloudformation", "cloudfront", "acm", "cloudwatch"}
 # Calls with no resource to tag: nothing narrower than "*" exists.
 UNTAGGABLE_ACTIONS = {"cloudwatch:PutMetricData"}
-# The name set each role must be denied. The test role lives in the lab's
-# separate TEST account and is denied production's names anyway. Production's
-# policies keep denying the retired staging names: a stack built under them
-# may still exist in the production account until someone destroys it.
-OTHER = {"test": "production", "production": "staging"}
+# The name sets each role must be denied: the other environment, and the
+# retired staging names (a stack built under them may still exist in the
+# account until someone destroys it).
+OTHER = {"test": ("production", "staging"), "production": ("test", "staging")}
+# Other lab projects in the same account: positive scoping must leave them out.
+OTHER_PROJECT_SAMPLES = [
+    ("rds:DeleteDBInstance", "arn:aws:rds:us-east-1:<ACCOUNT_ID>:db:meetlab-v2-db"),
+    ("s3:DeleteObject", "arn:aws:s3:::meetlab-v2-uploads/x"),
+    ("s3:GetObject", "arn:aws:s3:::ckviz-data/x"),
+    ("elasticbeanstalk:TerminateEnvironment",
+     "arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:environment/meetlab-v2/meetlab-v2-env"),
+    ("iam:PutRolePolicy", "arn:aws:iam::<ACCOUNT_ID>:role/meetlab-v2-role"),
+    ("logs:DeleteLogGroup", "arn:aws:logs:us-east-1:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/meetlab-v2-env"),
+    # Reads that return secrets: EB environment variables (database
+    # passwords, API keys) and CloudFormation templates of EB stacks.
+    ("elasticbeanstalk:DescribeConfigurationSettings",
+     "arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:environment/meetlab-v2/meetlab-v2-env"),
+    ("elasticbeanstalk:DescribeConfigurationSettings",
+     "arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:configurationtemplate/meetlab-v2/default"),
+    ("cloudformation:GetTemplate", "arn:aws:cloudformation:us-east-1:<ACCOUNT_ID>:stack/awseb-e-meet123-stack/abc"),
+    ("cloudformation:GetTemplateSummary", "arn:aws:cloudformation:us-east-1:<ACCOUNT_ID>:stack/awseb-e-meet123-stack/abc"),
+]
+# Another project's resources whose names happen to contain this
+# environment's name or prefix, and reads that return secrets.
+def other_project_samples(env):
+    a = "<ACCOUNT_ID>"
+    return [
+        # EB matches a name pattern against configurationtemplate/<app>/<name>
+        # and environment/<app>/<name> too: a template named <PREFIX>-<env> in
+        # someone else's application would expose that application's settings.
+        ("elasticbeanstalk:CreateConfigurationTemplate",
+         f"arn:aws:elasticbeanstalk:us-east-1:{a}:configurationtemplate/meetlab-v2/<PREFIX>-{env}"),
+        ("elasticbeanstalk:DescribeConfigurationSettings",
+         f"arn:aws:elasticbeanstalk:us-east-1:{a}:environment/meetlab-v2/<PREFIX>-{env}"),
+        # The AWSEBBeanstalkMetadata resource of an EB stack holds its option
+        # settings, environment variables included.
+        ("cloudformation:DescribeStackResource", f"arn:aws:cloudformation:us-east-1:{a}:stack/awseb-e-meet123-stack/abc"),
+        ("rds:DeleteDBInstance", f"arn:aws:rds:us-east-1:{a}:db:meetlab-{env}-db"),
+        ("s3:GetObject", f"arn:aws:s3:::meetlab-{env}-uploads/x"),
+        ("cloudfront:UpdateFunction", f"arn:aws:cloudfront::{a}:function/meetlab-router"),
+        ("cloudfront:GetFunction", f"arn:aws:cloudfront::{a}:function/meetlab-router"),
+        # Origin access controls cannot be tagged: an update could break any
+        # distribution in the account (an outage); a delete fails while in use.
+        ("cloudfront:UpdateOriginAccessControl", f"arn:aws:cloudfront::{a}:origin-access-control/EOTHER"),
+        # A volume from another project's snapshot, attached to an own
+        # instance, would expose its data; so would a private AMI.
+        ("ec2:CreateVolume", f"arn:aws:ec2:us-east-1:{a}:snapshot/snap-other"),
+        ("ec2:CreateVolume", "*"),
+        # An own instance placed in another project's subnet or security group
+        # would reach that project's database port.
+        ("ec2:RunInstances", f"arn:aws:ec2:us-east-1:{a}:security-group/sg-meetlab-db"),
+        ("ec2:RunInstances", f"arn:aws:ec2:us-east-1:{a}:subnet/subnet-meetlab"),
+    ]
+
+
+# Unconditioned Allows on Resource "*": only these. Metadata reads of the
+# services the stacks use (no secret-bearing reads: no Get* of secrets,
+# parameters, templates, function code, EB settings), plus calls that name no
+# resource. Anything new needs a decision here.
+STAR_ALLOWLIST = {
+    "acm:Describe*", "acm:List*", "autoscaling:Describe*", "cloudfront:List*", "ec2:Describe*",
+    "elasticache:Describe*", "elasticache:ListTagsForResource", "elasticbeanstalk:DescribeA*",
+    "elasticbeanstalk:DescribeE*", "elasticbeanstalk:DescribeI*", "elasticbeanstalk:DescribeP*",
+    "elasticbeanstalk:List*", "elasticloadbalancing:Describe*", "iam:Get*", "iam:List*", "logs:Describe*",
+    "rds:Describe*", "rds:ListTagsForResource", "s3:ListAllMyBuckets", "sts:GetCallerIdentity",
+    "bedrock:Converse*", "bedrock:InvokeModel*", "cloudwatch:PutMetricData",
+}
+# Statements that may only appear tag-scoped (own aws:ResourceTag or
+# aws:RequestTag): writes to CloudFront distributions, which serve the live
+# sites and other projects too.
+DISTRIBUTION_WRITE = re.compile(r"cloudfront:(Create|Update|Delete)\w*Distribution", re.I)
+SES_SENDS = ("ses:SendEmail", "ses:SendRawEmail")
+SES_IDENTITY = "arn:aws:ses:us-east-1:<ACCOUNT_ID>:identity/<SES_FROM_DOMAIN>"
 # role -> (environment it serves, GitHub Environment it trusts, ref condition)
 ROLES = {
     # Production: only from main.
@@ -752,6 +883,15 @@ def allows(policy, action, resource):
     unconditional Deny refuses it."""
     denied = any("Condition" not in st for st in matching(policy, "Deny", action, resource))
     return bool(matching(policy, "Allow", action, resource)) and not denied
+
+
+def allows_untagged(policy, action, resource, environment):
+    """allows(), for a resource that carries none of this stack's tags (another
+    project's): an Allow conditioned on aws:ResourceTag Environment/Project =
+    its own cannot match it."""
+    untagged = [st for st in policy["Statement"]
+                if not own_tags(st.get("Condition", {}), "ResourceTag", environment)]
+    return allows({"Statement": untagged}, action, resource)
 
 
 def denies(policy, action, resource):
@@ -968,7 +1108,7 @@ live_statements = {}
 for name, policy in policies.items():
     environment = name.rsplit("-", 1)[-1]
     fname = name if name.startswith("boundary") else f"{name}-permissions"
-    other = OTHER[environment]
+    others = OTHER[environment]
     kind = name.split("-", 1)[0]
     for st in policy["Statement"]:
         check(
@@ -1010,20 +1150,76 @@ for name, policy in policies.items():
     # tag. The boundary (size-limited to 6144 characters) instead allows
     # nothing that names it: every Allow there is scoped to its own names or
     # its own Environment tag.
+    for other in others:
+        if kind == "boundary":
+            for what, arn in sample_arns(other).items():
+                named = [r for st in policy["Statement"] if st.get("Effect") == "Allow"
+                         for r in as_list(st.get("Resource", [])) if r != "*" and fnmatchcase(arn, r)]
+                check(not named, f"{fname}.json: an Allow reaches the {other} {what} ({arn}) through {named}")
+        if kind == "boundary" and other == "staging":
+            continue  # retired: positive scoping above is enough for the boundary
+        # A boundary (6144 characters at most) that allows nothing but
+        # metadata reads (Describe/List) in a service needs no Deny there: its
+        # implicit deny already caps every change and every data read.
+        allowed_services = {a.split(":")[0] for st in policy["Statement"] if st.get("Effect") == "Allow"
+                            for a in as_list(st.get("Action", []))
+                            if not re.match(r"[\w-]+:(Describe|List)", a)}
+        if True:
+            for what, arn in sample_arns(other).items():
+                if kind == "boundary" and arn.split(":")[2] not in allowed_services:
+                    continue
+                for action in ("s3:GetObject", "s3:PutObject"):
+                    check(denies(policy, action, arn), f"{fname}.json: must deny {action} on the {other} {what} ({arn})")
+            check(
+                any(st.get("Effect") == "Deny" and as_list(st.get("Action")) == ["*"] and as_list(st.get("Resource")) == ["*"]
+                    and other in as_list(st.get("Condition", {}).get("StringEquals", {}).get("aws:ResourceTag/Environment", []))
+                    and set(st.get("Condition", {})) == {"StringEquals"}
+                    and set(st["Condition"]["StringEquals"]) == {"aws:ResourceTag/Environment"}
+                    for st in policy["Statement"]),
+                f"{fname}.json: must deny everything tagged Environment={other}",
+            )
+
+    # Other projects in the account: nothing reaches them.
+    samples = OTHER_PROJECT_SAMPLES + other_project_samples(environment)
     if kind == "boundary":
-        for what, arn in sample_arns(other).items():
-            named = [r for st in policy["Statement"] if st.get("Effect") == "Allow"
-                     for r in as_list(st.get("Resource", [])) if r != "*" and fnmatchcase(arn, r)]
-            check(not named, f"{fname}.json: an Allow reaches the {other} {what} ({arn}) through {named}")
-    else:
-        for what, arn in sample_arns(other).items():
-            check(denies(policy, "s3:GetObject", arn), f"{fname}.json: must deny the {other} {what} ({arn})")
-        check(
-            any(st.get("Effect") == "Deny" and as_list(st.get("Action")) == ["*"]
-                and as_list(st.get("Condition", {}).get("StringEquals", {}).get("aws:ResourceTag/Environment", [])) == [other]
-                for st in policy["Statement"]),
-            f"{fname}.json: must deny everything tagged Environment={other}",
-        )
+        # Known limit: no room in the boundary for a tag scope on subnets and
+        # security groups (the apply roles have one).
+        samples = [x for x in samples if not x[1].endswith(("sg-meetlab-db", "subnet-meetlab"))]
+    for action, arn in samples:
+        check(not allows_untagged(policy, action, arn, environment),
+              f"{fname}.json: must not allow {action} on another project's {arn}")
+
+    for st in policy["Statement"]:
+        if st.get("Effect") != "Allow":
+            continue
+        cond = st.get("Condition", {})
+        tagged = own_tags(cond, "ResourceTag", environment) or own_tags(cond, "RequestTag", environment)
+        actions = as_list(st.get("Action", []))
+        if as_list(st.get("Resource")) == ["*"] and not tagged:
+            extra = sorted(set(actions) - STAR_ALLOWLIST)
+            check(not extra, f"{fname}.json: unconditioned Allow on '*' outside the allowlist: {extra}")
+        if "*" not in as_list(st.get("Resource", [])):
+            tagging = [a for a in actions if any(fnmatchcase(t, a) for t in TAGGING_ACTIONS)]
+            check(not tagging or (own_tags(cond, "ResourceTag", environment) and tag_keys_limited(cond)),
+                  f"{fname}.json: {tagging} on named resources needs own aws:ResourceTag and aws:TagKeys conditions")
+        for a in actions:
+            check(not DISTRIBUTION_WRITE.search(a) or tagged,
+                  f"{fname}.json: {a} may only be allowed tag-scoped to Environment={environment}")
+        for r in as_list(st.get("Resource", [])):
+            if r.endswith(("::image/*", "::snapshot/*")):
+                check(cond.get("StringEquals", {}).get("ec2:Owner") == "amazon",
+                      f"{fname}.json: {r} needs StringEquals ec2:Owner = amazon (no other project's AMIs or snapshots)")
+
+    # The test stack must not send real email: SES sends are explicitly denied
+    # to the test apply role and to every role the test stack creates (its
+    # boundary), and no test policy allows them. Production's boundary allows
+    # sending from the configured domain only.
+    for action in SES_SENDS:
+        if environment == "test":
+            check(denies(policy, action, SES_IDENTITY) and denies(policy, action, "*"),
+                  f"{fname}.json: must explicitly deny {action} (the test stack sends no real email)")
+            check(not matching(policy, "Allow", action, SES_IDENTITY),
+                  f"{fname}.json: no statement may allow {action} in the test stack")
 
     if kind == "apply":
         check(not allows(policy, "s3:GetObject", "arn:aws:s3:::someone-elses-bucket/key"),
@@ -1034,6 +1230,41 @@ for name, policy in policies.items():
             check(allows(policy, action, own["state"]), f"{fname}.json: {action} on its own state must be allowed")
             check(not allows(policy, action, f"{STATE_BUCKET}/<PREFIX>/terraform.tfstate"),
                   f"{fname}.json: {action} on the old project-wide state key must not be allowed")
+        check(allows(policy, "elasticbeanstalk:DescribeConfigurationSettings", own["eb-env"]),
+              f"{fname}.json: must read its own Elastic Beanstalk environment's settings")
+        # A configuration template copies the settings of the environment it
+        # is made from, and EB checks that source only through
+        # elasticbeanstalk:FromEnvironment. The stack makes none: denied.
+        check(denies(policy, "elasticbeanstalk:CreateConfigurationTemplate",
+                     f"arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:configurationtemplate/<PREFIX>-{environment}/t"),
+              f"{fname}.json: must deny elasticbeanstalk:CreateConfigurationTemplate")
+        # User data and launch template data can hold secrets: readable only on
+        # resources tagged with this environment.
+        check(any(st.get("Effect") == "Deny" and as_list(st.get("Resource")) == ["*"]
+                  and {"ec2:DescribeInstanceAttribute", "ec2:DescribeLaunchTemplateVersions"} <= set(as_list(st.get("Action")))
+                  and st.get("Condition") == {"StringNotEquals": {"aws:ResourceTag/Environment": environment}}
+                  for st in policy["Statement"]),
+              f"{fname}.json: must deny ec2:DescribeInstanceAttribute / DescribeLaunchTemplateVersions unless tagged Environment={environment}")
+        # One state bucket holds both environments' state and production's
+        # backups (<PREFIX>/production/backups/). The test role reads and
+        # writes only <PREFIX>/test/, may not create or reconfigure the bucket
+        # (production's first apply, or an administrator, creates it), and
+        # may not list another environment's keys.
+        if environment == "test":
+            check(denies(policy, "s3:GetObject", f"{STATE_BUCKET}/<PREFIX>/production/backups/20261127T000000Z/data/x"),
+                  f"{fname}.json: must deny production's backups in the state bucket")
+            for action in ("s3:CreateBucket", "s3:DeleteBucket", "s3:DeleteBucketPolicy", "s3:PutBucketPolicy",
+                           "s3:PutBucketVersioning", "s3:PutBucketPublicAccessBlock", "s3:PutEncryptionConfiguration",
+                           "s3:PutLifecycleConfiguration", "s3:PutBucketAcl"):
+                check(denies(policy, action, STATE_BUCKET) and not matching(policy, "Allow", action, STATE_BUCKET),
+                      f"{fname}.json: must deny (and not allow) {action} on the shared state bucket")
+            check(any(st.get("Effect") == "Deny" and "s3:ListBucket" in as_list(st.get("Action"))
+                      and STATE_BUCKET in as_list(st.get("Resource"))
+                      and sorted(as_list(st.get("Condition", {}).get("StringNotLike", {}).get("s3:prefix", [])))
+                      == ["<PREFIX>/test/*", "env:/*"]
+                      and st["Condition"].get("Null") == {"s3:prefix": "false"}
+                      for st in policy["Statement"]),
+                  f"{fname}.json: must deny s3:ListBucket on the state bucket for any s3:prefix but <PREFIX>/test/* (and env:/*)")
         # Name-scoped services: its own resources yes, anyone else's no.
         for action, what in (("rds:DeleteDBInstance", "rds"), ("elasticache:DeleteServerlessCache", "cache"),
                              ("elasticbeanstalk:TerminateEnvironment", "eb-env"),
@@ -1043,7 +1274,8 @@ for name, policy in policies.items():
             check(not allows(policy, action, own[what].replace(f"<PREFIX>-{environment}", "someone-else")),
                   f"{fname}.json: {action} must be limited to <PREFIX>-{environment} names")
         # The shared Elastic Beanstalk bucket: only this application's keys.
-        for key in ("humanlikebot/app.zip", "resources/environments/e-live/x", f"<PREFIX>-{other}/app.zip"):
+        for key in ("humanlikebot/app.zip", "resources/environments/e-live/x", "meetlab-v2/app.zip",
+                    *(f"<PREFIX>-{o}/app.zip" for o in others)):
             check(not allows(policy, "s3:PutObject", f"{EB_BUCKET}/{key}"),
                   f"{fname}.json: must not write '{key}' in the shared elasticbeanstalk bucket")
         # IAM: only the actions Terraform needs, only on its own names, only
@@ -1088,7 +1320,7 @@ for name, policy in policies.items():
             check(denies(policy, action, boundary_arn(environment)) or denies(policy, action, own["role"]),
                   f"{fname}.json: must deny {action} (the boundary must stay in place)")
         for target in ("role/<PREFIX>-terraform-apply-production", "role/<PREFIX>-terraform-apply-test",
-                       "role/aws-elasticbeanstalk-ec2-role", f"role/<PREFIX>-{other}-github-actions"):
+                       "role/aws-elasticbeanstalk-ec2-role", *(f"role/<PREFIX>-{o}-github-actions" for o in others)):
             check(not allows(policy, "iam:PutRolePolicy", f"arn:aws:iam::<ACCOUNT_ID>:{target}"),
                   f"{fname}.json: must not change {target}")
     else:  # boundary: the most any role the stack creates can ever do
@@ -1104,7 +1336,7 @@ for name, policy in policies.items():
         for action, arn, expected in (
             ("ssm:GetParameter", own["param"], True),
             ("ssm:GetParameter", "arn:aws:ssm:us-east-1:<ACCOUNT_ID>:parameter/someone-else/x", False),
-            ("ses:SendEmail", "arn:aws:ses:us-east-1:<ACCOUNT_ID>:identity/<SES_FROM_DOMAIN>", True),
+            ("ses:SendEmail", SES_IDENTITY, environment == "production"),
             ("ses:SendEmail", "arn:aws:ses:us-east-1:<ACCOUNT_ID>:identity/someone-else.org", False),
             ("s3:GetObject", own["object"], True),
             ("s3:PutObject", own["eb-version"], True),
@@ -1140,10 +1372,26 @@ check(
     "reviewers and deployment branches `main` and `test/*` (as apply-test-trust.json)",
 )
 check(
-    "trusts that branch's code with the TEST account" in readme and "never production's" in readme,
-    "README.md: say that approving a test run trusts that branch's code with the TEST account (which may hold "
-    "a production snapshot), and that the test stack uses its own API keys, never production's",
+    "trusts that branch's code with the shared AWS account" in readme and "never production's" in readme,
+    "README.md: say that approving a test run trusts that branch's code with the shared AWS account, and that "
+    "the test stack uses its own API keys, never production's",
 )
+# One account (the owner's decision, 2026-11-27): no document may still send
+# the test stack to a separate account, or call the test policy safe to widen
+# because of one.
+for doc in (TERRAFORM / "README.md", ROOT / "docs" / "deployment" / "technical-reference.rst",
+            ROOT / "docs" / "deployment" / "data-migration.rst", TERRAFORM / "environments" / "test.tfvars",
+            WORKFLOWS / "deploy-infrastructure.yml", WORKFLOWS / "destroy-infrastructure.yml"):
+    text = doc.read_text()
+    for stale in ("TEST account", "separate account", "different AWS accounts", "cross-account copy", "separate TEST"):
+        check(stale.lower() not in text.lower() or f"no {stale.lower()}" in text.lower(),
+              f"{doc.name}: still says '{stale}'; the test stack lives in the production account")
+for needle in ("IAM Access Analyzer", "iam:CreateRole", "TF_AWS_ACCOUNT_ID", "<PREFIX>-terraform-apply-production", "<PREFIX>-terraform-apply-test",
+               "<PREFIX>-terraform-boundary-test", "Environment=production", "positive scoping", "ses:Send*",
+               "Bedrock"):
+    check(needle in readme, f"README.md: the single-account setup must name {needle}")
+check("TF_AWS_ACCOUNT_ID" in reference and "same AWS account" in reference,
+      "technical-reference.rst: describe the one account (TF_AWS_ACCOUNT_ID) both stacks share")
 # The owner approves their own runs: no document may tell them to switch on
 # "Prevent self-review" (it would lock them out of their own deploys).
 for doc in (TERRAFORM / "README.md", ROOT / "docs" / "deployment" / "technical-reference.rst",
@@ -1152,7 +1400,7 @@ for doc in (TERRAFORM / "README.md", ROOT / "docs" / "deployment" / "technical-r
         check("self-review" not in line.lower() or re.search(r"\b(off|not|unticked)\b", line),
               f"{doc.name}: must not tell anyone to enable Prevent self-review: '{line.strip()}'")
 # The owner's one-time setup: the account secrets, and what to delete.
-for needle in ("TF_PROD_ACCOUNT_ID", "TF_TEST_ACCOUNT_ID", "`plan-staging`", "`plan-production`",
+for needle in ("`TF_PROD_ACCOUNT_ID`", "`TF_TEST_ACCOUNT_ID`", "`plan-staging`", "`plan-production`",
                "`TF_PLAN_ROLE_ARN`", "`TF_APPLY_ROLE_ARN`", "bootstrap/iam/apply-test-trust.json"):
     check(needle in readme, f"README.md: the setup steps must name {needle}")
 check("plan-staging" not in reference and "TF_APPLY_ROLE_ARN" not in reference,
@@ -1160,6 +1408,23 @@ check("plan-staging" not in reference and "TF_APPLY_ROLE_ARN" not in reference,
 runbook = (ROOT / "docs" / "deployment" / "data-migration.rst").read_text()
 check("test stack" in runbook and "Follow it for **staging first**" not in runbook,
       "data-migration.rst: the rehearsal runs on the test stack, not on a Terraform staging stack")
+rehearsal_source = runbook.split("Rehearsal source\n", 1)[-1].split("\nProcedure\n", 1)[0]
+step13 = runbook.split("13. **Rehearsal before production.**", 1)[-1].split("\n14. ", 1)[0]
+# The source sits in the test stack's subnet group but is not in its state:
+# delete it before Destroy, or Destroy stops half-way. It is named outside the
+# test role's scope (no <PREFIX>-test- name, no Environment tag), so only the
+# administrator running the copy can touch it.
+check(0 <= step13.find("delete-db-instance --db-instance-identifier rehearsal-source-") < step13.find("Destroy Infrastructure"),
+      "data-migration.rst: step 13 must delete the rehearsal source before running Destroy Infrastructure")
+check("--db-instance-identifier rehearsal-source-" in rehearsal_source and "Key=Environment" not in rehearsal_source
+      and "main`` only" in rehearsal_source,
+      "data-migration.rst: name the rehearsal source rehearsal-source-<date>, untagged, and set the test "
+      "Environment's deployment branches to ``main`` only during a rehearsal")
+check("same AWS account" in runbook
+      and all(n in rehearsal_source for n in ("copy-db-snapshot", "--kms-key-id", "--no-publicly-accessible",
+                                              "StorageEncrypted", "<PREFIX>-test-database-subnet-group")),
+      "data-migration.rst: the rehearsal restores the snapshot in the same AWS account, private and encrypted like "
+      "production (re-encrypt an unencrypted snapshot with copy-db-snapshot --kms-key-id)")
 check(
     not re.search(r"Deployment branches\*\*[^.]*`staging`[^.]*production|production[^.]*Deployment branches\*\*[^.]*`staging`", readme),
     "README.md: production may deploy only from main",
@@ -1181,6 +1446,8 @@ check(
     and "production" in env_bullet.group(0),
     "README.md: GH_PAT is a production Environment secret, not a repository secret",
 )
+check(repo_bullet and "`TF_AWS_ACCOUNT_ID`" in repo_bullet.group(0),
+      "README.md: the repository secrets step must name `TF_AWS_ACCOUNT_ID`")
 
 # --- Destroy: manual, one named environment; production needs every yes ----
 # The test stack needs only its typed name and the test Environment's

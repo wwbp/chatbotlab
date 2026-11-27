@@ -43,13 +43,14 @@ name: Deploy Infrastructure
 #     TF_PROJECT_PREFIX     Name prefix for every AWS resource (var.project_name).
 #                           No default: a wrong value points Terraform at the
 #                           wrong state.
-#     TF_PROD_ACCOUNT_ID    AWS account of production.
-#     TF_TEST_ACCOUNT_ID    The lab's separate TEST account, where the test
-#                           stack lives. Must differ from TF_PROD_ACCOUNT_ID.
-#                           The job assumes
-#                           <TF_PROJECT_PREFIX>-terraform-apply-<environment>
-#                           in the account of the chosen environment, and
-#                           refuses credentials from any other account.
+#     TF_AWS_ACCOUNT_ID     The one AWS account that holds both stacks (and
+#                           the hand-built live deployment, and other lab
+#                           projects). The job assumes
+#                           <TF_PROJECT_PREFIX>-terraform-apply-production or
+#                           <TF_PROJECT_PREFIX>-terraform-apply-test, by
+#                           environment, and refuses credentials from any
+#                           other account. Each role is denied the other
+#                           environment's names, tags and state key.
 #
 #   Environment secrets (Settings → Environments → production)
 #     GH_PAT                Token that can write repository secrets. Needed
@@ -59,7 +60,10 @@ name: Deploy Infrastructure
 #
 #   Environment secrets (Settings → Environments → test / production)
 #     DB_PASSWORD           Database password (letters + numbers only).
-#     ADMIN_PANEL_PASSWORD  Password of the `admin` user in the admin panel.
+#     ADMIN_PANEL_PASSWORD  Test only: password of the `admin` user the test
+#                           stack creates at boot. Production creates no
+#                           account at boot (its superusers come with the
+#                           copied database) and ignores it.
 #     OPENAI_API_KEY        OpenAI key (or ANTHROPIC_API_KEY, or both).
 #     ANTHROPIC_API_KEY
 #     SURVEY_INGEST_TOKEN   Optional.
@@ -163,7 +167,7 @@ jobs:
           missing() { echo "::error::$1 secret is not set"; fail=1; }
 
           [[ -z "$DB_PASSWORD" ]]          && missing "DB_PASSWORD"
-          [[ -z "$ADMIN_PANEL_PASSWORD" ]] && missing "ADMIN_PANEL_PASSWORD"
+          [[ "$ENVIRONMENT" == "test" && -z "$ADMIN_PANEL_PASSWORD" ]] && missing "ADMIN_PANEL_PASSWORD"
           [[ -z "$TF_PROJECT_PREFIX" ]]    && missing "TF_PROJECT_PREFIX"
 
           if [[ -z "$OPENAI_KEY" && -z "$ANTHROPIC_KEY" ]]; then
@@ -226,32 +230,29 @@ jobs:
           terraform_wrapper: false
 
       # ── 4. AWS credentials (short-lived, GitHub OIDC) ─────────────────────────
-      # Production and test live in different AWS accounts. The account comes
-      # from the environment, here and nowhere else, and the credentials
-      # action refuses credentials from any other account.
+      # Production and test live in the same AWS account. The role comes from
+      # the environment, here and nowhere else, and the credentials action
+      # refuses credentials from any other account.
       - name: Choose the AWS account
         id: aws
         env:
-          TF_PROD_ACCOUNT_ID: ${{ secrets.TF_PROD_ACCOUNT_ID }}
-          TF_TEST_ACCOUNT_ID: ${{ secrets.TF_TEST_ACCOUNT_ID }}
-          TF_PROJECT_PREFIX:  ${{ secrets.TF_PROJECT_PREFIX }}
+          TF_AWS_ACCOUNT_ID: ${{ secrets.TF_AWS_ACCOUNT_ID }}
+          TF_PROJECT_PREFIX: ${{ secrets.TF_PROJECT_PREFIX }}
         run: |
+          # One account holds both environments. The role keeps them apart:
+          # each is denied the other's names, tags and state key.
           case "$ENVIRONMENT" in
-            production) ACCOUNT="$TF_PROD_ACCOUNT_ID" ;;
-            test)       ACCOUNT="$TF_TEST_ACCOUNT_ID" ;;
+            production) ROLE="${TF_PROJECT_PREFIX}-terraform-apply-production" ;;
+            test)       ROLE="${TF_PROJECT_PREFIX}-terraform-apply-test" ;;
             *)          echo "::error::Unknown environment '$ENVIRONMENT'"; exit 1 ;;
           esac
-          if [[ ! "$ACCOUNT" =~ ^[0-9]{12}$ ]]; then
-            echo "::error::The AWS account ID of $ENVIRONMENT is not set (repository secret TF_PROD_ACCOUNT_ID or TF_TEST_ACCOUNT_ID, 12 digits)."
-            exit 1
-          fi
-          if [[ "$TF_PROD_ACCOUNT_ID" == "$TF_TEST_ACCOUNT_ID" ]]; then
-            echo "::error::TF_TEST_ACCOUNT_ID equals TF_PROD_ACCOUNT_ID. The test stack must live in the lab's separate TEST account."
+          if [[ ! "$TF_AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
+            echo "::error::The repository secret TF_AWS_ACCOUNT_ID (12 digits) is not set."
             exit 1
           fi
           {
-            echo "account=$ACCOUNT"
-            echo "role=arn:aws:iam::${ACCOUNT}:role/${TF_PROJECT_PREFIX}-terraform-apply-${ENVIRONMENT}"
+            echo "account=$TF_AWS_ACCOUNT_ID"
+            echo "role=arn:aws:iam::${TF_AWS_ACCOUNT_ID}:role/${ROLE}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials
@@ -265,6 +266,9 @@ jobs:
       # Deterministic name: "<TF_PROJECT_PREFIX>-tfstate-<ACCOUNT_ID>" — no random
       # suffix. The prefix comes from a secret so the repository does not
       # publish the names of live AWS resources.
+      # The bucket holds both environments' state (and production's backups),
+      # so only production creates it: the test role may not create or
+      # reconfigure it, and may list only <prefix>/test/.
       - name: Bootstrap Terraform state backend
         id: bootstrap
         env:
@@ -278,6 +282,9 @@ jobs:
             echo "State bucket already exists: $BUCKET"
           elif [[ "$ACTION" != "apply" ]]; then
             echo "::error::The state bucket does not exist yet. A plan creates nothing; run with action = apply to build the first environment."
+            exit 1
+          elif [[ "$ENVIRONMENT" != "production" ]]; then
+            echo "::error::The state bucket $BUCKET does not exist yet, and the test role may not create it (it also holds production's state). Create it first: build production once, or have an administrator create it from infra/terraform/bootstrap."
             exit 1
           else
             aws s3api create-bucket --bucket "$BUCKET" --region us-east-1
@@ -298,10 +305,14 @@ jobs:
           # it, so stop until the old state file has been moved.
           # Listing needs only s3:ListBucket, and an error fails the step
           # instead of reading as "no old state".
-          legacy=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "${TF_PROJECT_PREFIX}/terraform.tfstate" --query 'KeyCount' --output text)
-          if [[ "$legacy" != "0" ]]; then
-            echo "::error::Old state file found at s3://<state bucket>/<prefix>/terraform.tfstate. It describes a production stack. Move it to <prefix>/production/terraform.tfstate (aws s3 mv), then run this workflow again."
-            exit 1
+          # Production only: it is production's old state, and the test role may
+          # list only <prefix>/test/.
+          if [[ "$ENVIRONMENT" == "production" ]]; then
+            legacy=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "${TF_PROJECT_PREFIX}/terraform.tfstate" --query 'KeyCount' --output text)
+            if [[ "$legacy" != "0" ]]; then
+              echo "::error::Old state file found at s3://<state bucket>/<prefix>/terraform.tfstate. It describes a production stack. Move it to <prefix>/production/terraform.tfstate (aws s3 mv), then run this workflow again."
+              exit 1
+            fi
           fi
 
           echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
@@ -480,7 +491,11 @@ jobs:
             echo "| Chatbot | $FRONTEND_URL |"
             echo "| Admin panel | $FRONTEND_URL/api/admin/ |"
             echo ""
-            echo "Log in to the admin panel with username \`admin\` and the password you set as \`ADMIN_PANEL_PASSWORD\`."
+            if [[ "$ENVIRONMENT" == "test" ]]; then
+              echo "Log in to the admin panel with username \`admin\` and the test Environment's \`ADMIN_PANEL_PASSWORD\`."
+            else
+              echo "Production creates no admin at boot: log in with a superuser from the copied database, or create one once with \`python manage.py createsuperuser\` on an instance."
+            fi
             echo ""
             echo "**Next step:** deploy the application code. Infrastructure and application deploys are separate: this workflow does not start one."
           } >> "$GITHUB_STEP_SUMMARY"
