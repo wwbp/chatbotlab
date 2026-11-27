@@ -519,6 +519,22 @@ for env_name in ("test", "production"):
     )
     secret_like = {n for n in names if re.search(r"password|secret|key|token", n)}
     check(not secret_like, f"environments/{env_name}.tfvars: secrets do not belong in git: {sorted(secret_like)}")
+# The test stack shares the AWS account (and its SES identities) with
+# production: its email goes to the application log, never through SES. The
+# test boundary denies ses:Send* as well.
+check(test_vars.get("email_backend", '""').strip('"') != "chatbot.email_backend.SESBackend",
+      "test.tfvars: the test stack must not send email through SES (it shares the account with production)")
+
+# Every resource carries the Environment and Project tags the roles' ABAC and
+# cross-environment Denies key on: both AWS providers set
+# default_tags = local.common_tags, and no resource overrides those keys.
+providers = re.findall(r'provider "aws" \{(.*?)\n\}', main_tf, re.S)
+check(len(providers) == 2 and all(re.search(r"default_tags \{\s*tags\s*=\s*local\.common_tags\s*\}", p) for p in providers),
+      "main.tf: both aws providers must set default_tags { tags = local.common_tags }")
+for path in sorted(TERRAFORM.glob("*.tf")):
+    for key in re.findall(r"^\s*\"?(Environment|Project)\"?\s*=", uncommented(path), re.M):
+        check(path.name == "locals.tf", f"{path.name}: sets the {key} tag itself; it comes from default_tags only")
+
 for line in deploy.splitlines():
     if re.search(r"terraform\s+plan", line):
         check(
