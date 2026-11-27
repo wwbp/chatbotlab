@@ -42,7 +42,9 @@ def names_read_by_code():
 
 
 def test_env_var_list_matches_the_code():
-    listed = set((API / "env_vars.txt").read_text().split())
+    # The name starts each line; comments and reasons are not names.
+    text = (API / "env_vars.txt").read_text()
+    listed = set(re.findall(r"^[A-Z][A-Z0-9_]*", text, re.M))
     found = names_read_by_code()
     assert sorted(found - listed) == [], (
         "read by the code but missing from api/env_vars.txt"

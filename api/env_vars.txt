@@ -1,12 +1,16 @@
+# Every environment variable the deployed application reads, one per line.
+# chatbot/tests/test_env_vars.py keeps this list in step with the code.
+# infra/terraform/tests/env_parity.tftest.hcl checks that Terraform sets each
+# one for production, except the names marked "unset:", with the reason.
 ALLOWED_HOSTS
 ANTHROPIC_API_KEY
-AWS_ACCESS_KEY_ID
+AWS_ACCESS_KEY_ID              unset: the instance role gives AWS access; static keys would override it
 AWS_BUCKET_NAME
 AWS_REGION
-AWS_SECRET_ACCESS_KEY
+AWS_SECRET_ACCESS_KEY          unset: as AWS_ACCESS_KEY_ID
 BACKEND_ENVIRONMENT
-CHATBOT_AVATAR_PROMPT
-CHATBOT_CONTROL_IMAGE
+CHATBOT_AVATAR_PROMPT          unset: fallback for bots without their own avatar prompt; live production does not set it
+CHATBOT_CONTROL_IMAGE          unset: image for the "control" avatar condition; live production does not set it, a study that uses it sets it
 CONN_MAX_AGE
 CORS_ALLOWED_ORIGINS
 CSRF_TRUSTED_ORIGINS
@@ -17,17 +21,17 @@ DATABASE_PORT
 DATABASE_USER
 DEBUG
 DEFAULT_FROM_EMAIL
-DJANGO_SETTINGS_MODULE
+DJANGO_SETTINGS_MODULE         unset: manage.py, asgi.py and wsgi.py set it
 DJANGO_SUPERUSER_EMAIL
 DJANGO_SUPERUSER_PASSWORD
 DJANGO_SUPERUSER_USERNAME
 EMAIL_BACKEND
-FRONTEND_URL
+FRONTEND_URL                   unset: CORS_ALLOWED_ORIGINS and CSRF_TRUSTED_ORIGINS already name the front end
 GUNICORN_WORKERS
 MOCK_LLM
-MOCK_LLM_P50_MS
-MOCK_MODERATION_P50_MS
-MODERATION_VALUES_FOR_BLOCKED
+MOCK_LLM_P50_MS                unset: read only when MOCK_LLM is true, never in production
+MOCK_MODERATION_P50_MS         unset: as MOCK_LLM_P50_MS
+MODERATION_VALUES_FOR_BLOCKED  unset: the thresholds in settings.py are the reviewed ones
 OPENAI_API_KEY
 REDIS_URL
 SECRET_KEY
