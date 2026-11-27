@@ -11,15 +11,18 @@ Coverage:
     and a superuser, on an unused bot and a bot with a conversation
 """
 
+import json
 import uuid
 from unittest.mock import patch
 
 import pytest
 from django.contrib.auth.models import Group, Permission, User
+from django.core.exceptions import ValidationError
 from django.db.models import ProtectedError
 from django.test import Client
 
 from chatbot.models import Bot
+from chatbot.tests.test_iam_roles import _bot_change_post
 
 ADMIN_BOTS = "/api/admin/chatbot/bot/"
 
@@ -190,3 +193,76 @@ def test_unused_bots_can_still_be_deleted(make_bot):
     Bot.objects.get(pk=one.pk).delete()  # a copy: make_bot tears down `one`
     Bot.objects.filter(pk=two.pk).delete()
     assert not Bot.objects.filter(pk__in=[one.pk, two.pk]).exists()
+
+
+# ── Rename: conversations name their bot, so a rename detaches them ──────────
+
+
+@pytest.mark.django_db
+def test_renaming_a_bot_with_conversations_raises(make_bot, make_conversation):
+    bot = make_bot()
+    make_conversation(bot=bot)
+    old = bot.name
+    bot.name = f"renamed_{uuid.uuid4().hex[:6]}"
+    with pytest.raises(ValidationError, match="can't be deleted or renamed"):
+        bot.clean()
+    with pytest.raises(ValidationError, match="can't be deleted or renamed"):
+        bot.save()
+    assert Bot.objects.get(pk=bot.pk).name == old
+
+
+@pytest.mark.django_db
+def test_renaming_an_unused_bot_is_allowed(make_bot):
+    bot = make_bot()
+    bot.name = f"renamed_{uuid.uuid4().hex[:6]}"
+    bot.clean()
+    bot.save()
+    assert Bot.objects.get(pk=bot.pk).name == bot.name
+
+
+@pytest.mark.django_db
+def test_other_edits_to_a_bot_with_conversations_still_save(
+    make_bot, make_conversation
+):
+    bot = make_bot()
+    make_conversation(bot=bot)
+    bot.prompt = "New prompt."
+    bot.save()
+    assert Bot.objects.get(pk=bot.pk).prompt == "New prompt."
+
+
+@pytest.mark.django_db
+def test_admin_form_refuses_renaming_a_bot_with_conversations(
+    make_bot, make_conversation
+):
+    bot = make_bot()
+    make_conversation(bot=bot)
+    r = _bot_change_post(_client("Config editor"), bot, name="renamed")
+    assert r.status_code == 200  # the form, redisplayed with the error
+    assert "can&#x27;t be deleted or renamed" in r.content.decode()
+    assert Bot.objects.get(pk=bot.pk).name == bot.name
+
+
+@pytest.mark.django_db
+def test_admin_form_renames_an_unused_bot(make_bot):
+    bot = make_bot()
+    new = f"renamed_{uuid.uuid4().hex[:6]}"
+    r = _bot_change_post(_client("Config editor"), bot, name=new)
+    assert r.status_code == 302
+    assert Bot.objects.get(pk=bot.pk).name == new
+
+
+@pytest.mark.django_db
+def test_api_put_refuses_renaming_a_bot_with_conversations(
+    make_bot, make_conversation
+):
+    bot = make_bot()
+    make_conversation(bot=bot)
+    r = _client("Config editor").put(
+        f"/api/bots/{bot.pk}/",
+        data=json.dumps({"name": "renamed"}),
+        content_type="application/json",
+    )
+    assert r.status_code == 409
+    assert r.json()["error"] == Bot.in_use_message(1)
+    assert Bot.objects.get(pk=bot.pk).name == bot.name
