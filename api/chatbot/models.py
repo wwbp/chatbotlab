@@ -1,7 +1,7 @@
 import secrets
 
 from django.conf import settings
-from django.core.exceptions import FieldDoesNotExist
+from django.core.exceptions import FieldDoesNotExist, ValidationError
 from django.db import models
 from simple_history.models import HistoricalRecords
 
@@ -613,6 +613,18 @@ class Bot(models.Model):
     def in_use_message(n):
         s = "" if n == 1 else "s"
         return f"This bot has {n} conversation{s}, so it can't be deleted or renamed."
+
+    def clean(self):
+        # Conversations name their bot, so a rename detaches them like a delete.
+        old = Bot.objects.filter(pk=self.pk).values_list("name", flat=True).first()
+        if old is not None and old != self.name:
+            n = Conversation.objects.filter(bot_name=old).count()
+            if n:
+                raise ValidationError({"name": self.in_use_message(n)})
+
+    def save(self, *args, **kwargs):
+        self.clean()  # the rename guard, for code paths that skip forms
+        return super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
         # Last line of defence: no code path may orphan a study's conversations.
