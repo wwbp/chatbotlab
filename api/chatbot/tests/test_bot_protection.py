@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 import pytest
 from django.contrib.auth.models import Group, Permission, User
+from django.db.models import ProtectedError
 from django.test import Client
 
 from chatbot.models import Bot
@@ -157,3 +158,35 @@ def test_api_delete_of_an_unused_bot_is_204(make_bot):
     bot = make_bot()
     assert _api_delete(_client(superuser=True), bot).status_code == 204
     assert not Bot.objects.filter(pk=bot.pk).exists()
+
+
+# ── Model: last line of defence ──────────────────────────────────────────────
+
+
+@pytest.mark.django_db
+def test_bot_delete_raises_when_it_has_conversations(make_bot, make_conversation):
+    bot = make_bot()
+    make_conversation(bot=bot)
+    with pytest.raises(ProtectedError, match="can't be deleted"):
+        bot.delete()
+    assert Bot.objects.filter(pk=bot.pk).exists()
+
+
+@pytest.mark.django_db
+def test_queryset_delete_raises_when_any_bot_has_conversations(
+    make_bot, make_conversation
+):
+    unused = make_bot()
+    used = make_bot()
+    make_conversation(bot=used)
+    with pytest.raises(ProtectedError, match="can't be deleted"):
+        Bot.objects.filter(pk__in=[unused.pk, used.pk]).delete()
+    assert Bot.objects.filter(pk__in=[unused.pk, used.pk]).count() == 2
+
+
+@pytest.mark.django_db
+def test_unused_bots_can_still_be_deleted(make_bot):
+    one, two = make_bot(), make_bot()
+    Bot.objects.get(pk=one.pk).delete()  # a copy: make_bot tears down `one`
+    Bot.objects.filter(pk=two.pk).delete()
+    assert not Bot.objects.filter(pk__in=[one.pk, two.pk]).exists()
