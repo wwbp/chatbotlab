@@ -264,7 +264,21 @@ Steps 1 to 3 are preparation and can be done ahead of time. The window (app offl
 
 11. **Switch.** Point the public name (``dev.bot.wwbp.org``, later ``bot.wwbp.org``) at the new stack. Leave the old environment blocked, not terminated.
 
-    *Rollback:* point the name back and restore the old security group rule. **Anything participants wrote to the new database after the switch is not in the old one.** Decide before the window who makes that call and until when; after real participants have written new data, prefer fixing forward.
+    A CloudFront alias can be on only one distribution at a time, and the old distribution (``E2Q6P4TGU4GOC`` for ``bot.wwbp.org``) holds it. The order:
+
+    a. **Ahead of the window:** ``domain_name = "bot.wwbp.org"`` in ``environments/production.tfvars`` (``cutover_dns`` stays ``false``), merged and applied. Terraform requests the certificate in us-east-1, writes its validation record (ACM reuses the live certificate's record for the same name: Terraform adopts it, same value) and attaches the certificate to the new distribution, without the alias. ``https://bot.wwbp.org`` still reaches the old site. Also open a pull request that sets ``cutover_dns = true``, reviewed but not merged.
+
+    b. **Move the alias** (an administrator: the apply roles are denied the live distribution). Without downtime, with CloudFront's alias move: create a TXT record ``_bot.wwbp.org`` with the new distribution's domain (``terraform output cloudfront_domain_name``) as its value, then::
+
+          aws cloudfront associate-alias --target-distribution-id <new distribution id> --alias bot.wwbp.org
+
+       CloudFront takes the alias off the old distribution and serves ``bot.wwbp.org`` from the new one, whichever distribution the DNS record still names. Delete the TXT record afterwards. If ``associate-alias`` is refused, remove ``bot.wwbp.org`` from the old distribution's alternate domain names instead (the site is down until c is applied).
+
+    c. **Merge the** ``cutover_dns = true`` **pull request and apply.** The new distribution keeps the alias in its Terraform configuration, and the ``bot.wwbp.org`` A/AAAA records point at it (replacing those for ``d2ssfi5pq27xs0.cloudfront.net``). Check: ``dig +short bot.wwbp.org`` and ``scripts/smoke.sh https://bot.wwbp.org``.
+
+    Nothing else in the zone changes: SES's DKIM, MAIL FROM and DMARC records stay as they are.
+
+    *Rollback:* point the name back (``cutover_dns = false`` and apply; then an administrator moves the alias back to the old distribution with ``associate-alias`` and repoints the A record at it) and restore the old security group rule. **Anything participants wrote to the new database after the switch is not in the old one.** Decide before the window who makes that call and until when; after real participants have written new data, prefer fixing forward.
 
 12. **Check and close the window.** ::
 

@@ -269,7 +269,7 @@ Step 9: Run the deployment
 
 The workflow takes approximately **20-25 minutes**. The database and cache take the longest to provision. Once infrastructure is ready, the application deploys automatically. You do not need to click anything else.
 
-**If you set a custom domain:** partway through, the workflow Summary will show a DNS record to add at your registrar. Add it while the workflow is still running. The workflow will wait up to 30 minutes for DNS to propagate.
+**If you set a custom domain:** it must be a name in the stack's Route 53 zone (``dns_zone_name``). Terraform validates its certificate itself; the name moves to the new site when ``cutover_dns = true`` is set (``infra/terraform/README.md``, "Add a custom domain").
 
 Step 10: After deployment
 --------------------------

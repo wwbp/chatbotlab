@@ -22,10 +22,13 @@ force_destroy_buckets   = false
 # The web ACL in waf.tf (live production's rules). variables.tf refuses false.
 waf_enabled = true
 
-# Custom domain, e.g. "chatbot.mylab.org". Empty: the CloudFront URL is used.
-# Setting it makes the next apply create a certificate and print the DNS
-# record to add.
+# Custom domain, e.g. "chatbot.mylab.org", a name in the Route 53 zone
+# (dns_zone_name). Empty: the CloudFront URL is used. Setting it makes the
+# next apply create and validate the certificate; the name moves to this
+# stack only with cutover_dns = true (docs/deployment/data-migration.rst,
+# step 11: the old distribution must give up the alias first).
 domain_name = ""
+cutover_dns = false
 
 # Where invite and password-reset links point, and an allowed CORS/CSRF origin.
 # Set apart from domain_name: moving the bot.wwbp.org alias to this stack's

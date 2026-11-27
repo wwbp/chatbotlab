@@ -564,19 +564,32 @@ openai_api_key = "sk-proj-new-key-here"
 ```
 Then `terraform apply` — EB picks up the new env var on the next instance refresh.
 
-**Add a custom domain:**
-1. Create an ACM certificate for your domain in us-east-1 (AWS console)
-2. Edit `cloudfront.tf`: add `aliases = ["your-domain.com"]` to the distribution
-   and replace `cloudfront_default_certificate = true` with:
-   ```hcl
-   viewer_certificate {
-     acm_certificate_arn      = "arn:aws:acm:us-east-1:..."
-     ssl_support_method       = "sni-only"
-     minimum_protocol_version = "TLSv1.2_2021"
-   }
-   ```
-3. `terraform apply`
-4. Point your domain's CNAME at the CloudFront domain name from `terraform output frontend_url`
+**The edge (CloudFront, WAF, DNS):**
+- CloudFront has the web ACL in `waf.tf` (live production's rules: AWS
+  anti-DDoS, IP reputation, common, known bad inputs, SQLi, and 300 requests
+  per IP in 5 minutes, all blocking). `waf_enabled` must stay true for
+  production; `environments/test.tfvars` turns it off (about $11 a month).
+- CloudFront reaches the load balancer https-only (TLS 1.2+) at
+  `<prefix>-origin.<dns_zone_name>`, a CNAME Terraform writes in the existing
+  Route 53 zone (`dns.tf`, default `wwbp.org`). The load balancer listens on
+  443 only, with an ACM certificate for that name (DNS-validated by
+  Terraform), and its security group admits only CloudFront. CloudFront sends
+  the origin name as `Host` (AllViewerExceptHostHeader): the certificate is
+  checked against it, and Django builds links from `SITE_URL`.
+- Terraform reads the zone and writes only this stack's names; the apply
+  roles may change no other record (see "One account, two roles").
+
+**Add a custom domain** (a name in `dns_zone_name`):
+1. Set `domain_name` in `environments/<env>.tfvars` and apply. Terraform
+   creates the certificate in us-east-1, writes its validation record and
+   attaches it to the distribution. The distribution does not claim the name
+   yet and the name's DNS is untouched.
+2. Set `cutover_dns = true` and apply: the distribution claims the name as an
+   alias and Terraform points its A/AAAA records here (replacing what is
+   there). A CloudFront alias can be on one distribution at a time, so if
+   another distribution has the name, move it first. For production
+   (`bot.wwbp.org`, held by the hand-built distribution) that is step 11 of
+   `docs/deployment/data-migration.rst`.
 
 ### Viewing Terraform state
 
