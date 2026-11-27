@@ -34,8 +34,9 @@ jobs:
     name: Backend test
     runs-on: ubuntu-latest
     services:
-      mariadb:
-        image: mariadb:11.4
+      # MySQL 8.4, the engine Terraform deploys (infra/terraform/rds.tf).
+      mysql:
+        image: mysql:8.4
         env:
           MYSQL_ROOT_PASSWORD: ci_root
           MYSQL_DATABASE: chatbot_db
@@ -44,7 +45,7 @@ jobs:
         ports:
           - 3306:3306
         options: >-
-          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-cmd="mysqladmin ping -h 127.0.0.1 --silent"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=5
@@ -104,6 +105,8 @@ jobs:
           - {source: "mariadb:10.11", target: "mariadb:10.11"}
           - {source: "mariadb:11.4", target: "mariadb:11.4"}
           - {source: "mysql:8.0", target: "mysql:8.0"}
+          # The real migration: live production (8.0) into Terraform's RDS (8.4).
+          - {source: "mysql:8.0", target: "mysql:8.4"}
           # An older target: preflight must refuse unless told otherwise.
           - {source: "mariadb:11.4", target: "mariadb:10.11"}
           # Different flavours: only the "refuses" tests run.
