@@ -24,13 +24,31 @@ SH_READ = re.compile(r"\$\{?([A-Z][A-Z0-9_]*)")
 NOT_DEPLOYED = {"bench_latency.py", "locustfile.py", "smoke_survey_context.py"}
 
 
-def names_read_by_code():
-    names = set()
+# Reads PY_READ cannot name: a non-literal name, `"X" in os.environ`, or
+# environ/getenv imported under another name.
+HIDDEN_READ = re.compile(
+    r"""(?:getenv|environ\.get|environ\.setdefault)\(\s*(?!["'\s])"""
+    r"""|environ\[\s*(?!["'])"""
+    r"""|\bin\s+os\.environ\b"""
+    r"""|from\s+os\s+import\b[^\n]*\b(?:environ|getenv)\b"""
+)
+# settings.py's _csv_env(name, default) reads its argument; PY_READ catches
+# each _csv_env("X", ...) call instead.
+ALLOWED_HIDDEN = {("generic_chatbot/settings.py", 'getenv(name, "")')}
+
+
+def deployed_python():
     for path in API.rglob("*.py"):
         rel = path.relative_to(API)
         if rel.name in NOT_DEPLOYED or "tests" in rel.parts or rel.parts[0] == ".venv":
             continue
-        for match in PY_READ.finditer(path.read_text()):
+        yield rel.as_posix(), path.read_text()
+
+
+def names_read_by_code():
+    names = set()
+    for _, text in deployed_python():
+        for match in PY_READ.finditer(text):
             names.add(match.group(1) or match.group(2))
     for script in ("entrypoint.sh", "wait-for-db.sh"):
         names |= set(SH_READ.findall((API / script).read_text()))
@@ -60,3 +78,29 @@ def test_scanner_finds_known_reads():
     assert {"SECRET_KEY", "CORS_ALLOWED_ORIGINS", "DJANGO_SETTINGS_MODULE"} <= found
     assert {"DJANGO_SUPERUSER_PASSWORD", "DATABASE_HOST", "GUNICORN_WORKERS"} <= found
     assert "LOCUST_TARGET_RPS" not in found
+
+
+def test_every_env_read_names_its_variable():
+    # Otherwise a read hides from the list and from the Terraform check.
+    # Whole files, not lines: calls often put the name on the next line.
+    hidden = []
+    for rel, text in deployed_python():
+        for match in HIDDEN_READ.finditer(text):
+            line = text[text.rfind("\n", 0, match.start()) + 1 :].split("\n", 1)[0]
+            if not any(r == rel and a in line for r, a in ALLOWED_HIDDEN):
+                hidden.append(f"{rel}: {line.strip()}")
+    assert hidden == [], 'read env vars as os.getenv("NAME") so the scan sees them'
+
+
+def test_hidden_read_pattern():
+    for line in (
+        "Y = os.getenv(NEW_KEY)",
+        "os.environ.get(key)",
+        "os.environ[key]",
+        'if "X" in os.environ:',
+        "from os import environ as e",
+        "from os import getenv",
+    ):
+        assert HIDDEN_READ.search(line), line
+    assert not HIDDEN_READ.search('os.getenv("X", "1")')
+    assert not HIDDEN_READ.search('os.environ["X"]')
