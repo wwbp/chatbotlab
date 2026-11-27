@@ -231,6 +231,20 @@ check(
     "deploy-infrastructure.yml: 'Check required secrets' must exit 1 when a required secret is missing",
 )
 
+# ADMIN_PANEL_PASSWORD makes the boot-created admin, which only the test
+# stack has: production gets its real superusers with the copied database,
+# and Terraform ignores the value there. Required for test only.
+secrets_step = block(deploy, r"name: Check required secrets")
+check(
+    '[[ "$ENVIRONMENT" == "test" && -z "$ADMIN_PANEL_PASSWORD" ]] && missing "ADMIN_PANEL_PASSWORD"' in secrets_step
+    and not re.search(r'^\s*\[\[ -z "\$ADMIN_PANEL_PASSWORD" \]\]', secrets_step, re.M),
+    "deploy-infrastructure.yml: 'Check required secrets' must require ADMIN_PANEL_PASSWORD for test only",
+)
+for doc in (ROOT / "docs" / "deployment" / "for-researchers.rst",):
+    text = doc.read_text()
+    check("createsuperuser" in text and "Log in with username ``admin`` and your ``ADMIN_PANEL_PASSWORD``" not in text,
+          f"{doc.name}: production has no boot-created admin; say to use the copied superusers or createsuperuser")
+
 # Production may be built only from main: the workflow refuses before it
 # touches AWS (the GitHub Environment's branch rule and the role's trust
 # policy refuse it again).
