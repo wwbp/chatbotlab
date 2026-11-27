@@ -18,7 +18,8 @@
 
 output "frontend_url" {
   description = "The CloudFront URL where the React application is served. This is your public frontend address."
-  value       = var.domain_name != "" ? "https://${var.domain_name}" : "https://${aws_cloudfront_distribution.frontend.domain_name}"
+  # The custom domain serves this stack only from the cutover (cutover_dns).
+  value = var.cutover_dns ? "https://${var.domain_name}" : "https://${aws_cloudfront_distribution.frontend.domain_name}"
 }
 
 output "backend_api_url" {
@@ -92,16 +93,16 @@ output "eb_solution_stack" {
 }
 
 output "cloudfront_domain_name" {
-  description = "The raw CloudFront domain name (e.g. d1abc123.cloudfront.net). Use this as the CNAME target when pointing a custom domain at the chatbot."
+  description = "The raw CloudFront domain name (e.g. d1abc123.cloudfront.net). With cutover_dns, Terraform points the custom domain's A/AAAA alias records here."
   value       = aws_cloudfront_distribution.frontend.domain_name
 }
 
 output "acm_validation_cname_name" {
-  description = "The DNS record name to add at your registrar to validate the custom domain SSL certificate. Empty when no custom domain is configured."
+  description = "The custom domain certificate's DNS validation record name (Terraform writes it in the Route 53 zone). Empty when no custom domain is configured."
   value       = var.domain_name != "" ? tolist(aws_acm_certificate.custom_domain[0].domain_validation_options)[0].resource_record_name : ""
 }
 
 output "acm_validation_cname_value" {
-  description = "The DNS record value to add at your registrar to validate the custom domain SSL certificate. Empty when no custom domain is configured."
+  description = "The custom domain certificate's DNS validation record value (Terraform writes it in the Route 53 zone). Empty when no custom domain is configured."
   value       = var.domain_name != "" ? tolist(aws_acm_certificate.custom_domain[0].domain_validation_options)[0].resource_record_value : ""
 }
