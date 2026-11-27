@@ -209,7 +209,7 @@ variable "db_instance_class" {
 }
 
 variable "domain_name" {
-  description = "Optional custom domain to serve the chatbot from (e.g. chatbot.mylab.org). Leave empty to use the auto-assigned CloudFront URL (https://xxxx.cloudfront.net). If set, I create an SSL certificate and you must add a DNS validation record at your registrar — the deploy workflow prints it to the run summary."
+  description = "Optional custom domain to serve the chatbot from (e.g. chatbot.mylab.org), a name in dns_zone_name. Leave empty to use the auto-assigned CloudFront URL (https://xxxx.cloudfront.net). If set, I create a certificate in us-east-1, validate it with a record in the Route 53 zone and attach it to the distribution. The distribution claims the name and the public DNS record moves to it only with cutover_dns."
   type        = string
   default     = ""
 }
@@ -238,4 +238,14 @@ variable "dns_zone_name" {
   description = "The public Route 53 hosted zone, already in this account, that holds this stack's DNS records: <prefix>-origin.<zone> (CloudFront's name for the load balancer) and, with domain_name, the certificate validation and alias records. Terraform reads the zone and adds only those names; it never manages the zone or its other records."
   type        = string
   default     = "wwbp.org"
+}
+
+variable "cutover_dns" {
+  description = "Move domain_name to this stack: the distribution claims it as an alias, and its A/AAAA records in the zone point here (replacing what is there). Set only at the cutover, after the old distribution has given up the alias (docs/deployment/data-migration.rst, step 11)."
+  type        = bool
+  default     = false
+  validation {
+    condition     = !var.cutover_dns || var.domain_name != ""
+    error_message = "cutover_dns needs domain_name: it moves that name to this stack."
+  }
 }

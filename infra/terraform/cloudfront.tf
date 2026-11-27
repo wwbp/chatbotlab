@@ -36,16 +36,18 @@ resource "aws_cloudfront_origin_access_control" "frontend_assets" {
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
-# ACM certificate for custom domain (only created when domain_name is set).
+# ACM certificate for the custom domain (only when domain_name is set).
 #
-# CloudFront requires ACM certs to be in us-east-1 regardless of the rest of
-# the infrastructure region. We use the aws.us_east_1 provider alias from
-# main.tf for this resource and the validation resource below.
+# CloudFront requires ACM certs in us-east-1 whatever the stack's region,
+# hence the aws.us_east_1 provider. Terraform writes the validation record in
+# the Route 53 zone (dns.tf) and waits for the certificate to be issued.
 #
-# On first deploy with a domain: the cert is created and the validation CNAME
-# is printed to the workflow summary. The researcher adds the CNAME at their
-# registrar. aws_acm_certificate_validation then waits (up to 30 min) for DNS
-# to propagate before continuing to wire the cert into CloudFront.
+# The name itself only moves to this distribution at the cutover
+# (cutover_dns, below): a CloudFront alias can be on one distribution at a
+# time, and for bot.wwbp.org the live one (E2Q6P4TGU4GOC) holds it until then.
+# Until cutover_dns, the certificate is attached without the alias, which is
+# what lets an administrator move the alias over without downtime
+# (docs/deployment/data-migration.rst, step 11).
 # -----------------------------------------------------------------------------
 
 resource "aws_acm_certificate" "custom_domain" {
@@ -54,8 +56,8 @@ resource "aws_acm_certificate" "custom_domain" {
   domain_name       = var.domain_name
   validation_method = "DNS"
 
-  # The us_east_1 provider has no default_tags; the apply role's scope
-  # relies on the Environment tag.
+  # Explicit as well as default_tags: the apply role may request a
+  # certificate only with its Environment and Project tags.
   tags = local.common_tags
 
   lifecycle {
@@ -63,13 +65,44 @@ resource "aws_acm_certificate" "custom_domain" {
   }
 }
 
-resource "aws_acm_certificate_validation" "custom_domain" {
+# ACM gives a name in one account the same validation record every time, so
+# for bot.wwbp.org this is the record the live certificate already uses (same
+# name, same value): allow_overwrite adopts it instead of failing.
+resource "aws_route53_record" "custom_domain_validation" {
   count           = var.domain_name != "" ? 1 : 0
-  provider        = aws.us_east_1
-  certificate_arn = aws_acm_certificate.custom_domain[0].arn
+  zone_id         = data.aws_route53_zone.main.zone_id
+  name            = one(aws_acm_certificate.custom_domain[0].domain_validation_options).resource_record_name
+  type            = one(aws_acm_certificate.custom_domain[0].domain_validation_options).resource_record_type
+  ttl             = 300
+  records         = [one(aws_acm_certificate.custom_domain[0].domain_validation_options).resource_record_value]
+  allow_overwrite = true
+}
+
+resource "aws_acm_certificate_validation" "custom_domain" {
+  count                   = var.domain_name != "" ? 1 : 0
+  provider                = aws.us_east_1
+  certificate_arn         = aws_acm_certificate.custom_domain[0].arn
+  validation_record_fqdns = [aws_route53_record.custom_domain_validation[0].fqdn]
 
   timeouts {
     create = "30m"
+  }
+}
+
+# The cutover: the public name's A and AAAA records point at this
+# distribution. allow_overwrite replaces the records that point at the live
+# distribution today.
+resource "aws_route53_record" "site" {
+  for_each        = var.cutover_dns ? toset(["A", "AAAA"]) : toset([])
+  zone_id         = data.aws_route53_zone.main.zone_id
+  name            = var.domain_name
+  type            = each.key
+  allow_overwrite = true
+
+  alias {
+    name                   = aws_cloudfront_distribution.frontend.domain_name
+    zone_id                = aws_cloudfront_distribution.frontend.hosted_zone_id
+    evaluate_target_health = false
   }
 }
 
@@ -116,7 +149,7 @@ resource "aws_cloudfront_distribution" "frontend" {
   default_root_object = "index.html"
   price_class         = "PriceClass_100"
   comment             = "${local.name_prefix} frontend — managed by Terraform"
-  aliases             = var.domain_name != "" ? [var.domain_name] : []
+  aliases             = var.cutover_dns ? [var.domain_name] : []
   web_acl_id          = var.waf_enabled ? aws_wafv2_web_acl.edge[0].arn : null
 
   origin {

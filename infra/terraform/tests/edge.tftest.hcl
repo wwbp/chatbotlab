@@ -205,3 +205,116 @@ run "the_origin_gets_its_own_name_as_host" {
     error_message = "Behaviours to the load balancer must use AllViewerExceptHostHeader: its certificate is for the origin name."
   }
 }
+
+# --- Custom domain: certificate first, alias and DNS at the cutover ---------------
+
+# A fixed certificate and distribution, so the plan shows how they are wired.
+# ACM gives a name in this account the same validation record every time:
+# for bot.wwbp.org it is the record the live certificate already uses.
+override_resource {
+  target          = aws_acm_certificate.custom_domain
+  override_during = plan
+  values = {
+    arn = "arn:aws:acm:us-east-1:123456789012:certificate/site"
+    domain_validation_options = [{
+      domain_name           = "bot.wwbp.org"
+      resource_record_name  = "_fedcba9876543210fedcba9876543210.bot.wwbp.org."
+      resource_record_type  = "CNAME"
+      resource_record_value = "_y.acm-validations.aws."
+    }]
+  }
+}
+
+override_resource {
+  target          = aws_cloudfront_distribution.frontend
+  override_during = plan
+  values = {
+    domain_name    = "d111111abcdef8.cloudfront.net"
+    hosted_zone_id = "Z2FDTNDATAQYW2"
+  }
+}
+
+# Setting domain_name before the cutover: the certificate, validated by a
+# record Terraform writes, is attached to the distribution (so the alias can
+# be moved onto it), but the distribution does not claim the name and the
+# public record is not touched. The live distribution keeps serving it.
+run "domain_before_the_cutover_gets_only_a_certificate" {
+  command = plan
+
+  variables {
+    domain_name = "bot.wwbp.org"
+  }
+
+  assert {
+    condition = alltrue([
+      aws_acm_certificate.custom_domain[0].domain_name == "bot.wwbp.org",
+      aws_route53_record.custom_domain_validation[0].name == "_fedcba9876543210fedcba9876543210.bot.wwbp.org.",
+      aws_route53_record.custom_domain_validation[0].zone_id == "Z0000000000000000000",
+      # The same name and value as the live certificate's record: take it over.
+      aws_route53_record.custom_domain_validation[0].allow_overwrite,
+      length(aws_acm_certificate_validation.custom_domain[0].validation_record_fqdns) == 1,
+    ])
+    error_message = "domain_name must create the certificate and its validation record in the zone."
+  }
+
+  assert {
+    condition     = aws_cloudfront_distribution.frontend.viewer_certificate[0].acm_certificate_arn == "arn:aws:acm:us-east-1:123456789012:certificate/site"
+    error_message = "The distribution must carry the certificate before the cutover, so the alias can be moved onto it."
+  }
+
+  assert {
+    condition     = length(aws_cloudfront_distribution.frontend.aliases) == 0 && length(aws_route53_record.site) == 0
+    error_message = "Before cutover_dns, the distribution must not claim the name and the public record must not change."
+  }
+}
+
+run "cutover_claims_the_name_and_points_dns_at_this_distribution" {
+  command = plan
+
+  variables {
+    domain_name = "bot.wwbp.org"
+    cutover_dns = true
+  }
+
+  assert {
+    condition     = aws_cloudfront_distribution.frontend.aliases == toset(["bot.wwbp.org"])
+    error_message = "At the cutover the distribution claims the domain."
+  }
+
+  assert {
+    condition = alltrue([
+      for type in ["A", "AAAA"] :
+      aws_route53_record.site[type].name == "bot.wwbp.org"
+      && aws_route53_record.site[type].type == type
+      && aws_route53_record.site[type].zone_id == "Z0000000000000000000"
+      && aws_route53_record.site[type].allow_overwrite
+      && one(aws_route53_record.site[type].alias).name == "d111111abcdef8.cloudfront.net"
+      && one(aws_route53_record.site[type].alias).zone_id == "Z2FDTNDATAQYW2"
+    ])
+    error_message = "At the cutover, A and AAAA alias records for the domain point at this distribution (replacing the live ones)."
+  }
+}
+
+run "cutover_needs_a_domain" {
+  command = plan
+
+  variables {
+    cutover_dns = true
+  }
+
+  expect_failures = [var.cutover_dns]
+}
+
+run "no_domain_no_certificate_no_records" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      length(aws_acm_certificate.custom_domain) == 0,
+      length(aws_route53_record.custom_domain_validation) == 0,
+      length(aws_route53_record.site) == 0,
+      aws_cloudfront_distribution.frontend.viewer_certificate[0].cloudfront_default_certificate,
+    ])
+    error_message = "Without domain_name: the cloudfront.net certificate and no domain records."
+  }
+}
