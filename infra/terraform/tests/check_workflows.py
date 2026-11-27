@@ -782,6 +782,55 @@ OTHER_PROJECT_SAMPLES = [
     ("cloudformation:GetTemplate", "arn:aws:cloudformation:us-east-1:<ACCOUNT_ID>:stack/awseb-e-meet123-stack/abc"),
     ("cloudformation:GetTemplateSummary", "arn:aws:cloudformation:us-east-1:<ACCOUNT_ID>:stack/awseb-e-meet123-stack/abc"),
 ]
+# Another project's resources whose names happen to contain this
+# environment's name or prefix, and reads that return secrets.
+def other_project_samples(env):
+    a = "<ACCOUNT_ID>"
+    return [
+        # EB matches a name pattern against configurationtemplate/<app>/<name>
+        # and environment/<app>/<name> too: a template named <PREFIX>-<env> in
+        # someone else's application would expose that application's settings.
+        ("elasticbeanstalk:CreateConfigurationTemplate",
+         f"arn:aws:elasticbeanstalk:us-east-1:{a}:configurationtemplate/meetlab-v2/<PREFIX>-{env}"),
+        ("elasticbeanstalk:DescribeConfigurationSettings",
+         f"arn:aws:elasticbeanstalk:us-east-1:{a}:environment/meetlab-v2/<PREFIX>-{env}"),
+        # The AWSEBBeanstalkMetadata resource of an EB stack holds its option
+        # settings, environment variables included.
+        ("cloudformation:DescribeStackResource", f"arn:aws:cloudformation:us-east-1:{a}:stack/awseb-e-meet123-stack/abc"),
+        ("rds:DeleteDBInstance", f"arn:aws:rds:us-east-1:{a}:db:meetlab-{env}-db"),
+        ("s3:GetObject", f"arn:aws:s3:::meetlab-{env}-uploads/x"),
+        ("cloudfront:UpdateFunction", f"arn:aws:cloudfront::{a}:function/meetlab-router"),
+        ("cloudfront:GetFunction", f"arn:aws:cloudfront::{a}:function/meetlab-router"),
+        # Origin access controls cannot be tagged: an update could break any
+        # distribution in the account (an outage); a delete fails while in use.
+        ("cloudfront:UpdateOriginAccessControl", f"arn:aws:cloudfront::{a}:origin-access-control/EOTHER"),
+        # A volume from another project's snapshot, attached to an own
+        # instance, would expose its data; so would a private AMI.
+        ("ec2:CreateVolume", f"arn:aws:ec2:us-east-1:{a}:snapshot/snap-other"),
+        ("ec2:CreateVolume", "*"),
+        # An own instance placed in another project's subnet or security group
+        # would reach that project's database port.
+        ("ec2:RunInstances", f"arn:aws:ec2:us-east-1:{a}:security-group/sg-meetlab-db"),
+        ("ec2:RunInstances", f"arn:aws:ec2:us-east-1:{a}:subnet/subnet-meetlab"),
+    ]
+
+
+# Unconditioned Allows on Resource "*": only these. Metadata reads of the
+# services the stacks use (no secret-bearing reads: no Get* of secrets,
+# parameters, templates, function code, EB settings), plus calls that name no
+# resource. Anything new needs a decision here.
+STAR_ALLOWLIST = {
+    "acm:Describe*", "acm:List*", "autoscaling:Describe*", "cloudfront:List*", "ec2:Describe*",
+    "elasticache:Describe*", "elasticache:ListTagsForResource", "elasticbeanstalk:DescribeA*",
+    "elasticbeanstalk:DescribeE*", "elasticbeanstalk:DescribeI*", "elasticbeanstalk:DescribeP*",
+    "elasticbeanstalk:List*", "elasticloadbalancing:Describe*", "iam:Get*", "iam:List*", "logs:Describe*",
+    "rds:Describe*", "rds:ListTagsForResource", "s3:ListAllMyBuckets", "sts:GetCallerIdentity",
+    "bedrock:Converse*", "bedrock:InvokeModel*", "cloudwatch:PutMetricData",
+}
+# Statements that may only appear tag-scoped (own aws:ResourceTag or
+# aws:RequestTag): writes to CloudFront distributions, which serve the live
+# sites and other projects too.
+DISTRIBUTION_WRITE = re.compile(r"cloudfront:(Create|Update|Delete)\w*Distribution", re.I)
 SES_SENDS = ("ses:SendEmail", "ses:SendRawEmail")
 SES_IDENTITY = "arn:aws:ses:us-east-1:<ACCOUNT_ID>:identity/<SES_FROM_DOMAIN>"
 # role -> (environment it serves, GitHub Environment it trusts, ref condition)
@@ -1131,9 +1180,35 @@ for name, policy in policies.items():
             )
 
     # Other projects in the account: nothing reaches them.
-    for action, arn in OTHER_PROJECT_SAMPLES:
+    samples = OTHER_PROJECT_SAMPLES + other_project_samples(environment)
+    if kind == "boundary":
+        # Known limit: no room in the boundary for a tag scope on subnets and
+        # security groups (the apply roles have one).
+        samples = [x for x in samples if not x[1].endswith(("sg-meetlab-db", "subnet-meetlab"))]
+    for action, arn in samples:
         check(not allows_untagged(policy, action, arn, environment),
               f"{fname}.json: must not allow {action} on another project's {arn}")
+
+    for st in policy["Statement"]:
+        if st.get("Effect") != "Allow":
+            continue
+        cond = st.get("Condition", {})
+        tagged = own_tags(cond, "ResourceTag", environment) or own_tags(cond, "RequestTag", environment)
+        actions = as_list(st.get("Action", []))
+        if as_list(st.get("Resource")) == ["*"] and not tagged:
+            extra = sorted(set(actions) - STAR_ALLOWLIST)
+            check(not extra, f"{fname}.json: unconditioned Allow on '*' outside the allowlist: {extra}")
+        if "*" not in as_list(st.get("Resource", [])):
+            tagging = [a for a in actions if any(fnmatchcase(t, a) for t in TAGGING_ACTIONS)]
+            check(not tagging or (own_tags(cond, "ResourceTag", environment) and tag_keys_limited(cond)),
+                  f"{fname}.json: {tagging} on named resources needs own aws:ResourceTag and aws:TagKeys conditions")
+        for a in actions:
+            check(not DISTRIBUTION_WRITE.search(a) or tagged,
+                  f"{fname}.json: {a} may only be allowed tag-scoped to Environment={environment}")
+        for r in as_list(st.get("Resource", [])):
+            if r.endswith(("::image/*", "::snapshot/*")):
+                check(cond.get("StringEquals", {}).get("ec2:Owner") == "amazon",
+                      f"{fname}.json: {r} needs StringEquals ec2:Owner = amazon (no other project's AMIs or snapshots)")
 
     # The test stack must not send real email: SES sends are explicitly denied
     # to the test apply role and to every role the test stack creates (its
@@ -1157,6 +1232,19 @@ for name, policy in policies.items():
                   f"{fname}.json: {action} on the old project-wide state key must not be allowed")
         check(allows(policy, "elasticbeanstalk:DescribeConfigurationSettings", own["eb-env"]),
               f"{fname}.json: must read its own Elastic Beanstalk environment's settings")
+        # A configuration template copies the settings of the environment it
+        # is made from, and EB checks that source only through
+        # elasticbeanstalk:FromEnvironment. The stack makes none: denied.
+        check(denies(policy, "elasticbeanstalk:CreateConfigurationTemplate",
+                     f"arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:configurationtemplate/<PREFIX>-{environment}/t"),
+              f"{fname}.json: must deny elasticbeanstalk:CreateConfigurationTemplate")
+        # User data and launch template data can hold secrets: readable only on
+        # resources tagged with this environment.
+        check(any(st.get("Effect") == "Deny" and as_list(st.get("Resource")) == ["*"]
+                  and {"ec2:DescribeInstanceAttribute", "ec2:DescribeLaunchTemplateVersions"} <= set(as_list(st.get("Action")))
+                  and st.get("Condition") == {"StringNotEquals": {"aws:ResourceTag/Environment": environment}}
+                  for st in policy["Statement"]),
+              f"{fname}.json: must deny ec2:DescribeInstanceAttribute / DescribeLaunchTemplateVersions unless tagged Environment={environment}")
         # One state bucket holds both environments' state and production's
         # backups (<PREFIX>/production/backups/). The test role reads and
         # writes only <PREFIX>/test/, may not create or reconfigure the bucket
@@ -1298,7 +1386,7 @@ for doc in (TERRAFORM / "README.md", ROOT / "docs" / "deployment" / "technical-r
     for stale in ("TEST account", "separate account", "different AWS accounts", "cross-account copy", "separate TEST"):
         check(stale.lower() not in text.lower() or f"no {stale.lower()}" in text.lower(),
               f"{doc.name}: still says '{stale}'; the test stack lives in the production account")
-for needle in ("TF_AWS_ACCOUNT_ID", "<PREFIX>-terraform-apply-production", "<PREFIX>-terraform-apply-test",
+for needle in ("IAM Access Analyzer", "iam:CreateRole", "TF_AWS_ACCOUNT_ID", "<PREFIX>-terraform-apply-production", "<PREFIX>-terraform-apply-test",
                "<PREFIX>-terraform-boundary-test", "Environment=production", "positive scoping", "ses:Send*",
                "Bedrock"):
     check(needle in readme, f"README.md: the single-account setup must name {needle}")
@@ -1321,7 +1409,18 @@ runbook = (ROOT / "docs" / "deployment" / "data-migration.rst").read_text()
 check("test stack" in runbook and "Follow it for **staging first**" not in runbook,
       "data-migration.rst: the rehearsal runs on the test stack, not on a Terraform staging stack")
 rehearsal_source = runbook.split("Rehearsal source\n", 1)[-1].split("\nProcedure\n", 1)[0]
-check("same AWS account" in runbook and "<PREFIX>-test-rehearsal-source --skip-final-snapshot" in runbook
+step13 = runbook.split("13. **Rehearsal before production.**", 1)[-1].split("\n14. ", 1)[0]
+# The source sits in the test stack's subnet group but is not in its state:
+# delete it before Destroy, or Destroy stops half-way. It is named outside the
+# test role's scope (no <PREFIX>-test- name, no Environment tag), so only the
+# administrator running the copy can touch it.
+check(0 <= step13.find("delete-db-instance --db-instance-identifier rehearsal-source-") < step13.find("Destroy Infrastructure"),
+      "data-migration.rst: step 13 must delete the rehearsal source before running Destroy Infrastructure")
+check("--db-instance-identifier rehearsal-source-" in rehearsal_source and "Key=Environment" not in rehearsal_source
+      and "main`` only" in rehearsal_source,
+      "data-migration.rst: name the rehearsal source rehearsal-source-<date>, untagged, and set the test "
+      "Environment's deployment branches to ``main`` only during a rehearsal")
+check("same AWS account" in runbook
       and all(n in rehearsal_source for n in ("copy-db-snapshot", "--kms-key-id", "--no-publicly-accessible",
                                               "StorageEncrypted", "<PREFIX>-test-database-subnet-group")),
       "data-migration.rst: the rehearsal restores the snapshot in the same AWS account, private and encrypted like "
