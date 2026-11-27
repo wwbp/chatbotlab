@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs once, on first initialisation of the MariaDB data volume.
+# Runs once, on first initialisation of the MySQL data volume.
 #
 # Django's test runner creates a separate `test_<DATABASE_NAME>` database, but
 # the entrypoint only grants MYSQL_USER rights on MYSQL_DATABASE itself. Without
@@ -12,7 +12,7 @@
 # substitution in plain .sql files.
 set -euo pipefail
 
-mariadb -uroot -p"${MYSQL_ROOT_PASSWORD}" <<-EOSQL
+mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" <<-EOSQL
 	GRANT ALL PRIVILEGES ON \`test\_%\`.* TO '${MYSQL_USER}'@'%';
 	FLUSH PRIVILEGES;
 EOSQL

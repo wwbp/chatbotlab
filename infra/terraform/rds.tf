@@ -1,11 +1,16 @@
 # -----------------------------------------------------------------------------
-# rds.tf — the MariaDB relational database that stores all chat data
+# rds.tf — the MySQL relational database that stores all chat data
 #
-# I run MariaDB 10.11 (the current Long Term Support release) on RDS so I get
+# I run MySQL 8.4 (the current Long Term Support release) on RDS so I get
 # automated backups, point-in-time recovery, and OS patching without managing
-# a database server myself.
+# a database server myself. Live production runs MySQL 8.0; staying on MySQL
+# lets scripts/migration/dbcopy.py copy it (the tool refuses MySQL to MariaDB)
+# and moving to 8.4 ends the paid 8.0 Extended Support.
 #
 # Key decisions:
+#   - engine_version "8.4" names the major only, with automatic minor
+#     upgrades: AWS applies 8.4.x patches and Terraform sees no drift. A pinned
+#     8.4.x would show a downgrade diff after every automatic upgrade.
 #   - Placed in private subnets — nothing outside the VPC can reach it.
 #   - Encrypted at rest with AES-256 — required for any database holding
 #     conversation transcripts and participant data.
@@ -14,17 +19,24 @@
 #   - deletion_protection (var.deletion_protection, true unless the test
 #     stack turns it off) must be disabled before a destroy, which prevents
 #     accidental data loss.
+#   - TLS is available but not required (require_secure_transport off): the
+#     app's DATABASES setting passes no SSL options, and the database is
+#     reachable only from the application's security group.
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
-# Parameter group — I set UTF-8 MB4 so the database can store emoji and
-# any Unicode character participants might type.
+# Parameter group — utf8mb4 so the database can store emoji and any Unicode
+# character participants might type, with MySQL's default collation
+# utf8mb4_0900_ai_ci. That is what live production's database uses (it runs
+# the default parameter group), so the copied tables, the database default and
+# tables the app creates after cutover all agree. Both values are MySQL 8.4's
+# defaults; they are written out so a change is deliberate.
 # -----------------------------------------------------------------------------
 
-resource "aws_db_parameter_group" "mariadb" {
-  name        = "${local.name_prefix}-mariadb"
-  description = "I configure MariaDB 10.11 with full UTF-8 support (utf8mb4) so participant messages containing emoji or non-Latin characters are stored correctly."
-  family      = "mariadb10.11"
+resource "aws_db_parameter_group" "main" {
+  name        = "${local.name_prefix}-mysql84"
+  description = "I configure MySQL 8.4 with full UTF-8 support (utf8mb4) so participant messages containing emoji or non-Latin characters are stored correctly."
+  family      = "mysql8.4"
 
   parameter {
     name  = "character_set_server"
@@ -33,11 +45,11 @@ resource "aws_db_parameter_group" "mariadb" {
 
   parameter {
     name  = "collation_server"
-    value = "utf8mb4_unicode_ci"
+    value = "utf8mb4_0900_ai_ci"
   }
 
   tags = {
-    Name = "${local.name_prefix}-mariadb-params"
+    Name = "${local.name_prefix}-mysql84-params"
   }
 }
 
@@ -62,9 +74,10 @@ resource "aws_db_instance" "main" {
   identifier = "${local.name_prefix}-database"
 
   # Engine
-  engine         = "mariadb"
-  engine_version = "10.11"
-  instance_class = var.db_instance_class
+  engine                     = "mysql"
+  engine_version             = "8.4"
+  auto_minor_version_upgrade = true
+  instance_class             = var.db_instance_class
 
   # Storage — I start at 20 GB and allow auto-scaling up to 100 GB so the
   # database never runs out of space without manual intervention.
@@ -73,7 +86,11 @@ resource "aws_db_instance" "main" {
   storage_type          = "gp3"
   storage_encrypted     = true
 
-  # Database and credentials
+  # Database and credentials. Not live production's ebdb / ebroot: dbcopy
+  # restores into whatever MIG_TARGET_DATABASE names (its tests copy between
+  # differently named databases), and the app reads the name from
+  # DATABASE_NAME, which elasticbeanstalk.tf already sets to chatbot_db.
+  # Keeping these means no change to the app's config or the runbook.
   db_name  = "chatbot_db"
   username = "chatbot_user"
   password = var.db_password
@@ -82,7 +99,7 @@ resource "aws_db_instance" "main" {
   db_subnet_group_name   = aws_db_subnet_group.database.name
   vpc_security_group_ids = [aws_security_group.database.id]
   publicly_accessible    = false
-  parameter_group_name   = aws_db_parameter_group.mariadb.name
+  parameter_group_name   = aws_db_parameter_group.main.name
 
   # Backups
   # At least 7 days on production (variables.tf refuses fewer), so I can

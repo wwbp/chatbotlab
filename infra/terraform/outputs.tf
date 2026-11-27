@@ -71,7 +71,7 @@ output "github_secret_AWS_BACKEND_ENVIRONMENT_NAME" {
 # -----------------------------------------------------------------------------
 
 output "rds_endpoint" {
-  description = "The RDS MariaDB hostname. Use this to connect with a MySQL client for debugging: mysql -h <endpoint> -u chatbot_user -p chatbot_db"
+  description = "The RDS MySQL hostname. Use this to connect with a MySQL client for debugging: mysql -h <endpoint> -u chatbot_user -p chatbot_db"
   value       = aws_db_instance.main.address
 }
 

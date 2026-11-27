@@ -119,7 +119,7 @@ resource "aws_route_table_association" "public" {
 
 resource "aws_db_subnet_group" "database" {
   name        = "${local.name_prefix}-database-subnet-group"
-  description = "I use these private subnets for the RDS MariaDB instance. Covering two AZs lets me enable Multi-AZ replication later without recreating this group."
+  description = "I use these private subnets for the RDS MySQL instance. Covering two AZs lets me enable Multi-AZ replication later without recreating this group."
   subnet_ids  = aws_subnet.private[*].id
 
   tags = {
