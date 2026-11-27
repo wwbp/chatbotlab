@@ -192,9 +192,7 @@
         "s3:GetObject",
         "s3:ListBucket",
         "s3:PutObject",
-        "ssm:GetParameter",
-        "ssm:GetParameters",
-        "ssm:GetParametersByPath"
+        "secretsmanager:GetSecretValue"
       ],
       "Resource": [
         "arn:aws:elasticbeanstalk:*:*:application/<PREFIX>-test",
@@ -205,7 +203,8 @@
         "arn:aws:s3:::elasticbeanstalk-*/<PREFIX>-test/*",
         "arn:aws:s3:::elasticbeanstalk-*-<ACCOUNT_ID>",
         "arn:aws:logs:*:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/<PREFIX>-test-*",
-        "arn:aws:ssm:*:<ACCOUNT_ID>:parameter/<PREFIX>-test/*"
+        "arn:aws:secretsmanager:*:<ACCOUNT_ID>:secret:<PREFIX>-test/*",
+        "arn:aws:secretsmanager:*:<ACCOUNT_ID>:secret:rds!db-*"
       ]
     },
     {
@@ -283,13 +282,7 @@
       "Sid": "DenyOtherEnvNames",
       "Effect": "Deny",
       "Action": "*",
-      "Resource": [
-        "arn:aws:s3:::*<PREFIX>-production*",
-        "arn:aws:elasticbeanstalk:*:*:*<PREFIX>-production*",
-        "arn:aws:logs:*:*:*<PREFIX>-production*",
-        "arn:aws:ssm:*:*:*<PREFIX>-production*",
-        "arn:aws:iam::*:*<PREFIX>-production*"
-      ]
+      "Resource": "arn:aws:*<PREFIX>-production*"
     },
     {
       "Sid": "DenyOtherEnvTags",

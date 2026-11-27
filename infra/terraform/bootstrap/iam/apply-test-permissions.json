@@ -63,6 +63,32 @@
       "Resource": "arn:aws:elasticache:*:<ACCOUNT_ID>:serverlesscache:<PREFIX>-test-*"
     },
     {
+      "Sid": "ManageOwnSecretsNotValues",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:GetResourcePolicy",
+        "secretsmanager:TagResource",
+        "secretsmanager:UntagResource"
+      ],
+      "Resource": "arn:aws:secretsmanager:*:<ACCOUNT_ID>:secret:<PREFIX>-test/*"
+    },
+    {
+      "Sid": "RdsManagedMasterUserSecret",
+      "Effect": "Allow",
+      "Action": [
+        "kms:DescribeKey",
+        "secretsmanager:CreateSecret",
+        "secretsmanager:TagResource"
+      ],
+      "Resource": [
+        "arn:aws:kms:*:<ACCOUNT_ID>:key/*",
+        "arn:aws:secretsmanager:*:<ACCOUNT_ID>:secret:rds!db-*"
+      ]
+    },
+    {
       "Sid": "ManageOwnElasticBeanstalk",
       "Effect": "Allow",
       "Action": "elasticbeanstalk:*",
