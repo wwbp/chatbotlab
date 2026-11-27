@@ -98,7 +98,7 @@ variable "survey_ingest_token" {
 }
 
 variable "db_password" {
-  description = "The master password for the MariaDB database I create on RDS. Use letters and numbers only — special characters can break the MySQL connection string."
+  description = "The master password for the MySQL database I create on RDS. Use letters and numbers only — special characters can break the MySQL connection string."
   type        = string
   sensitive   = true
 }
@@ -197,7 +197,7 @@ variable "eb_max_instances" {
 }
 
 variable "db_instance_class" {
-  description = "The RDS instance class for the MariaDB database. db.t3.micro is free-tier eligible and sufficient for the test stack. Consider db.t3.small or db.t3.medium for production."
+  description = "The RDS instance class for the MySQL database. db.t3.micro is free-tier eligible and sufficient for the test stack. Consider db.t3.small or db.t3.medium for production."
   type        = string
   default     = "db.t3.micro"
 }
