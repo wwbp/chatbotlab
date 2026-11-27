@@ -29,7 +29,7 @@ variable "project_name" {
 }
 
 variable "environment" {
-  description = "Which deployment environment I am provisioning: production (study data, in the production AWS account) or test (the on-demand stack in the lab's separate TEST account, applied and destroyed when needed)."
+  description = "Which deployment environment I am provisioning: production (study data, in the production AWS account) or test (the on-demand stack, applied and destroyed when needed; it shares the production account, with every resource named <project>-test)."
   type        = string
   validation {
     condition     = contains(["test", "production"], var.environment)
@@ -115,9 +115,15 @@ variable "django_secret_key" {
 }
 
 variable "admin_panel_password" {
-  description = "The password for the Django admin panel at /api/admin/. I pass it to the app as DJANGO_SUPERUSER_PASSWORD, which makes api/entrypoint.sh create the 'admin' superuser on first deploy."
+  description = "Test stack only: the password of the 'admin' superuser that api/entrypoint.sh creates in the empty database (DJANGO_SUPERUSER_PASSWORD). Production ignores it: its database has the real admins, and it creates no account at boot."
   type        = string
   sensitive   = true
+  default     = ""
+
+  validation {
+    condition     = var.environment != "test" || var.admin_panel_password != ""
+    error_message = "The test stack needs admin_panel_password: its database starts empty, and the admin account is the only way into /api/admin/."
+  }
 }
 
 # -----------------------------------------------------------------------
@@ -131,18 +137,18 @@ variable "site_url" {
 }
 
 variable "email_backend" {
-  description = "The Django email backend (EMAIL_BACKEND). Leave empty to leave the setting alone: Terraform then sends nothing, a value set by hand on the environment is kept, and the application falls back to printing emails to its log. Set chatbot.email_backend.SESBackend to send through Amazon SES, which also needs default_from_email."
+  description = "The Django email backend (EMAIL_BACKEND). Leave empty for the default: chatbot.email_backend.SESBackend (Amazon SES) on production, django.core.mail.backends.console.EmailBackend (the log) on the test stack, which may use nothing else."
   type        = string
   default     = ""
 
   validation {
-    condition     = var.email_backend != "chatbot.email_backend.SESBackend" || var.default_from_email != ""
-    error_message = "The SES backend needs default_from_email: the instance role is only allowed to send from that address."
+    condition     = var.environment != "test" || contains(["", "django.core.mail.backends.console.EmailBackend"], var.email_backend)
+    error_message = "The test stack prints emails to its log, so a rehearsal never writes to real participants."
   }
 }
 
 variable "default_from_email" {
-  description = "The sender of invites and password resets (DEFAULT_FROM_EMAIL), as an address or as 'Name <address>', e.g. \"ChatbotLab <no-reply@mylab.org>\". Setting it also lets the instance role send through SES from exactly that address. Leave empty for a stack that sends no email."
+  description = "The sender of invites and password resets (DEFAULT_FROM_EMAIL), as an address or as 'Name <address>', e.g. \"ChatbotLab <no-reply@mylab.org>\". With the SES backend, the instance role may send from exactly that address. Leave empty for the default: ChatbotLab <no-reply@bot.wwbp.org> on production, the application's own default on the test stack."
   type        = string
   default     = ""
 
