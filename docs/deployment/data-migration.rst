@@ -41,13 +41,14 @@ Do these days before the window. Each one can stop the plan.
       UNION ALL SELECT 'audio_file', COUNT(*) FROM chatbot_utterance
         WHERE audio_file LIKE '%://%' OR audio_file LIKE '%bot-avatar%';
 
-   After step 8, ``grep -c 'bot-avatar\.wwbp\.org' <run-dir>/dump.sql`` checks every other column too (a prompt or setting that names the bucket); it must print 0, or each hit must be rewritten by hand. Save the keys the database refers to as ``db.keys``, one per line, for step 9::
+   After step 8, ``grep -c 'bot-avatar\.wwbp\.org' <run-dir>/dump.sql`` checks every other column too (a prompt or setting that names the bucket); it must print 0, or each hit must be rewritten by hand. Save the keys the database refers to as ``db.keys``, one per line, for step 9 (connection options as for the source database)::
 
-      SELECT audio_file FROM chatbot_utterance WHERE audio_file <> ''
-      UNION SELECT IF(k LIKE 'avatar/%', k, CONCAT('avatar/', k)) FROM (
-        SELECT participant_avatar AS k FROM chatbot_avatar
-        UNION SELECT chatbot_avatar FROM chatbot_avatar) a
-      WHERE k <> '';
+      mariadb -N -B -e "
+        SELECT audio_file FROM chatbot_utterance WHERE audio_file <> ''
+        UNION SELECT IF(k LIKE 'avatar/%', k, CONCAT('avatar/', k)) FROM (
+          SELECT participant_avatar AS k FROM chatbot_avatar
+          UNION SELECT chatbot_avatar FROM chatbot_avatar) a
+        WHERE k <> ''" <database> > db.keys
 
    ``CHATBOT_CONTROL_IMAGE`` (an environment variable, not a row) is also a key (``avatar/chatbot_control.png``) and is copied with the rest.
 
@@ -181,24 +182,26 @@ Steps 1 to 3 are preparation and can be done ahead of time. The window (app offl
 
    *Rollback:* as step 4. The new database can simply be left.
 
-9. **Copy the uploaded files, under the same keys.** Skip ``uploads/``: it holds participants' raw photos, which are deleted once their avatar is made and expire after 1 day in both buckets; copying them would only restart that clock. ::
+9. **Copy the uploaded files, under the same keys.** Skip ``uploads/``: it holds participants' raw photos, which the app deletes once their avatar is made and the new bucket expires after 1 day (S3 runs expiry asynchronously and rounds to the next midnight UTC, so 24 to 48 hours in practice). Production's old bucket has the same rule; the staging bucket ``dev.bot-avatar.wwbp.org`` has none and still holds old photos there. Copying them would only carry them over. ::
 
       OLD=<old-data-bucket>; NEW=<new-data-bucket>
       aws s3 sync s3://$OLD s3://$NEW --exclude 'uploads/*'
       for b in $OLD $NEW; do
         aws s3api list-objects-v2 --bucket $b --output text \
           --query 'Contents[?!starts_with(Key, `uploads/`)].[Key,Size,ETag]' | sort > $b.keys
-        wc -l < $b.keys; awk '{s+=$2} END {print s}' $b.keys
+        wc -l < $b.keys; awk -F'\t' '{s+=$2} END {print s}' $b.keys
       done
       diff $OLD.keys $NEW.keys && echo SAME
 
    Each line is key, size and ETag. The ETag is the MD5 of the content, except for an object uploaded or copied in parts (over 8 MB), whose ETag contains a ``-`` and can differ between the buckets with the same content: for those lines only, download the object from both buckets and compare ``shasum -a 256``.
 
-   Then list the keys the database refers to that are missing from the new bucket (expected only for files that never reached the old bucket either)::
+   Then list the keys the database refers to that are missing from the new bucket, and those missing from the old one; the two lists must be the same (files that never reached S3)::
 
-      cut -f1 $NEW.keys | sort | comm -23 <(sort -u db.keys) -
+      cut -f1 $NEW.keys | sort | comm -23 <(sort -u db.keys) - > missing-new
+      cut -f1 $OLD.keys | sort | comm -23 <(sort -u db.keys) - > missing-old
+      diff missing-old missing-new && wc -l < missing-new
 
-   *Gate:* do not continue unless ``diff`` prints ``SAME`` (same keys, count, sizes and checksums), or every differing line is a multipart ETag whose SHA-256 matched; and every missing key is also missing from the old bucket.
+   *Gate:* do not continue unless ``diff`` prints ``SAME`` (same keys, count, sizes and checksums), or every differing line is a multipart ETag whose SHA-256 matched; and ``diff missing-old missing-new`` prints nothing.
 
 10. **Start the new app.** Set the new environment back to 1 or more instances. Give it the old environment's ``SECRET_KEY`` if staff should stay logged in. From this moment the new database changes (the app records logins and sessions), so ``verify`` will no longer print ``IDENTICAL``: that is why it comes first.
 
