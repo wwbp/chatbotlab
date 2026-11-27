@@ -73,6 +73,29 @@ run "raw_participant_photos_expire_after_one_day" {
     ])
     error_message = "Only uploads/ may expire: every enabled rule with an expiration must filter on exactly uploads/."
   }
+
+  # Parts of an interrupted multipart upload (boto3 goes multipart above 8 MB)
+  # are invisible to listings and would otherwise stay forever.
+  assert {
+    condition = length([
+      for r in aws_s3_bucket_lifecycle_configuration.application_data.rule : r
+      if r.status == "Enabled" && one(r.filter).prefix == "uploads/"
+      && try(one(r.abort_incomplete_multipart_upload).days_after_initiation, 0) == 1
+      && try(one(r.noncurrent_version_expiration).noncurrent_days, 0) == 1
+    ]) == 1
+    error_message = "The uploads/ rule must also abort incomplete multipart uploads and expire noncurrent versions after 1 day."
+  }
+}
+
+# With versioning, the expiry and the app's delete leave the photo behind as a
+# noncurrent version. "Disabled" (never versioned) rather than "Suspended".
+run "data_bucket_is_never_versioned" {
+  command = plan
+
+  assert {
+    condition     = one(aws_s3_bucket_versioning.application_data.versioning_configuration).status == "Disabled"
+    error_message = "The data bucket must never be versioned (status Disabled)."
+  }
 }
 
 run "data_bucket_is_private_and_encrypted" {

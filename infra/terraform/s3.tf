@@ -105,9 +105,10 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "application_data"
 # Participants' raw photos (uploads/) are needed only long enough to generate
 # their avatar. The app deletes each one afterwards; this catches every path
 # that does not (a failed generation, an abandoned upload). Same rule as the
-# live production bucket. The bucket is deliberately not versioned: with
-# versioning, this expiry and the app's delete would only add delete markers
-# and the photo would survive as a noncurrent version.
+# live production bucket, plus two backstops: parts of an interrupted
+# multipart upload (invisible to listings) and noncurrent versions, should
+# versioning ever be turned on, go after a day too. S3 runs expiry
+# asynchronously and rounds to the next midnight UTC: 24 to 48 hours.
 resource "aws_s3_bucket_lifecycle_configuration" "application_data" {
   bucket = aws_s3_bucket.application_data.id
 
@@ -122,6 +123,26 @@ resource "aws_s3_bucket_lifecycle_configuration" "application_data" {
     expiration {
       days = 1
     }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 1
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 1
+    }
+  }
+}
+
+# Never versioned, as live production: with versioning, the expiry above and
+# the app's delete would only add delete markers, and the photo would survive
+# as a noncurrent version. "Disabled" is valid only for a bucket that has
+# never been versioned, so it cannot be set back after "Enabled".
+resource "aws_s3_bucket_versioning" "application_data" {
+  bucket = aws_s3_bucket.application_data.id
+
+  versioning_configuration {
+    status = "Disabled"
   }
 }
 
