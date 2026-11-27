@@ -131,6 +131,21 @@
           "aws:ResourceTag/Environment": "production"
         }
       }
+    },
+    {
+      "Sid": "DenySecretValueCalls",
+      "Effect": "Deny",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:ReplicateSecretToRegions",
+        "secretsmanager:RestoreSecret",
+        "secretsmanager:UpdateSecret",
+        "secretsmanager:UpdateSecretVersionStage"
+      ],
+      "Resource": "arn:aws:secretsmanager:*:*:secret:<PREFIX>-*"
     }
   ]
 }

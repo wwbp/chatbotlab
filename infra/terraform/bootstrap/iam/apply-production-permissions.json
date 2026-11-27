@@ -74,30 +74,33 @@
       "Resource": "arn:aws:elasticache:*:<ACCOUNT_ID>:serverlesscache:<PREFIX>-production-*"
     },
     {
-      "Sid": "ManageOwnSecretsNotValues",
+      "Sid": "LookUpOwnSecrets",
       "Effect": "Allow",
       "Action": [
-        "secretsmanager:CreateSecret",
-        "secretsmanager:DeleteSecret",
         "secretsmanager:DescribeSecret",
-        "secretsmanager:GetResourcePolicy",
-        "secretsmanager:TagResource",
-        "secretsmanager:UntagResource"
+        "secretsmanager:GetResourcePolicy"
       ],
       "Resource": "arn:aws:secretsmanager:*:<ACCOUNT_ID>:secret:<PREFIX>-production/*"
     },
     {
-      "Sid": "RdsManagedMasterUserSecret",
+      "Sid": "RdsCreatesMasterUserSecret",
       "Effect": "Allow",
       "Action": [
-        "kms:DescribeKey",
         "secretsmanager:CreateSecret",
         "secretsmanager:TagResource"
       ],
-      "Resource": [
-        "arn:aws:kms:*:<ACCOUNT_ID>:key/*",
-        "arn:aws:secretsmanager:*:<ACCOUNT_ID>:secret:rds!db-*"
-      ]
+      "Resource": "arn:aws:secretsmanager:*:<ACCOUNT_ID>:secret:rds!db-*",
+      "Condition": {
+        "Bool": {
+          "aws:ViaAWSService": "true"
+        }
+      }
+    },
+    {
+      "Sid": "DescribeSecretsManagerKey",
+      "Effect": "Allow",
+      "Action": "kms:DescribeKey",
+      "Resource": "arn:aws:kms:*:<ACCOUNT_ID>:key/*"
     },
     {
       "Sid": "ManageOwnElasticBeanstalk",
