@@ -146,6 +146,8 @@ def test_production_without_its_secret_fails_at_start(monkeypatch):
 
 def test_production_secret_without_secret_key_fails_at_start(monkeypatch):
     production(monkeypatch)
+    # A stale value left in the environment must not stand in for it.
+    monkeypatch.setenv("SECRET_KEY", "stale-secret-key-from-the-environment")
     fake_secrets_manager(
         monkeypatch,
         [
@@ -155,6 +157,32 @@ def test_production_secret_without_secret_key_fails_at_start(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="SECRET_KEY"):
+        load_settings()
+
+
+def test_a_stale_api_key_in_the_environment_is_not_used(monkeypatch):
+    # The secret leaves ANTHROPIC_API_KEY out: the deployment does not use it.
+    production(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-stale")
+    fake_secrets_manager(
+        monkeypatch,
+        [(APP_ID, json.dumps(APP_VALUES)), (DB_ID, json.dumps(DB_VALUES))],
+    )
+    import os
+
+    load_settings()
+
+    assert os.getenv("ANTHROPIC_API_KEY") is None
+
+
+def test_production_without_its_database_secret_fails_at_start(monkeypatch):
+    production(monkeypatch)
+    fake_secrets_manager(
+        monkeypatch, [(APP_ID, json.dumps(APP_VALUES)), (DB_ID, None)]
+    )
+    monkeypatch.setenv("DATABASE_PASSWORD", "an-env-value-must-not-be-used-instead")
+
+    with pytest.raises(Exception, match="ResourceNotFoundException"):
         load_settings()
 
 
@@ -251,7 +279,15 @@ def wrapper_with(monkeypatch, outcomes):
 
 def test_a_rotated_database_password_is_read_again(monkeypatch):
     monkeypatch.setenv("DATABASE_SECRET_ID", DB_ID)
-    fake_secrets_manager(monkeypatch, [(DB_ID, json.dumps(DB_VALUES))])
+    fake_secrets_manager(
+        monkeypatch,
+        [
+            (DB_ID, json.dumps({**DB_VALUES, "password": "old"})),
+            (DB_ID, json.dumps(DB_VALUES)),
+        ],
+    )
+    # As at start: the process holds the old password in its cache.
+    assert aws_secrets.read(DB_ID)["password"] == "old"
     from django.db.backends.mysql import base as mysql
 
     wrapper, attempts, _ = wrapper_with(
