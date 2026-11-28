@@ -84,16 +84,32 @@ resource "aws_iam_role_policy" "eb_instance_application_access" {
         Resource = aws_s3_bucket.application_data.arn
       },
       {
-        # The application can call AWS Bedrock to run Llama and Claude models
-        # hosted by AWS. The instance role handles authentication so no API
-        # keys are needed for Bedrock — only for OpenAI and Anthropic.
+        # The application calls Bedrock's Converse and ConverseStream
+        # (bedrock_engine.py, check_models, validate_bedrock_models) with
+        # the instance role's credentials: no static keys. Every model it
+        # offers or still serves is Anthropic, mostly through us.* cross-region
+        # inference profiles. A profile call is authorised on the profile ARN
+        # (in this region) and on the foundation model in whichever us-*
+        # region it routes to, hence the region wildcard on foundation-model.
+        # Converse/ConverseStream are authorised by InvokeModel/
+        # InvokeModelWithResponseStream; the Converse* entries are kept in
+        # case AWS adds them as separate actions. Never drop InvokeModel*.
+        # Model access is an account setting, so no aws-marketplace actions:
+        # a model never used in this account is enabled by an admin invoking
+        # it once (first-call marketplace subscription), not by this role.
+        # A model from another provider needs its family added here.
         Sid    = "InvokeBedrockModels"
         Effect = "Allow"
         Action = [
           "bedrock:InvokeModel",
           "bedrock:InvokeModelWithResponseStream",
+          "bedrock:Converse",
+          "bedrock:ConverseStream",
         ]
-        Resource = "*"
+        Resource = [
+          "arn:aws:bedrock:*::foundation-model/anthropic.*",
+          "arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:inference-profile/us.anthropic.*",
+        ]
       },
       {
         # I allow the application to read SSM parameters under its namespace.

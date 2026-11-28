@@ -191,3 +191,59 @@ run "test_database_is_private_and_encrypted" {
     error_message = "The test database must be encrypted and not publicly accessible, like production's."
   }
 }
+
+# The app calls converse/converse_stream (bedrock_engine.py, check_models,
+# validate_bedrock_models). Converse/ConverseStream are authorised by
+# InvokeModel/InvokeModelWithResponseStream; the Converse* entries are kept in
+# case AWS adds them as separate actions. Never drop InvokeModel*.
+# Resources: Anthropic foundation models in any region (a us. cross-region
+# profile routes to us-east-1/us-east-2/us-west-2 and IAM checks the model ARN
+# in the destination region) plus this account's us.anthropic.* inference
+# profiles in the stack's region. No bedrock:*, no "*" resource, no marketplace.
+run "instance_role_bedrock_is_converse_on_anthropic_only" {
+  command = plan
+
+  # The policy also names the data bucket; known at plan so the JSON is readable.
+  override_resource {
+    target          = aws_s3_bucket.application_data
+    override_during = plan
+    values          = { arn = "arn:aws:s3:::chatbotlab-test-data" }
+  }
+
+  # A Deny, or a Condition such as aws:RequestedRegion (which would break
+  # cross-region inference profiles), would leave the actions and resources
+  # intact but stop every chat.
+  assert {
+    condition = alltrue([
+      for st in jsondecode(aws_iam_role_policy.eb_instance_application_access.policy).Statement :
+      st.Effect == "Allow" && try(st.Condition, null) == null
+      if try(st.Sid, "") == "InvokeBedrockModels"
+      ]) && length([
+      for st in jsondecode(aws_iam_role_policy.eb_instance_application_access.policy).Statement :
+      st if try(st.Sid, "") == "InvokeBedrockModels"
+    ]) == 1
+    error_message = "InvokeBedrockModels must be a single unconditioned Allow."
+  }
+
+  assert {
+    condition = toset(flatten([
+      for st in jsondecode(aws_iam_role_policy.eb_instance_application_access.policy).Statement :
+      [for a in flatten([st.Action]) : a if startswith(a, "bedrock:") || startswith(a, "aws-marketplace:")]
+      ])) == toset([
+      "bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream",
+      "bedrock:Converse", "bedrock:ConverseStream",
+    ])
+    error_message = "The instance role's Bedrock actions must be exactly InvokeModel, InvokeModelWithResponseStream, Converse and ConverseStream (no bedrock:*, no marketplace)."
+  }
+
+  assert {
+    condition = toset(flatten([
+      for st in jsondecode(aws_iam_role_policy.eb_instance_application_access.policy).Statement :
+      flatten([st.Resource]) if anytrue([for a in flatten([st.Action]) : startswith(a, "bedrock:")])
+      ])) == toset([
+      "arn:aws:bedrock:*::foundation-model/anthropic.*",
+      "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.*",
+    ])
+    error_message = "Bedrock must be granted on Anthropic foundation models and this account's us.anthropic.* inference profiles only, never on \"*\"."
+  }
+}
