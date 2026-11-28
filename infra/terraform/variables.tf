@@ -2,8 +2,10 @@
 # variables.tf — every input this configuration accepts
 #
 # Sensitive variables (marked sensitive = true) are never printed in plan
-# output or stored in plaintext in state. They still live in state as
-# encrypted values — which is why the state bucket uses AES-256 encryption.
+# output, but their values are stored in state in clear text (the bucket is
+# encrypted at rest; anyone who can read it can read them). So the only one
+# left is the test stack's throwaway admin password; the application's
+# secrets are in Secrets Manager (secrets.tf).
 #
 # Fill in actual values in terraform.tfvars (copy from terraform.tfvars.example).
 # -----------------------------------------------------------------------------
@@ -73,46 +75,12 @@ variable "force_destroy_buckets" {
 }
 
 # -----------------------------------------------------------------------
-# Secrets — these are passed in at deploy time and never hardcoded
+# Secrets. The application's (Django's SECRET_KEY, the OpenAI and Anthropic
+# keys, the survey token) are not variables: they live in the Secrets
+# Manager secret <project>-<environment>/app, which a person fills once
+# (secrets.tf), and RDS keeps the database password. None of them is in
+# Terraform state.
 # -----------------------------------------------------------------------
-
-variable "openai_api_key" {
-  description = "The OpenAI API key I inject into the Django application for chat and content moderation. Generate one at platform.openai.com. Leave empty if using Anthropic only."
-  type        = string
-  sensitive   = true
-  default     = ""
-}
-
-variable "anthropic_api_key" {
-  description = "The Anthropic API key I inject into the Django application for Claude-based chat models. Generate one at console.anthropic.com. Leave empty if using OpenAI only."
-  type        = string
-  sensitive   = true
-  default     = ""
-}
-
-variable "survey_ingest_token" {
-  description = "Shared secret the survey tool (e.g. a Qualtrics Web Service element) sends as the X-Survey-Token header when POSTing participant answers to /api/survey_response/. Leave empty to disable the endpoint entirely — it fails closed and rejects every request when unset, so only set this for studies that feed survey answers to the bot. Generate one with: openssl rand -hex 32"
-  type        = string
-  sensitive   = true
-  default     = ""
-}
-
-variable "db_password" {
-  description = "The master password for the MySQL database I create on RDS. Use letters and numbers only — special characters can break the MySQL connection string."
-  type        = string
-  sensitive   = true
-}
-
-variable "django_secret_key" {
-  description = "The cryptographic signing key Django uses for sessions and CSRF tokens. Leave empty to auto-generate a stable key (recommended — random_password.django_secret_key is kept in state and reused on every deploy, so sessions survive re-deploys). If you set it yourself, use at least 50 characters."
-  type        = string
-  sensitive   = true
-  default     = ""
-  validation {
-    condition     = var.django_secret_key == "" || length(var.django_secret_key) >= 50
-    error_message = "A caller-supplied Django secret key must be at least 50 characters. Leave it empty to auto-generate one instead."
-  }
-}
 
 variable "admin_panel_password" {
   description = "Test stack only: the password of the 'admin' superuser that api/entrypoint.sh creates in the empty database (DJANGO_SUPERUSER_PASSWORD). Production ignores it: its database has the real admins, and it creates no account at boot."

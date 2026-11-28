@@ -58,17 +58,21 @@ name: Deploy Infrastructure
 #                           (production only). Never a repository secret:
 #                           any workflow run in the repository could read it.
 #
-#   Environment secrets (Settings → Environments → test / production)
-#     DB_PASSWORD           Database password (letters + numbers only).
+#   Environment secrets (Settings → Environments → test)
 #     ADMIN_PANEL_PASSWORD  Test only: password of the `admin` user the test
 #                           stack creates at boot. Production creates no
 #                           account at boot (its superusers come with the
 #                           copied database) and ignores it.
-#     OPENAI_API_KEY        OpenAI key (or ANTHROPIC_API_KEY, or both).
-#     ANTHROPIC_API_KEY
-#     SURVEY_INGEST_TOKEN   Optional.
-#   Keep these Environment secrets, not repository secrets: then test and
-#   production do not share them, and only an approved run can read them.
+#   Keep it an Environment secret, not a repository secret: then only an
+#   approved test run can read it.
+#
+#   No application secret passes through this workflow. SECRET_KEY, the
+#   OpenAI and Anthropic keys and SURVEY_INGEST_TOKEN live in the Secrets
+#   Manager secret <prefix>-<environment>/app, which an administrator creates
+#   and fills before the first apply (the plan fails until it exists); RDS
+#   generates and keeps the database password. The old DB_PASSWORD,
+#   OPENAI_API_KEY, ANTHROPIC_API_KEY and SURVEY_INGEST_TOKEN Environment
+#   secrets are no longer read and can be deleted.
 
 on:
   workflow_dispatch:
@@ -142,20 +146,13 @@ jobs:
       TF_VAR_github_repo:                 ${{ github.event.repository.name }}
       TF_VAR_github_org_id:               ${{ github.repository_owner_id }}
       TF_VAR_github_repo_id:              ${{ github.repository_id }}
-      TF_VAR_openai_api_key:              ${{ secrets.OPENAI_API_KEY }}
-      TF_VAR_anthropic_api_key:           ${{ secrets.ANTHROPIC_API_KEY }}
-      TF_VAR_db_password:                 ${{ secrets.DB_PASSWORD }}
       TF_VAR_admin_panel_password:        ${{ secrets.ADMIN_PANEL_PASSWORD }}
-      TF_VAR_survey_ingest_token:         ${{ secrets.SURVEY_INGEST_TOKEN }}
       TF_VAR_create_github_oidc_provider: false
 
     steps:
       # ── 1. Fail fast before touching AWS if anything is missing ───────────────
       - name: Check required secrets
         env:
-          OPENAI_KEY:           ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_KEY:        ${{ secrets.ANTHROPIC_API_KEY }}
-          DB_PASSWORD:          ${{ secrets.DB_PASSWORD }}
           ADMIN_PANEL_PASSWORD: ${{ secrets.ADMIN_PANEL_PASSWORD }}
           GH_PAT:               ${{ secrets.GH_PAT }}
           TF_PROJECT_PREFIX:    ${{ secrets.TF_PROJECT_PREFIX }}
@@ -166,14 +163,8 @@ jobs:
           fail=0
           missing() { echo "::error::$1 secret is not set"; fail=1; }
 
-          [[ -z "$DB_PASSWORD" ]]          && missing "DB_PASSWORD"
           [[ "$ENVIRONMENT" == "test" && -z "$ADMIN_PANEL_PASSWORD" ]] && missing "ADMIN_PANEL_PASSWORD"
           [[ -z "$TF_PROJECT_PREFIX" ]]    && missing "TF_PROJECT_PREFIX"
-
-          if [[ -z "$OPENAI_KEY" && -z "$ANTHROPIC_KEY" ]]; then
-            echo "::error::At least one of OPENAI_API_KEY or ANTHROPIC_API_KEY must be set"
-            fail=1
-          fi
 
           # The custom domain used to come from the DOMAIN_NAME secret. It is
           # now domain_name in environments/<environment>.tfvars. Carrying on

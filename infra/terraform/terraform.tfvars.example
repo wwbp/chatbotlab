@@ -21,33 +21,15 @@ aws_region = "us-east-1"
 project_name = "REPLACE_with_your_resource_prefix"  # must match the TF_PROJECT_PREFIX secret; prefixes every AWS resource
 
 # -----------------------------------------------------------------------
-# Secrets — fill these in, never share this file
+# Secrets. The API keys, Django's SECRET_KEY and the survey token are not
+# set here: they go in the Secrets Manager secret <project_name>-<environment>/app,
+# which an administrator creates and fills before the first apply
+# (docs/deployment/technical-reference.rst, "Secrets"). RDS generates and
+# keeps the database password. Neither ever enters Terraform state.
 # -----------------------------------------------------------------------
 
-# OpenAI API key — used by the Django backend for chat and moderation
-openai_api_key = "sk-proj-..."
-
-# Anthropic API key — used for Claude-based chat models
-anthropic_api_key = "sk-ant-..."
-
-# Password for the MySQL database user I create on RDS.
-# Rules: at least 8 characters, letters and numbers only (no special chars —
-# some chars break the MySQL connection string).
-db_password = "REPLACE_with_strong_password_min8chars"
-
-# Django's cryptographic signing key.
-# Leave empty (recommended) to auto-generate a stable key that survives every
-# re-deploy. Only set it if you must pin a value — then it needs 50+ characters.
-django_secret_key = ""
-
-# Shared secret the survey tool sends as the X-Survey-Token header when it
-# POSTs participant answers to /api/survey_response/. Leave empty unless your
-# study feeds survey answers to the bot — the endpoint rejects all traffic when
-# this is unset. Generate one with: openssl rand -hex 32
-survey_ingest_token = ""
-
-# Password for the Django admin panel at /api/admin/. On the first deploy the
-# app creates an "admin" superuser with this password.
+# Test stack only: the password of the "admin" superuser the app creates in
+# its empty database (production ignores it). It is kept in Terraform state.
 admin_panel_password = "REPLACE_with_admin_panel_password"
 
 # -----------------------------------------------------------------------

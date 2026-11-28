@@ -164,6 +164,17 @@ for path in (TERRAFORM / "setup.sh", TERRAFORM / "README.md", TERRAFORM / "boots
     )
 
 
+# --- No application secret value passes through Terraform -------------------
+# They live in Secrets Manager (secrets.tf, rds.tf). An undeclared TF_VAR_ is
+# silently ignored, so a stale one would go unnoticed while still handing the
+# value to every step of the job.
+for name, text in all_workflows.items():
+    for var in ("db_password", "django_secret_key", "openai_api_key", "anthropic_api_key", "survey_ingest_token"):
+        check(f"TF_VAR_{var}" not in text, f"{name}: TF_VAR_{var} passes a secret value to Terraform; it lives in Secrets Manager")
+    for secret in ("DB_PASSWORD", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "SURVEY_INGEST_TOKEN"):
+        check(f"secrets.{secret}" not in text, f"{name}: reads secrets.{secret}; the value lives in Secrets Manager")
+
+
 # --- Deploy secrets: only the chosen environment's, only when asked ----------
 
 staging_yml = all_workflows["staging.yml"]
@@ -844,7 +855,10 @@ ROLES = {
 }
 
 
-ROLE_PARTS = {"apply": ("permissions", "abac", "guardrails")}
+# The managed policies each apply role carries, one file each (bootstrap/iam/
+# apply-<env>-<part>.json): one policy would exceed IAM's 6144 characters.
+# Every check below runs on the union of all of them.
+ROLE_PARTS = {"apply": ("permissions", "abac", "guardrails", "secrets")}
 
 
 def boundary_arn(env_name):
@@ -894,6 +908,39 @@ def allows_untagged(policy, action, resource, environment):
     return allows({"Statement": untagged}, action, resource)
 
 
+TAG_KEY = re.compile(r"(?:aws|secretsmanager):ResourceTag/(.+)")
+
+
+def tag_conditions_hold(cond, tags):
+    """Whether the resource-tag conditions of a statement hold for a resource
+    carrying `tags`. Other conditions are taken as met, which errs towards
+    finding an Allow; a negated or unknown operator on a tag fails the check."""
+    for op, entries in cond.items():
+        for key, wanted in entries.items():
+            m = TAG_KEY.fullmatch(key)
+            if not m:
+                continue
+            value = tags.get(m.group(1))
+            if op == "StringEquals":
+                ok = value in as_list(wanted)
+            elif op == "StringLike":
+                ok = value is not None and any(fnmatchcase(value, w) for w in as_list(wanted))
+            else:
+                ok = False
+            if not ok:
+                return False
+    return True
+
+
+def allows_tagged(policy, action, resource, tags):
+    """allows(), evaluating resource-tag conditions against `tags`."""
+    granted = any(tag_conditions_hold(st.get("Condition", {}), tags)
+                  for st in matching(policy, "Allow", action, resource))
+    denied = any(tag_conditions_hold(st.get("Condition", {}), tags) if "Condition" in st else True
+                 for st in matching(policy, "Deny", action, resource))
+    return granted and not denied
+
+
 def denies(policy, action, resource):
     return any("Condition" not in st for st in matching(policy, "Deny", action, resource))
 
@@ -912,8 +959,30 @@ def sample_arns(env_name):
         "eb-env": f"arn:aws:elasticbeanstalk:us-east-1:<ACCOUNT_ID>:environment/{p}/{p}-env",
         "role": f"arn:aws:iam::<ACCOUNT_ID>:role/{p}-eb-instance-role",
         "param": f"arn:aws:ssm:us-east-1:<ACCOUNT_ID>:parameter/{p}/DJANGO_SECRET_KEY",
-        "secret": f"arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:{p}/database-AbCdEf",
+        "secret": f"arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:{p}/app-AbCdEf",
     }
+
+
+# The master user secret RDS creates for a database (manage_master_user_password).
+RDS_SECRET = "arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:rds!db-0123abcd-AbCdEf"
+# Calls that write, restore, destroy or read a secret's value.
+# Calls that write, restore, destroy or read a secret's value, or change who
+# may (resource policy), when it changes (rotation), where it lives
+# (replication) or how it is tagged (tags can feed conditions).
+SECRET_VALUE_CALLS = ("secretsmanager:CreateSecret", "secretsmanager:PutSecretValue", "secretsmanager:UpdateSecret",
+                      "secretsmanager:RestoreSecret", "secretsmanager:DeleteSecret", "secretsmanager:GetSecretValue",
+                      "secretsmanager:UpdateSecretVersionStage", "secretsmanager:ReplicateSecretToRegions",
+                      "secretsmanager:RotateSecret", "secretsmanager:CancelRotateSecret",
+                      "secretsmanager:PutResourcePolicy", "secretsmanager:DeleteResourcePolicy",
+                      "secretsmanager:TagResource", "secretsmanager:UntagResource",
+                      "secretsmanager:StopReplicationToReplica", "secretsmanager:RemoveRegionsFromReplication")
+# RDS tags the master user secret with the database it belongs to. An
+# rds!db-* name says nothing about the owner: the tag is the only scope.
+RDS_SECRET_TAG = "aws:rds:primaryDBInstanceArn"
+
+
+def rds_db_tag(owner):
+    return {RDS_SECRET_TAG: f"arn:aws:rds:us-east-1:<ACCOUNT_ID>:db:{owner}-database"}
 
 
 # IAM actions that accept the iam:PermissionsBoundary condition key: every one
@@ -1076,7 +1145,7 @@ for role, (environment, gh_environment, (ref_operator, ref)) in ROLES.items():
         f"{role}-trust.json: a ref wildcard other than refs/heads/test/* (e.g. refs/heads/*) trusts any branch: {refs}",
     )
     # A role's permissions may be split over several managed policies
-    # (<role>-permissions.json, <role>-abac.json, <role>-guardrails.json); the
+    # (<role>-<part>.json for each part in ROLE_PARTS); the
     # checks below look at all of them together.
     parts = [load_policy(f"{role}-{part}") for part in ROLE_PARTS[role.split("-")[0]]]
     policies[role] = {"Statement": [st for part in parts for st in part["Statement"]]}
@@ -1309,6 +1378,41 @@ for name, policy in policies.items():
                     services = set(as_list(cond.get("StringEquals", {}).get("iam:PassedToService", [])))
                     check(services and services <= {"elasticbeanstalk.amazonaws.com", "ec2.amazonaws.com"},
                           f"{fname}.json: iam:PassRole needs iam:PassedToService = EB / EC2")
+        # Secrets Manager. The secrets under <PREFIX>-<env>/ are created once by
+        # an administrator, out of band; Terraform only looks them up. Any call
+        # that can set a value (CreateSecret and UpdateSecret take a
+        # SecretString), restore an old one, or destroy one counts as a value
+        # write: allowing it would let a workflow on main replace SECRET_KEY
+        # (and forge sessions) or an API key. Reading a value is refused too.
+        # Each must be explicitly denied, not merely missing.
+        for action in ("secretsmanager:DescribeSecret", "secretsmanager:GetResourcePolicy"):
+            check(allows(policy, action, own["secret"]), f"{fname}.json: must allow {action} on its own secrets")
+            check(not allows(policy, action, own["secret"].replace(f"<PREFIX>-{environment}", "someone-else")),
+                  f"{fname}.json: {action} must be limited to <PREFIX>-{environment}/ secrets")
+        for action in SECRET_VALUE_CALLS:
+            check(not matching(policy, "Allow", action, own["secret"]),
+                  f"{fname}.json: must not allow {action} on its own secrets (a value write or read)")
+            check(denies(policy, action, own["secret"]),
+                  f"{fname}.json: must explicitly deny {action} on <PREFIX>-* secrets")
+        # manage_master_user_password: RDS creates and tags rds!db-<id> with
+        # the caller's credentials (a forward access session). Only that way:
+        # directly, the role could tag or touch any project's RDS secret in the
+        # shared account. kms:DescribeKey describes aws/secretsmanager.
+        # And only for this environment's database: RDS puts the
+        # aws:rds:primaryDBInstanceArn tag on the secret it creates.
+        own_db = f"arn:aws:rds:*:<ACCOUNT_ID>:db:<PREFIX>-{environment}-*"
+        for action in ("secretsmanager:CreateSecret", "secretsmanager:TagResource"):
+            grants = matching(policy, "Allow", action, RDS_SECRET)
+            check(grants and all(st.get("Condition") == {"Bool": {"aws:ViaAWSService": "true"},
+                                                         "StringLike": {f"aws:RequestTag/{RDS_SECRET_TAG}": own_db}}
+                                 for st in grants),
+                  f"{fname}.json: {action} on rds!db-* only with Bool aws:ViaAWSService = true (through RDS) and "
+                  f"StringLike aws:RequestTag/{RDS_SECRET_TAG} = {own_db}")
+        for action in ("secretsmanager:DeleteSecret", "secretsmanager:PutSecretValue", "secretsmanager:UpdateSecret",
+                       "secretsmanager:GetSecretValue", "secretsmanager:UntagResource"):
+            check(not matching(policy, "Allow", action, RDS_SECRET), f"{fname}.json: must not allow {action} on rds!db-*")
+        check(allows(policy, "kms:DescribeKey", "arn:aws:kms:us-east-1:<ACCOUNT_ID>:key/aws-secretsmanager"),
+              f"{fname}.json: manage_master_user_password needs kms:DescribeKey (RDS user guide, rds-secrets-manager)")
         check(allows(policy, "iam:CreateRole", own["role"]), f"{fname}.json: must be able to create its own roles")
         check(
             any(st.get("Effect") == "Deny" and "iam:PutRolePermissionsBoundary" in as_list(st.get("Action"))
@@ -1335,7 +1439,13 @@ for name, policy in policies.items():
                     check(action in BOUNDARY_WILDCARDS_ON_ANY_RESOURCE,
                           f"{fname}.json: '{action}' on '*' is wider than the stack's roles need")
         for action, arn, expected in (
-            ("ssm:GetParameter", own["param"], True),
+            # The application reads Secrets Manager (its own secrets and the
+            # RDS master user secret), and no SSM parameters.
+            ("ssm:GetParameter", own["param"], False),
+            ("secretsmanager:GetSecretValue", own["secret"], True),
+            ("secretsmanager:GetSecretValue", "arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:someone-else/x-AbCdEf", False),
+            ("secretsmanager:PutSecretValue", own["secret"], False),
+            ("secretsmanager:UpdateSecret", own["secret"], False),
             ("ssm:GetParameter", "arn:aws:ssm:us-east-1:<ACCOUNT_ID>:parameter/someone-else/x", False),
             ("ses:SendEmail", SES_IDENTITY, environment == "production"),
             ("ses:SendEmail", "arn:aws:ses:us-east-1:<ACCOUNT_ID>:identity/someone-else.org", False),
@@ -1346,6 +1456,17 @@ for name, policy in policies.items():
         ):
             check(allows(policy, action, arn) == expected,
                   f"{fname}.json: {action} on {arn} must be {'allowed' if expected else 'refused'}")
+        # The RDS master user secrets of every database in the shared account
+        # are rds!db-*: only the one tagged with this environment's database.
+        # Another environment's, another project's (MeetLab's production
+        # database uses one), or an untagged one: refused.
+        for owner, expected in ((f"<PREFIX>-{environment}", True),
+                                *((f"<PREFIX>-{o}", False) for o in others),
+                                ("meetlab-v2-production", False), ("meetlab-v2", False), (None, False)):
+            tags = rds_db_tag(owner) if owner else {}
+            check(allows_tagged(policy, "secretsmanager:GetSecretValue", RDS_SECRET, tags) == expected,
+                  f"{fname}.json: GetSecretValue on an rds!db secret of {owner or 'an untagged database'} "
+                  f"must be {'allowed' if expected else 'refused'}")
         check(denies(policy, "s3:GetObject", sample_arns(environment)["state"]),
               f"{fname}.json: must explicitly deny the Terraform state to the roles the stack creates")
         for action in ("iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy", "iam:CreatePolicyVersion",
@@ -1359,6 +1480,15 @@ check(len({json.dumps(v) for v in live_statements.values()}) == 1 and all(len(v)
 # The boundary is mandatory: no switch turns it off.
 for name, text in {**all_workflows, "variables.tf": (TERRAFORM / "variables.tf").read_text()}.items():
     check("use_permissions_boundary" not in text, f"{name}: the permissions boundary must not be optional")
+# The setup steps attach every policy file of a role, by its exact name.
+_readme = (TERRAFORM / "README.md").read_text()
+for role in ROLES:
+    parts = ROLE_PARTS[role.split("-")[0]]
+    check(f"{len(parts)} customer managed policies" in _readme,
+          f"README.md: must say the apply roles carry {len(parts)} customer managed policies")
+    for part in parts:
+        check(f"bootstrap/iam/{role}-{part}.json" in _readme and f"<PREFIX>-terraform-{role}-{part}" in _readme,
+              f"README.md: the setup steps must attach bootstrap/iam/{role}-{part}.json as <PREFIX>-terraform-{role}-{part}")
 check(
     "put-role-permissions-boundary" in (TERRAFORM / "README.md").read_text(),
     "README.md: must say to attach the boundary to existing stack roles before granting the apply policy",

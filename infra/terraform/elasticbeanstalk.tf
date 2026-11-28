@@ -8,7 +8,11 @@
 # I inject every environment variable the application needs directly into the
 # EB environment configuration. Terraform resolves all the values (database
 # endpoint, Redis URL, S3 bucket name) from the other resources in this
-# configuration, so there is nothing to copy and paste manually.
+# configuration, so there is nothing to copy and paste manually. Secrets are
+# the exception: the environment gets only the NAMES of their Secrets Manager
+# secrets (APP_SECRET_ID, DATABASE_SECRET_ID), and the application reads the
+# values at start. An EB setting is readable by anyone who can describe the
+# environment and is kept in Terraform state.
 #
 # Important: Terraform provisions the infrastructure here. The application
 # code is deployed separately by the GitHub Actions workflow
@@ -198,8 +202,9 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
 
   # ===========================================================================
   # Application environment variables
-  # All secrets and endpoints are injected here so the application code never
-  # needs to know where it is running — it just reads os.getenv().
+  # Endpoints and the names of the secrets are injected here, so the
+  # application code never needs to know where it is running.
+  # tests/secrets.tftest.hcl refuses a setting that carries a secret value.
   # ===========================================================================
 
   # ----- Django core ---------------------------------------------------------
@@ -213,10 +218,13 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
     name      = "BACKEND_ENVIRONMENT"
     value     = var.environment
   }
+  # SECRET_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY and SURVEY_INGEST_TOKEN,
+  # from the secret an administrator fills (secrets.tf). The name, not the ARN: it
+  # survives the secret being recreated.
   setting {
     namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "SECRET_KEY"
-    value     = local.django_secret_key
+    name      = "APP_SECRET_ID"
+    value     = data.aws_secretsmanager_secret.app.name
   }
   setting {
     namespace = "aws:elasticbeanstalk:application:environment"
@@ -267,15 +275,11 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
     name      = "DATABASE_NAME"
     value     = "chatbot_db"
   }
+  # The master user's name and password, from the secret RDS keeps (rds.tf).
   setting {
     namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "DATABASE_USER"
-    value     = "chatbot_user"
-  }
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "DATABASE_PASSWORD"
-    value     = var.db_password
+    name      = "DATABASE_SECRET_ID"
+    value     = aws_db_instance.main.master_user_secret[0].secret_arn
   }
   # Django under ASGI must open a connection per request: a kept connection
   # is shared across threads and breaks under load (technical reference,
@@ -325,27 +329,6 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
     namespace = "aws:elasticbeanstalk:application:environment"
     name      = "AWS_REGION"
     value     = var.aws_region
-  }
-
-  # ----- AI provider keys ----------------------------------------------------
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "OPENAI_API_KEY"
-    value     = var.openai_api_key
-  }
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "ANTHROPIC_API_KEY"
-    value     = var.anthropic_api_key
-  }
-
-  # Shared secret for /api/survey_response/, the endpoint the survey tool POSTs
-  # participant answers to. Empty means the endpoint rejects everything, which
-  # is the right default for studies that do not use survey context.
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "SURVEY_INGEST_TOKEN"
-    value     = var.survey_ingest_token
   }
 
   # ----- Email ---------------------------------------------------------------

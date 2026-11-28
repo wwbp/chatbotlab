@@ -77,6 +77,13 @@ Credentials come from the environment or from a client option file, never from t
    RUN="--run-dir migration-runs/rehearsal-$(date -u +%Y%m%d)"
    python3 scripts/migration/dbcopy.py $RUN preflight --dry-run
 
+The target's password is not in Terraform: RDS keeps it in Secrets Manager. Read it into the variable without printing it (and again if RDS rotates it during a long rehearsal; it rotates every 7 days)::
+
+   MIG_TARGET_PASSWORD=$(aws secretsmanager get-secret-value --query SecretString --output text \
+     --secret-id "$(aws rds describe-db-instances --db-instance-identifier <prefix>-<environment>-database \
+                     --query 'DBInstances[0].MasterUserSecret.SecretArn' --output text)" | jq -r .password)
+   export MIG_TARGET_PASSWORD
+
 Instead of ``HOST``/``PORT``/``USER``/``PASSWORD`` you may set ``MIG_SOURCE_DEFAULTS_FILE`` (and ``MIG_TARGET_DEFAULTS_FILE``) to a ``chmod 600`` client option file with a ``[client]`` section.
 
 **No other option file is read.** Every client and dump the tool starts gets ``--no-defaults``, or ``--defaults-file=<your file>`` when you set one: ``~/.my.cnf``, ``/etc/my.cnf`` and the like are ignored, because a ``safe-updates``, ``select_limit``, ``init-command`` or ``force`` there could silently cap or excuse what the tool reads. Put everything the client needs (host, user, password, TLS settings) in the one file you name. Each client is given only its own side's password.
@@ -143,7 +150,27 @@ Steps 1 to 3 are preparation and can be done ahead of time. The window (app offl
 
    *Gate:* do not continue unless both environments run the tagged commit.
 
-2. **Stand up and check the new stack, then stop its app.** Apply Terraform, deploy, and run ``scripts/smoke.sh <new stack URL>``. On the first apply of a stack, also run ``python manage.py check_models`` on an instance, inside the app container: it makes one real call per active model, and proves that Bedrock answers through the instance role, with no static AWS keys (an ``AccessDeniedException`` there means the role's ``InvokeBedrockModels`` statement in ``infra/terraform/iam.tf`` does not cover that model). If ``check_models`` denies a model never used in this account, an admin must invoke it once to enable model access (first-call marketplace subscription); do not add ``aws-marketplace`` actions to the instance role. Then set the new environment's Auto Scaling group to 0 instances (Elastic Beanstalk console: Configuration, Capacity, min 0 and max 0).
+2. **Stand up and check the new stack, then stop its app.** First create the application secret (the plan fails without it). For production, an administrator copies the live environment's ``SECRET_KEY`` and API keys into ``<prefix>-production/app``, so staff stay logged in across the switch; no value is printed or written to disk::
+
+       aws elasticbeanstalk describe-configuration-settings \
+           --application-name humanlikebot --environment-name humanlikebot-env \
+           --query 'ConfigurationSettings[0].OptionSettings[?Namespace==`aws:elasticbeanstalk:application:environment`]' \
+           --output json \
+         | jq -c 'map({(.OptionName): .Value}) | add
+                  | with_entries(select((.key | IN("SECRET_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "SURVEY_INGEST_TOKEN")) and .value != ""))' \
+         | aws secretsmanager create-secret --name "<prefix>-production/app" \
+             --description "ChatbotLab application secrets (JSON)" \
+             --tags Key=Project,Value=<prefix> Key=Environment,Value=production \
+             --secret-string file:///dev/stdin
+
+   Check the copy by hash only; the two lines must match::
+
+       aws elasticbeanstalk describe-configuration-settings --application-name humanlikebot --environment-name humanlikebot-env \
+           --query 'ConfigurationSettings[0].OptionSettings[?OptionName==`SECRET_KEY`].Value | [0]' --output text | shasum -a 256
+       aws secretsmanager get-secret-value --secret-id "<prefix>-production/app" --query SecretString --output text \
+         | jq -r .SECRET_KEY | shasum -a 256
+
+   The test stack never gets these: ``<prefix>-test/app`` holds its own keys (technical reference, "Secrets"). If the live ``SECRET_KEY`` changes before the window, copy it again (``put-secret-value``, same pipeline). Then apply Terraform, deploy, and run ``scripts/smoke.sh <new stack URL>``. On the first apply of a stack, also run ``python manage.py check_models`` on an instance, inside the app container: it makes one real call per active model, and proves that Bedrock answers through the instance role, with no static AWS keys (an ``AccessDeniedException`` there means the role's ``InvokeBedrockModels`` statement in ``infra/terraform/iam.tf`` does not cover that model). If ``check_models`` denies a model never used in this account, an admin must invoke it once to enable model access (first-call marketplace subscription); do not add ``aws-marketplace`` actions to the instance role. Then set the new environment's Auto Scaling group to 0 instances (Elastic Beanstalk console: Configuration, Capacity, min 0 and max 0).
 
    *Gate:* do not continue unless the smoke test passed and the new environment now has 0 instances. A running app writes to the database it is attached to.
 
@@ -256,7 +283,7 @@ Steps 1 to 3 are preparation and can be done ahead of time. The window (app offl
 
    *Gate:* do not continue unless ``diff`` prints ``SAME`` (same keys, count, sizes and checksums), or every differing line is a multipart ETag whose SHA-256 matched; and ``diff missing-old missing-new`` prints nothing.
 
-10. **Start the new app.** Set the new environment back to 1 or more instances. Give it the old environment's ``SECRET_KEY`` if staff should stay logged in. From this moment the new database changes (the app records logins and sessions), so ``verify`` will no longer print ``IDENTICAL``: that is why it comes first.
+10. **Start the new app.** Set the new environment back to 1 or more instances. It already has the live ``SECRET_KEY`` (copied in step 2), so staff sessions stay valid. From this moment the new database changes (the app records logins and sessions), so ``verify`` will no longer print ``IDENTICAL``: that is why it comes first.
 
     *Gate:* do not continue unless ``scripts/smoke.sh <new stack URL>`` passes, and you can log in to the admin with an existing account and open a known conversation with its full transcript.
 

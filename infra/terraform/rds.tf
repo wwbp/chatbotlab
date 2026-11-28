@@ -93,7 +93,13 @@ resource "aws_db_instance" "main" {
   # Keeping these means no change to the app's config or the runbook.
   db_name  = "chatbot_db"
   username = "chatbot_user"
-  password = var.db_password
+
+  # RDS generates the master password and keeps it in Secrets Manager
+  # (rds!db-<id>, rotated every 7 days), so it never passes through
+  # Terraform or its state. The application reads it at start
+  # (DATABASE_SECRET_ID in elasticbeanstalk.tf) and again after a rotation
+  # (api/generic_chatbot/db/base.py).
+  manage_master_user_password = true
 
   # Networking — private subnets only, no public endpoint
   db_subnet_group_name   = aws_db_subnet_group.database.name

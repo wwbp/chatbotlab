@@ -6,10 +6,18 @@ from urllib.parse import urlparse
 import requests
 from dotenv import load_dotenv
 
+from generic_chatbot import aws_secrets
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 load_dotenv(BASE_DIR / ".env")
+
+# A Terraform-built stack names its secrets (APP_SECRET_ID, DATABASE_SECRET_ID)
+# and they are read from Secrets Manager here, or the process stops. Without
+# the names, SECRET_KEY, the API keys and DATABASE_USER/PASSWORD are read from
+# the environment as before (local development, CI).
+aws_secrets.load_into_environ()
 
 
 STATIC_ROOT = BASE_DIR / "staticfiles"
@@ -222,7 +230,8 @@ WSGI_APPLICATION = "generic_chatbot.wsgi.application"
 
 DATABASES = {
     "default": {
-        "ENGINE": "django.db.backends.mysql",
+        # Django's MySQL backend, re-reading a rotated RDS password (db/base.py).
+        "ENGINE": "generic_chatbot.db",
         "NAME": os.getenv("DATABASE_NAME"),
         "USER": os.getenv("DATABASE_USER"),
         "PASSWORD": os.getenv("DATABASE_PASSWORD"),

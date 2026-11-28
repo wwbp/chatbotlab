@@ -171,7 +171,7 @@ The trust policy on the GitHub Actions IAM role restricts assumption to:
 - OIDC issuer: ``token.actions.githubusercontent.com``
 - Subject, exactly (no wildcard): ``repo:{github_org}/{github_repo}:ref:refs/heads/main`` for production (``production.yml`` on ``main``), ``repo:{github_org}/{github_repo}:environment:test`` for the test stack; each also in the immutable-ID form ``repo:{org}@{org_id}/{repo}@{repo_id}:...``. A workflow a pull request adds cannot assume it.
 
-``deploy-infrastructure.yml`` and ``destroy-infrastructure.yml`` also sign in through OIDC, with an apply role per environment that a person creates one time from the policies in ``infra/terraform/bootstrap/iam/``: ``<PREFIX>-terraform-apply-production`` and ``<PREFIX>-terraform-apply-test``, both in the same AWS account (``TF_AWS_ACCOUNT_ID``), which also holds the hand-built live deployment and other lab projects. Each has a permissions boundary for the roles its stack creates. Each is allowed only its own ``<PREFIX>-<environment>-*`` names and ``Environment``/``Project`` tags (which keeps other projects out), and explicitly denied the other environment's names, tags and state key, the hand-built live resources, and any change to the GitHub OIDC provider. The test role and the test stack's roles are also denied ``ses:Send*``: the test stack sends no real email. See ``infra/terraform/README.md``, "One account, two roles". No workflow uses long-lived AWS keys.
+``deploy-infrastructure.yml`` and ``destroy-infrastructure.yml`` also sign in through OIDC, with an apply role per environment that a person creates one time from the policies in ``infra/terraform/bootstrap/iam/``: ``<PREFIX>-terraform-apply-production`` and ``<PREFIX>-terraform-apply-test``, both in the same AWS account (``TF_AWS_ACCOUNT_ID``). Each role carries four customer managed policies, ``<PREFIX>-terraform-apply-<environment>-permissions``, ``-abac``, ``-guardrails`` and ``-secrets``, one per file ``apply-<environment>-<part>.json`` (one policy would exceed IAM's 6144 characters). The same account also holds the hand-built live deployment and other lab projects. Each has a permissions boundary for the roles its stack creates. Each is allowed only its own ``<PREFIX>-<environment>-*`` names and ``Environment``/``Project`` tags (which keeps other projects out), and explicitly denied the other environment's names, tags and state key, the hand-built live resources, and any change to the GitHub OIDC provider. The test role and the test stack's roles are also denied ``ses:Send*``: the test stack sends no real email. See ``infra/terraform/README.md``, "One account, two roles". No workflow uses long-lived AWS keys.
 
 
 Application stack
@@ -210,9 +210,9 @@ Terraform sets the application's environment variables on the Elastic Beanstalk 
    * - ``BACKEND_ENVIRONMENT``
      - ``production`` (``test`` on the test stack)
      -
-   * - ``SECRET_KEY``
-     - generated, kept in state
-     - Moves to Secrets Manager in a later change
+   * - ``APP_SECRET_ID``
+     - ``<prefix>-production/app``
+     - The name of the application secret, not a value (see `Secrets`_)
    * - ``ALLOWED_HOSTS``
      - ``*``
      -
@@ -228,9 +228,12 @@ Terraform sets the application's environment variables on the Elastic Beanstalk 
    * - ``DEFAULT_FROM_EMAIL``
      - ``ChatbotLab <no-reply@bot.wwbp.org>``
      - The instance role may send as this address only
-   * - ``DATABASE_HOST``, ``DATABASE_PORT``, ``DATABASE_NAME``, ``DATABASE_USER``, ``DATABASE_PASSWORD``
+   * - ``DATABASE_HOST``, ``DATABASE_PORT``, ``DATABASE_NAME``
      - the Terraform RDS instance
      -
+   * - ``DATABASE_SECRET_ID``
+     - ARN of ``rds!db-<id>``
+     - The secret RDS keeps the master user in; the application reads ``DATABASE_USER`` and ``DATABASE_PASSWORD`` from it
    * - ``CONN_MAX_AGE``
      - ``0``
      - See gotcha 7
@@ -243,9 +246,6 @@ Terraform sets the application's environment variables on the Elastic Beanstalk 
    * - ``AWS_REGION``
      - ``aws_region``
      -
-   * - ``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY``, ``SURVEY_INGEST_TOKEN``
-     - GitHub secrets
-     -
    * - ``GUNICORN_WORKERS``
      - ``4``
      - Async workers, two per vCPU of a ``t3.small``. Database connections follow concurrent requests, not workers (``CONN_MAX_AGE = 0``)
@@ -256,9 +256,65 @@ Terraform sets the application's environment variables on the Elastic Beanstalk 
      - not set
      - Test stack only: ``admin``, ``admin@example.com``, ``admin_panel_password``. ``api/entrypoint.sh`` tries to create this user on every boot while the password is set
 
-**Read by the application, not set on purpose** (the reasons are in ``api/env_vars.txt``): ``AWS_ACCESS_KEY_ID`` and ``AWS_SECRET_ACCESS_KEY`` (the instance role gives AWS access; static keys would override it), ``MOCK_LLM_P50_MS`` and ``MOCK_MODERATION_P50_MS`` (only with ``MOCK_LLM`` on), ``DJANGO_SUPERUSER_*`` (production creates no account at boot; its copied database has the real admins; run ``manage.py createsuperuser`` once if ever needed), ``CHATBOT_AVATAR_PROMPT`` and ``CHATBOT_CONTROL_IMAGE`` (live production does not set them either), ``FRONTEND_URL``, ``MODERATION_VALUES_FOR_BLOCKED``, ``DJANGO_SETTINGS_MODULE``.
+**Read by the application, not set on purpose** (the reasons are in ``api/env_vars.txt``): ``AWS_ACCESS_KEY_ID`` and ``AWS_SECRET_ACCESS_KEY`` (the instance role gives AWS access; static keys would override it), ``MOCK_LLM_P50_MS`` and ``MOCK_MODERATION_P50_MS`` (only with ``MOCK_LLM`` on), ``DJANGO_SUPERUSER_*`` (production creates no account at boot; its copied database has the real admins; run ``manage.py createsuperuser`` once if ever needed), ``CHATBOT_AVATAR_PROMPT`` and ``CHATBOT_CONTROL_IMAGE`` (live production does not set them either), ``FRONTEND_URL``, ``MODERATION_VALUES_FOR_BLOCKED``, ``DJANGO_SETTINGS_MODULE``; and the secrets, ``SECRET_KEY``, ``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY``, ``SURVEY_INGEST_TOKEN``, ``DATABASE_USER`` and ``DATABASE_PASSWORD``, which come from Secrets Manager (`Secrets`_).
 
 **Set on the hand-built environments, dropped on purpose** because no code reads them: ``BASE_URL`` (``SITE_URL`` replaced it), ``CORS_ALLOW_CREDENTIALS``, ``REACT_APP_API_URL`` (the front end reads ``VITE_API_URL`` at build time). Terraform no longer sets ``DATABASE_ENGINE`` for the same reason.
+
+
+Secrets
+-------
+
+No secret value is in Terraform state, the plan, a workflow or the Elastic Beanstalk configuration. The environment gets only the secrets' names, and ``api/generic_chatbot/aws_secrets.py`` reads the values once per process at start, with the instance role:
+
+- ``APP_SECRET_ID`` names ``<prefix>-<environment>/app``, one JSON object with ``SECRET_KEY`` (required) and, when used, ``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY`` and ``SURVEY_INGEST_TOKEN``. Any other key stops the app (a typo would otherwise switch a provider off silently).
+- ``DATABASE_SECRET_ID`` names the secret RDS keeps the master user in (``manage_master_user_password`` in ``rds.tf``). RDS rotates it every 7 days and the old password stops working at once; the app's MySQL backend (``api/generic_chatbot/db/base.py``) reads the secret again when a connection is refused with error 1045.
+
+When a name is set, its secret is required: a missing secret or value, or no permission, stops the app at start (the deploy then fails its health check). Without the names (local development, CI, and the hand-built live environment until the cutover) the same variables are read from the environment.
+
+**Who can do what.** An administrator creates and fills ``<prefix>-<environment>/app``. The Terraform apply roles may only describe it, and are explicitly denied every call that writes, restores, deletes or reads a value (``bootstrap/iam/apply-*-guardrails.json``, ``DenySecretValueCalls``): ``CreateSecret`` and ``UpdateSecret`` take a value, so a workflow allowed them could replace ``SECRET_KEY`` and forge staff sessions. They may let RDS create and tag ``rds!db-*`` only through RDS (``aws:ViaAWSService``) and only for their own database (the ``aws:rds:primaryDBInstanceArn`` tag). This does not make the values unreachable from CI: an approved apply can still give the stack's own roles read access within the boundary, the same power as deploying application code that reads the secret. What it rules out is CI changing, replacing or destroying a value. The instance role may read ``<prefix>-<environment>/*`` and its own database's RDS secret, nothing else (``iam.tf``). The permissions boundary allows no more: ``rds!db-*`` names say nothing about their owner, so the boundary allows them only when the ``aws:rds:primaryDBInstanceArn`` tag names this environment's database. That keeps out the other environment's database and other projects' databases in the shared account. **On the first test apply**, confirm RDS set that tag: ``aws secretsmanager describe-secret --secret-id <DATABASE_SECRET_ID> --query Tags``. If it is missing, the app cannot read its password and fails at start, which is safe and visible. The secret is not part of the stack, so Destroy Infrastructure leaves it, and the test stack keeps its keys between rehearsals.
+
+**The test stack uses its own keys**: ``<prefix>-test/app`` holds its own ``SECRET_KEY`` and LLM keys scoped to it (a separate project or key with a low spending limit), never production's.
+
+Create and fill the secret (once per environment, before its first apply; the plan fails until it exists). As an administrator, in bash, write the values to a file only you can read, outside the repository, so they never appear on a command line or in shell history. Generate a new ``SECRET_KEY`` with ``python3 -c 'import secrets; print(secrets.token_urlsafe(50))'`` (production's comes from the live environment instead: runbook, step 2)::
+
+    umask 077
+    cat > ~/app-secret.json    # paste the JSON below with real values, then Ctrl-D
+    {"SECRET_KEY": "...", "OPENAI_API_KEY": "...", "ANTHROPIC_API_KEY": "...", "SURVEY_INGEST_TOKEN": "..."}
+
+    aws secretsmanager create-secret --name "<prefix>-<environment>/app" \
+      --description "ChatbotLab application secrets (JSON)" \
+      --tags Key=Project,Value=<prefix> Key=Environment,Value=<environment> \
+      --secret-string file://$HOME/app-secret.json
+    rm ~/app-secret.json
+
+Leave out the keys a deployment does not use (no ``SURVEY_INGEST_TOKEN`` means the survey endpoint refuses everything).
+
+Rotate a key (or change any value): rewrite the JSON without printing it, then restart the app so every process reads it again::
+
+    read -rs NEW_VALUE && export NEW_VALUE    # type the new key, Enter
+    aws secretsmanager get-secret-value --secret-id "<prefix>-<environment>/app" \
+        --query SecretString --output text \
+      | jq -c '.OPENAI_API_KEY = env.NEW_VALUE' \
+      | aws secretsmanager put-secret-value --secret-id "<prefix>-<environment>/app" \
+          --secret-string file:///dev/stdin
+    unset NEW_VALUE
+    aws elasticbeanstalk restart-app-server --environment-name <prefix>-<environment>-env
+
+Until the cutover, ``<prefix>-production/app`` holds the **same** keys as the hand-built live environment (copied in runbook step 2). Rotate a production key only after the cutover, or change it in both places together: the secret and the live environment's setting. A new ``SURVEY_INGEST_TOKEN`` also needs the new value in every Qualtrics Web Service element that sends it (``docs/survey-integration/qualtrics.rst``), or survey answers are refused. A new ``SECRET_KEY`` signs everyone out and invalidates reset links. The database password needs nothing: ``aws rds modify-db-instance --db-instance-identifier <prefix>-<environment>-database --rotate-master-user-password --apply-immediately`` rotates it now, and the app follows.
+
+Before this change, Terraform state held the database password, a generated ``SECRET_KEY`` and the API keys, and the versioned state bucket keeps the old versions. After the first apply with this change:
+
+1. Rotate the OpenAI, Anthropic and survey keys that were passed as variables, after the cutover (see above). The database password is replaced by RDS, and production's ``SECRET_KEY`` comes from the live environment (runbook, step 2).
+2. Delete the noncurrent versions of that environment's state file that predate the apply. Wait until the new state has been applied cleanly at least once, because the old versions are your rollback points. Only the state key is touched, never ``<prefix>/production/backups/``. Do not add a lifecycle rule to the bucket: the production backups live in it too.
+
+   ::
+
+       BUCKET=<prefix>-tfstate-<account id>; KEY=<prefix>/<environment>/terraform.tfstate
+       BEFORE=2026-12-01T00:00:00Z   # the time of the first apply with Secrets Manager
+       aws s3api list-object-versions --bucket "$BUCKET" --prefix "$KEY" --output json \
+         | jq -r --arg k "$KEY" --arg t "$BEFORE" \
+             '.Versions[] | select(.Key == $k and (.IsLatest | not) and .LastModified < $t) | .VersionId' \
+         | while read -r id; do aws s3api delete-object --bucket "$BUCKET" --key "$KEY" --version-id "$id"; done
 
 
 Security configuration

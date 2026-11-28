@@ -63,9 +63,4 @@ locals {
   # iam.tf conditions on it.
   # The last bracketed group, trimmed, as Python's parseaddr reads it.
   ses_from_address = trimspace(try(regex("<([^<>]*)>\\s*$", local.default_from_email)[0], local.default_from_email))
-
-  # Use the caller-supplied key if provided; otherwise use the auto-generated
-  # one from random_password.django_secret_key (stored in state, stable across
-  # re-deploys so active user sessions are never invalidated).
-  django_secret_key = var.django_secret_key != "" ? var.django_secret_key : random_password.django_secret_key.result
 }

@@ -28,7 +28,6 @@ variables {
   project_name         = "chatbotlab"
   environment          = "production"
   site_url             = "https://bot.wwbp.org"
-  db_password          = "test-password-not-real"
   admin_panel_password = "test-password-not-real"
 }
 
