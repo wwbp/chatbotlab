@@ -855,7 +855,10 @@ ROLES = {
 }
 
 
-ROLE_PARTS = {"apply": ("permissions", "abac", "guardrails")}
+# The managed policies each apply role carries, one file each (bootstrap/iam/
+# apply-<env>-<part>.json): one policy would exceed IAM's 6144 characters.
+# Every check below runs on the union of all of them.
+ROLE_PARTS = {"apply": ("permissions", "abac", "guardrails", "secrets")}
 
 
 def boundary_arn(env_name):
@@ -1142,7 +1145,7 @@ for role, (environment, gh_environment, (ref_operator, ref)) in ROLES.items():
         f"{role}-trust.json: a ref wildcard other than refs/heads/test/* (e.g. refs/heads/*) trusts any branch: {refs}",
     )
     # A role's permissions may be split over several managed policies
-    # (<role>-permissions.json, <role>-abac.json, <role>-guardrails.json); the
+    # (<role>-<part>.json for each part in ROLE_PARTS); the
     # checks below look at all of them together.
     parts = [load_policy(f"{role}-{part}") for part in ROLE_PARTS[role.split("-")[0]]]
     policies[role] = {"Statement": [st for part in parts for st in part["Statement"]]}
@@ -1477,6 +1480,15 @@ check(len({json.dumps(v) for v in live_statements.values()}) == 1 and all(len(v)
 # The boundary is mandatory: no switch turns it off.
 for name, text in {**all_workflows, "variables.tf": (TERRAFORM / "variables.tf").read_text()}.items():
     check("use_permissions_boundary" not in text, f"{name}: the permissions boundary must not be optional")
+# The setup steps attach every policy file of a role, by its exact name.
+_readme = (TERRAFORM / "README.md").read_text()
+for role in ROLES:
+    parts = ROLE_PARTS[role.split("-")[0]]
+    check(f"{len(parts)} customer managed policies" in _readme,
+          f"README.md: must say the apply roles carry {len(parts)} customer managed policies")
+    for part in parts:
+        check(f"bootstrap/iam/{role}-{part}.json" in _readme and f"<PREFIX>-terraform-{role}-{part}" in _readme,
+              f"README.md: the setup steps must attach bootstrap/iam/{role}-{part}.json as <PREFIX>-terraform-{role}-{part}")
 check(
     "put-role-permissions-boundary" in (TERRAFORM / "README.md").read_text(),
     "README.md: must say to attach the boundary to existing stack roles before granting the apply policy",
