@@ -585,6 +585,11 @@ Then `terraform apply` — EB picks up the new env var on the next instance refr
   checked against it, and Django builds links from `SITE_URL`.
 - Terraform reads the zone and writes only this stack's names; the apply
   roles may change no other record (see "One account, two roles").
+- Known gap, as on live: the security group admits every CloudFront
+  distribution (the managed prefix list), so someone else's distribution
+  pointed at `<prefix>-origin.<zone>` reaches the load balancer without this
+  web ACL. Follow-up: CloudFront adds a secret origin header and an ALB
+  listener rule rejects requests without it.
 
 **Add a custom domain** (a name in `dns_zone_name`):
 1. Set `domain_name` in `environments/<env>.tfvars` and apply. Terraform

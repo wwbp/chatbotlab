@@ -357,3 +357,39 @@ run "no_domain_no_certificate_no_records" {
     error_message = "Without domain_name: the cloudfront.net certificate and no domain records."
   }
 }
+
+# --- Review fixes -----------------------------------------------------------------
+
+# The custom domain must be in the zone Terraform writes records in.
+run "domain_outside_the_zone_is_refused" {
+  command = plan
+
+  variables {
+    domain_name = "chat.example.org"
+  }
+
+  expect_failures = [var.domain_name]
+}
+
+run "records_go_in_the_wwbp_zone_by_default" {
+  command = plan
+
+  assert {
+    condition     = data.aws_route53_zone.main.name == "wwbp.org" && !data.aws_route53_zone.main.private_zone
+    error_message = "By default the stack's records go in the public wwbp.org zone."
+  }
+}
+
+# Before the cutover the site is reached at its cloudfront.net name.
+run "frontend_url_is_the_cloudfront_name_before_the_cutover" {
+  command = plan
+
+  variables {
+    domain_name = "bot.wwbp.org"
+  }
+
+  assert {
+    condition     = output.frontend_url == "https://d111111abcdef8.cloudfront.net"
+    error_message = "Before cutover_dns, frontend_url must be the distribution's own name: bot.wwbp.org still serves the old site."
+  }
+}

@@ -227,8 +227,8 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
   }
 
   # Browsers send Origin on every admin POST. Django compares it against the
-  # request's own origin, which here is http://<eb-cname> — CloudFront reaches
-  # this environment over HTTP and forwards every viewer header except Host —
+  # request's own origin, which here is http://<prefix>-origin.<zone> — the
+  # Host CloudFront sends, and Django sees plain HTTP from the load balancer —
   # while the browser sends https://<cloudfront-domain>. Without the real
   # front-end origin listed, every admin login fails with
   # "CSRF verification failed" and settings.py falls back to the wwbp domains,

@@ -212,6 +212,10 @@ variable "domain_name" {
   description = "Optional custom domain to serve the chatbot from (e.g. chatbot.mylab.org), a name in dns_zone_name. Leave empty to use the auto-assigned CloudFront URL (https://xxxx.cloudfront.net). If set, I create a certificate in us-east-1, validate it with a record in the Route 53 zone and attach it to the distribution. The distribution claims the name and the public DNS record moves to it only with cutover_dns."
   type        = string
   default     = ""
+  validation {
+    condition     = var.domain_name == "" || endswith(var.domain_name, ".${var.dns_zone_name}")
+    error_message = "domain_name must be a name in dns_zone_name: Terraform writes its certificate and alias records there."
+  }
 }
 
 variable "create_github_oidc_provider" {

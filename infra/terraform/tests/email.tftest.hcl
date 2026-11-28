@@ -128,7 +128,8 @@ run "site_url_follows_the_custom_domain" {
   command = plan
 
   variables {
-    domain_name = "chat.example.org"
+    domain_name   = "chat.example.org"
+    dns_zone_name = "example.org"
   }
 
   assert {

@@ -29,6 +29,7 @@ variables {
   db_password          = "test-password-not-real"
   admin_panel_password = "test-password-not-real"
   domain_name          = "chat.example.org"
+  dns_zone_name        = "example.org"
   # As in the workflows: the account's OIDC provider exists already, so its
   # ARN (and every trust policy naming it) is known at plan time.
   create_github_oidc_provider = false
