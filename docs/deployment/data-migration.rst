@@ -170,7 +170,7 @@ Steps 1 to 3 are preparation and can be done ahead of time. The window (app offl
        aws secretsmanager get-secret-value --secret-id "<prefix>-production/app" --query SecretString --output text \
          | jq -r .SECRET_KEY | shasum -a 256
 
-   The test stack never gets these: ``<prefix>-test/app`` holds its own keys (technical reference, "Secrets"). If the live ``SECRET_KEY`` changes before the window, copy it again (``put-secret-value``, same pipeline). Then apply Terraform, deploy, and run ``scripts/smoke.sh <new stack URL>``. Then set the new environment's Auto Scaling group to 0 instances (Elastic Beanstalk console: Configuration, Capacity, min 0 and max 0).
+   The test stack never gets these: ``<prefix>-test/app`` holds its own keys (technical reference, "Secrets"). If the live ``SECRET_KEY`` changes before the window, copy it again (``put-secret-value``, same pipeline). Then apply Terraform, deploy, and run ``scripts/smoke.sh <new stack URL>``. On the first apply of a stack, also run ``python manage.py check_models`` on an instance, inside the app container: it makes one real call per active model, and proves that Bedrock answers through the instance role, with no static AWS keys (an ``AccessDeniedException`` there means the role's ``InvokeBedrockModels`` statement in ``infra/terraform/iam.tf`` does not cover that model). If ``check_models`` denies a model never used in this account, an admin must invoke it once to enable model access (first-call marketplace subscription); do not add ``aws-marketplace`` actions to the instance role. Then set the new environment's Auto Scaling group to 0 instances (Elastic Beanstalk console: Configuration, Capacity, min 0 and max 0).
 
    *Gate:* do not continue unless the smoke test passed and the new environment now has 0 instances. A running app writes to the database it is attached to.
 
@@ -310,6 +310,11 @@ Steps 1 to 3 are preparation and can be done ahead of time. The window (app offl
     Then destroy the test stack (Destroy Infrastructure, environment ``test``) and set the ``test`` Environment's deployment branches back to ``main`` and ``test/*``. Keep production's own step 5 snapshot; delete only the rehearsal's.
 
 14. **Keep the old environment** blocked (or at 0 instances) for 30 days, or one full study cycle if longer. Keep the step 5 snapshot until the study data's retention period ends. Before terminating the old environment, confirm that snapshot still exists and delete ``dump.sql`` from wherever the tool ran.
+
+    Once production runs on the new stack, the static IAM users the old environments used for Bedrock, S3 and SES are no longer needed (the new stack uses its instance role). Retire them in two steps, so a forgotten consumer shows up as a failure you can undo:
+
+    - Deactivate, then after a week delete, the access keys of ``humanlike-chatbot-bedrock-svc`` (both old environments use it) and ``chatbot-bedrock-service`` (no known consumer). Before deleting, check ``aws iam get-access-key-last-used --access-key-id <id>``: a last-used date after the switch means something still uses the key.
+    - Then delete both users (detach their managed policies and delete their inline policies first). Do this only after the old environments are terminated: they still hold ``humanlike-chatbot-bedrock-svc``'s keys and would fail on rollback without them.
 
 
 Rollback at a glance
