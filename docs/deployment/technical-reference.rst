@@ -271,11 +271,11 @@ No secret value is in Terraform state, the plan, a workflow or the Elastic Beans
 
 When a name is set, its secret is required: a missing secret or value, or no permission, stops the app at start (the deploy then fails its health check). Without the names (local development, CI, and the hand-built live environment until the cutover) the same variables are read from the environment.
 
-**Who can do what.** An administrator creates and fills ``<prefix>-<environment>/app``. The Terraform apply roles may only describe it, and are explicitly denied every call that writes, restores, deletes or reads a value (``bootstrap/iam/apply-*-guardrails.json``, ``DenySecretValueCalls``): ``CreateSecret`` and ``UpdateSecret`` take a value, so a workflow allowed them could replace ``SECRET_KEY`` and forge staff sessions. They may create and tag ``rds!db-*`` only through RDS (``aws:ViaAWSService``). The instance role may read ``<prefix>-<environment>/*`` and its own database's RDS secret, nothing else (``iam.tf``; the permissions boundary allows no more). The secret is not part of the stack, so Destroy Infrastructure leaves it, and the test stack keeps its keys between rehearsals.
+**Who can do what.** An administrator creates and fills ``<prefix>-<environment>/app``. The Terraform apply roles may only describe it, and are explicitly denied every call that writes, restores, deletes or reads a value (``bootstrap/iam/apply-*-guardrails.json``, ``DenySecretValueCalls``): ``CreateSecret`` and ``UpdateSecret`` take a value, so a workflow allowed them could replace ``SECRET_KEY`` and forge staff sessions. They may let RDS create and tag ``rds!db-*`` only through RDS (``aws:ViaAWSService``) and only for their own database (the ``aws:rds:primaryDBInstanceArn`` tag). This does not make the values unreachable from CI: an approved apply can still give the stack's own roles read access within the boundary, the same power as deploying application code that reads the secret. What it rules out is CI changing, replacing or destroying a value. The instance role may read ``<prefix>-<environment>/*`` and its own database's RDS secret, nothing else (``iam.tf``). The permissions boundary allows no more: ``rds!db-*`` names say nothing about their owner, so the boundary allows them only when the ``aws:rds:primaryDBInstanceArn`` tag names this environment's database. That keeps out the other environment's database and other projects' databases in the shared account. **On the first test apply**, confirm RDS set that tag: ``aws secretsmanager describe-secret --secret-id <DATABASE_SECRET_ID> --query Tags``. If it is missing, the app cannot read its password and fails at start, which is safe and visible. The secret is not part of the stack, so Destroy Infrastructure leaves it, and the test stack keeps its keys between rehearsals.
 
 **The test stack uses its own keys**: ``<prefix>-test/app`` holds its own ``SECRET_KEY`` and LLM keys scoped to it (a separate project or key with a low spending limit), never production's.
 
-Create and fill the secret (once per environment, before its first apply; the plan fails until it exists). As an administrator, in bash, write the values to a file only you can read, outside the repository, so they never appear on a command line or in shell history. Generate a new ``SECRET_KEY`` with ``python3 -c 'import secrets; print(secrets.token_urlsafe(50))'`` (production's comes from the live environment instead: runbook, step 10)::
+Create and fill the secret (once per environment, before its first apply; the plan fails until it exists). As an administrator, in bash, write the values to a file only you can read, outside the repository, so they never appear on a command line or in shell history. Generate a new ``SECRET_KEY`` with ``python3 -c 'import secrets; print(secrets.token_urlsafe(50))'`` (production's comes from the live environment instead: runbook, step 2)::
 
     umask 077
     cat > ~/app-secret.json    # paste the JSON below with real values, then Ctrl-D
@@ -300,9 +300,21 @@ Rotate a key (or change any value): rewrite the JSON without printing it, then r
     unset NEW_VALUE
     aws elasticbeanstalk restart-app-server --environment-name <prefix>-<environment>-env
 
-A new ``SECRET_KEY`` signs everyone out and invalidates reset links. The database password needs nothing: ``aws rds modify-db-instance --db-instance-identifier <prefix>-<environment>-database --rotate-master-user-password --apply-immediately`` rotates it now, and the app follows.
+Until the cutover, ``<prefix>-production/app`` holds the **same** keys as the hand-built live environment (copied in runbook step 2). Rotate a production key only after the cutover, or change it in both places together: the secret and the live environment's setting. A new ``SURVEY_INGEST_TOKEN`` also needs the new value in every Qualtrics Web Service element that sends it (``docs/survey-integration/qualtrics.rst``), or survey answers are refused. A new ``SECRET_KEY`` signs everyone out and invalidates reset links. The database password needs nothing: ``aws rds modify-db-instance --db-instance-identifier <prefix>-<environment>-database --rotate-master-user-password --apply-immediately`` rotates it now, and the app follows.
 
-Before this change, Terraform state held the database password, a generated ``SECRET_KEY`` and the API keys, and the state bucket keeps old versions. After the first apply with this change, rotate the OpenAI, Anthropic and survey keys that were passed as variables (the database password is replaced by RDS, and production's ``SECRET_KEY`` comes from the live environment, see the runbook, step 10).
+Before this change, Terraform state held the database password, a generated ``SECRET_KEY`` and the API keys, and the versioned state bucket keeps the old versions. After the first apply with this change:
+
+1. Rotate the OpenAI, Anthropic and survey keys that were passed as variables, after the cutover (see above). The database password is replaced by RDS, and production's ``SECRET_KEY`` comes from the live environment (runbook, step 2).
+2. Delete the noncurrent versions of that environment's state file that predate the apply. Wait until the new state has been applied cleanly at least once, because the old versions are your rollback points. Only the state key is touched, never ``<prefix>/production/backups/``. Do not add a lifecycle rule to the bucket: the production backups live in it too.
+
+   ::
+
+       BUCKET=<prefix>-tfstate-<account id>; KEY=<prefix>/<environment>/terraform.tfstate
+       BEFORE=2026-12-01T00:00:00Z   # the time of the first apply with Secrets Manager
+       aws s3api list-object-versions --bucket "$BUCKET" --prefix "$KEY" --output json \
+         | jq -r --arg k "$KEY" --arg t "$BEFORE" \
+             '.Versions[] | select(.Key == $k and (.IsLatest | not) and .LastModified < $t) | .VersionId' \
+         | while read -r id; do aws s3api delete-object --bucket "$BUCKET" --key "$KEY" --version-id "$id"; done
 
 
 Security configuration
