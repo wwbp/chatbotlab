@@ -323,44 +323,15 @@ jobs:
             -reconfigure \
             -input=false
 
-      # ── 7. Custom domain: create the ACM cert first so we can print the     ───
-      #       DNS validation record before the full apply waits for it          ───
-      # This targeted apply runs before the plan below and is not part of it.
-      # It touches only the certificate.
+      # ── 7. The custom domain, for the summary ─────────────────────────────────
+      # Terraform validates its certificate itself (a record in the Route 53
+      # zone, dns.tf / cloudfront.tf): nothing to add by hand.
       - name: Read the custom domain from the environment's settings
         id: domain
         working-directory: infra/terraform
         run: |
           DOMAIN=$(sed -n 's/^[[:space:]]*domain_name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "environments/${ENVIRONMENT}.tfvars")
           echo "name=$DOMAIN" >> "$GITHUB_OUTPUT"
-
-      - name: Create ACM certificate
-        if: inputs.action == 'apply' && steps.domain.outputs.name != ''
-        working-directory: infra/terraform
-        run: |
-          terraform apply -target='aws_acm_certificate.custom_domain[0]' -auto-approve -input=false -var-file="environments/${ENVIRONMENT}.tfvars"
-
-      # ── 8. Print the DNS validation record to the summary so it can be     ───
-      #       added while the rest of the infrastructure is building            ───
-      - name: Print DNS validation record
-        if: inputs.action == 'apply' && steps.domain.outputs.name != ''
-        working-directory: infra/terraform
-        run: |
-          CNAME_NAME=$(terraform output -raw acm_validation_cname_name)
-          CNAME_VALUE=$(terraform output -raw acm_validation_cname_value)
-          {
-            echo "## Action required: add this DNS record now"
-            echo ""
-            echo "Add the following record at your domain registrar **while this workflow continues running**."
-            echo "This proves you own the domain and enables HTTPS for your custom URL."
-            echo ""
-            echo "| Type | Name | Value |"
-            echo "|---|---|---|"
-            echo "| CNAME | \`$CNAME_NAME\` | \`$CNAME_VALUE\` |"
-            echo ""
-            echo "> The workflow will wait up to 30 minutes for DNS to propagate."
-            echo "> If it times out before you add the record, just re-run this workflow."
-          } >> "$GITHUB_STEP_SUMMARY"
 
       # ── 9. Plan — always, under the state lock ────────────────────────────────
       - name: Plan
@@ -492,15 +463,10 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [[ -n "$DOMAIN" ]]; then
-            CF_DOMAIN=$(terraform output -raw cloudfront_domain_name)
             {
               echo ""
-              echo "## Custom domain: final DNS record"
+              echo "## Custom domain"
               echo ""
-              echo "After adding the validation record above and re-running this workflow, add this record to serve your chatbot at **https://$DOMAIN**:"
-              echo ""
-              echo "| Type | Name | Value |"
-              echo "|---|---|---|"
-              echo "| CNAME | \`$DOMAIN\` | \`$CF_DOMAIN\` |"
+              echo "The certificate for **$DOMAIN** is validated and attached. The name moves to this stack only with \`cutover_dns = true\` in environments/${ENVIRONMENT}.tfvars, after the old distribution has given up the alias (docs/deployment/data-migration.rst, step 11)."
             } >> "$GITHUB_STEP_SUMMARY"
           fi

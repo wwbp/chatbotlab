@@ -195,6 +195,6 @@ esac
 
 echo ""
 info "Frontend URL: $(terraform output -raw frontend_url)"
-info "Backend URL:  $(terraform output -raw backend_api_url)"
+info "Backend URL:  $(terraform output -raw backend_api_url) (CloudFront only)"
 echo ""
 info "Next step: deploy the app — push to main (production), or by hand (test)."

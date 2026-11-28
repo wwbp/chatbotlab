@@ -4,8 +4,8 @@
 # I follow a strict least-privilege chain: each layer only accepts traffic
 # from the layer directly in front of it.
 #
-#   Internet (0.0.0.0/0)
-#       │  port 80, 443
+#   Internet → CloudFront
+#       │  CloudFront only, port 443
 #       ▼
 #   load_balancer (ALB)
 #       │  port 80
@@ -37,13 +37,13 @@ resource "aws_security_group" "load_balancer" {
   vpc_id      = aws_vpc.main.id
 
   # Only CloudFront, so nobody can skip it and forge the client IP the access
-  # log records (api/chatbot/access_log.py). Port 80 only: CloudFront reaches
-  # this origin http-only (cloudfront.tf) and the ALB has no HTTPS listener.
+  # log records (api/chatbot/access_log.py). Port 443 only: CloudFront reaches
+  # this origin https-only (cloudfront.tf) and the ALB has no HTTP listener.
   # The prefix list counts as 55 of a security group's 60 rules, so one rule.
   ingress {
-    description     = "HTTP from CloudFront only"
-    from_port       = 80
-    to_port         = 80
+    description     = "HTTPS from CloudFront only"
+    from_port       = 443
+    to_port         = 443
     protocol        = "tcp"
     prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }

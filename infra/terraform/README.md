@@ -183,13 +183,12 @@ deploys the Django backend to Elastic Beanstalk. The first deploy takes about
 When it completes, visit the URLs from terraform output:
 ```bash
 terraform output frontend_url    # https://xxxx.cloudfront.net
-terraform output backend_api_url # http://xxxx.elasticbeanstalk.com
+terraform output backend_api_url # https://<prefix>-origin.wwbp.org (CloudFront only)
 ```
 
-Test the backend health check:
+The load balancer admits only CloudFront, so check the site through it:
 ```bash
-curl $(terraform output -raw backend_api_url)/health/
-# {"status": "ok"}
+scripts/smoke.sh $(terraform output -raw frontend_url)   # from the repository root
 ```
 
 ---
@@ -299,6 +298,20 @@ isolated by policy:
   controls cannot be tagged, so neither role may update one (any
   distribution in the account could depend on it); creating and deleting
   stay allowed, and deleting fails while one is in use;
+- **DNS and WAF**: the zone (`wwbp.org`) is shared with the live
+  deployment, SES (DKIM, MAIL FROM, DMARC) and other projects. Each apply
+  role may change records only in that one hosted zone (`<ZONE_ID>`), only
+  A, AAAA and CNAME, and only named exactly `<PREFIX>-<env>-origin.<ZONE_NAME>`,
+  production also `<SITE_DOMAIN>`, and their ACM validation records
+  (`_` + 32 characters + `.<name>`; a Deny refuses such a label with a dot
+  in it, so `_dmarc` and `_domainkey` names stay out); it can read the
+  rest. IAM cannot see `cutover_dns`: production's role may change the
+  `<SITE_DOMAIN>` records whenever it applies, and the variable is what
+  holds the change back to the cutover. Web ACLs:
+  only `<PREFIX>-<env>-*`, never the live distributions' `CreatedByCloudFront-*`.
+  The roles' existing policies need this added (re-create them from
+  `bootstrap/iam/` with the `sed` below) before the first apply of this
+  change; the boundaries are unchanged;
 - **email**: the test role and every role the test stack creates (its
   boundary, `<PREFIX>-terraform-boundary-test`) are denied `ses:Send*`, so
   the test stack cannot send real email through the account's SES
@@ -343,13 +356,15 @@ within the test role's limits. Read the branch before you approve.
 ### One-time setup (the owner)
 
 The policies are committed in `bootstrap/iam/` and checked by
-`tests/check_workflows.py`. Replace `<ACCOUNT_ID>` (`TF_AWS_ACCOUNT_ID`), `<PREFIX>` (the value of `TF_PROJECT_PREFIX`) and
-`<SES_FROM_DOMAIN>` before using them, for example:
+`tests/check_workflows.py`. Replace `<ACCOUNT_ID>` (`TF_AWS_ACCOUNT_ID`), `<PREFIX>` (the value of `TF_PROJECT_PREFIX`),
+`<SES_FROM_DOMAIN>`, `<SITE_DOMAIN>` (production's public name, `bot.wwbp.org`), `<ZONE_NAME>` (the Route 53 zone,
+`dns_zone_name`: `wwbp.org`) and `<ZONE_ID>` (its hosted zone ID: `aws route53 list-hosted-zones-by-name --dns-name wwbp.org`) before using them, for example:
 
 ```bash
 for f in bootstrap/iam/*.json; do
   sed -e "s/<ACCOUNT_ID>/$ACCOUNT_ID/g" -e "s/<PREFIX>/$PREFIX/g" \
-      -e "s/<SES_FROM_DOMAIN>/$SES_FROM_DOMAIN/g" "$f" > "/tmp/$(basename "$f")"
+      -e "s/<SES_FROM_DOMAIN>/$SES_FROM_DOMAIN/g" -e "s/<SITE_DOMAIN>/$SITE_DOMAIN/g" \
+      -e "s/<ZONE_NAME>/$ZONE_NAME/g" -e "s/<ZONE_ID>/$ZONE_ID/g" "$f" > "/tmp/$(basename "$f")"
 done
 ```
 
@@ -563,19 +578,38 @@ db_instance_class = "db.t3.small"   # was db.t3.micro
 secret and restart the app (no Terraform run): see "Secrets" in
 docs/deployment/technical-reference.rst.
 
-**Add a custom domain:**
-1. Create an ACM certificate for your domain in us-east-1 (AWS console)
-2. Edit `cloudfront.tf`: add `aliases = ["your-domain.com"]` to the distribution
-   and replace `cloudfront_default_certificate = true` with:
-   ```hcl
-   viewer_certificate {
-     acm_certificate_arn      = "arn:aws:acm:us-east-1:..."
-     ssl_support_method       = "sni-only"
-     minimum_protocol_version = "TLSv1.2_2021"
-   }
-   ```
-3. `terraform apply`
-4. Point your domain's CNAME at the CloudFront domain name from `terraform output frontend_url`
+**The edge (CloudFront, WAF, DNS):**
+- CloudFront has the web ACL in `waf.tf`, matched to live production's: AWS
+  anti-DDoS (live's settings), a 300-requests-per-IP-in-5-minutes rule that
+  only counts, then IP reputation, common (8 KB body limit counted, not
+  blocked), known bad inputs and SQLi. `waf_enabled` must stay true for
+  production; `environments/test.tfvars` turns it off (about $11 a month).
+- CloudFront reaches the load balancer https-only (TLS 1.2+) at
+  `<prefix>-origin.<dns_zone_name>`, a CNAME Terraform writes in the existing
+  Route 53 zone (`dns.tf`, default `wwbp.org`). The load balancer listens on
+  443 only, with an ACM certificate for that name (DNS-validated by
+  Terraform), and its security group admits only CloudFront. CloudFront sends
+  the origin name as `Host` (AllViewerExceptHostHeader): the certificate is
+  checked against it, and Django builds links from `SITE_URL`.
+- Terraform reads the zone and writes only this stack's names; the apply
+  roles may change no other record (see "One account, two roles").
+- Known gap, as on live: the security group admits every CloudFront
+  distribution (the managed prefix list), so someone else's distribution
+  pointed at `<prefix>-origin.<zone>` reaches the load balancer without this
+  web ACL. Follow-up: CloudFront adds a secret origin header and an ALB
+  listener rule rejects requests without it.
+
+**Add a custom domain** (a name in `dns_zone_name`):
+1. Set `domain_name` in `environments/<env>.tfvars` and apply. Terraform
+   creates the certificate in us-east-1, writes its validation record and
+   attaches it to the distribution. The distribution does not claim the name
+   yet and the name's DNS is untouched.
+2. Set `cutover_dns = true` and apply: the distribution claims the name as an
+   alias and Terraform points its A/AAAA records here (replacing what is
+   there). A CloudFront alias can be on one distribution at a time, so if
+   another distribution has the name, move it first. For production
+   (`bot.wwbp.org`, held by the hand-built distribution) that is step 11 of
+   `docs/deployment/data-migration.rst`.
 
 ### Viewing Terraform state
 

@@ -49,8 +49,8 @@ run "load_balancer_accepts_cloudfront_only" {
   assert {
     condition = alltrue([
       for rule in aws_security_group.load_balancer.ingress :
-      toset(rule.prefix_list_ids) == toset(["pl-cloudfront"]) && rule.from_port == 80
+      toset(rule.prefix_list_ids) == toset(["pl-cloudfront"]) && rule.from_port == 443 && rule.to_port == 443
     ])
-    error_message = "Only port 80 (CloudFront's http-only origin) from the CloudFront prefix list."
+    error_message = "Only port 443 (CloudFront's https-only origin) from the CloudFront prefix list."
   }
 }
