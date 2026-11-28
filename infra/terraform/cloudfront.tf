@@ -68,6 +68,13 @@ resource "aws_acm_certificate" "custom_domain" {
 # ACM gives a name in one account the same validation record every time, so
 # for bot.wwbp.org this is the record the live certificate already uses (same
 # name, same value): allow_overwrite adopts it instead of failing.
+#
+# Terraform must never delete it: the live certificate (CloudFront
+# E2Q6P4TGU4GOC and the live ALB) renews through it, and a deleted record
+# makes that renewal fail silently. Before reverting domain_name or
+# destroying the stack, take it out of the state instead:
+#   terraform state rm 'aws_route53_record.custom_domain_validation[0]'
+# (docs/deployment/data-migration.rst, step 11).
 resource "aws_route53_record" "custom_domain_validation" {
   count           = var.domain_name != "" ? 1 : 0
   zone_id         = data.aws_route53_zone.main.zone_id
@@ -76,6 +83,10 @@ resource "aws_route53_record" "custom_domain_validation" {
   ttl             = 300
   records         = [one(aws_acm_certificate.custom_domain[0].domain_validation_options).resource_record_value]
   allow_overwrite = true
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_acm_certificate_validation" "custom_domain" {
