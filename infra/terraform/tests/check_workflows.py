@@ -905,6 +905,39 @@ def allows_untagged(policy, action, resource, environment):
     return allows({"Statement": untagged}, action, resource)
 
 
+TAG_KEY = re.compile(r"(?:aws|secretsmanager):ResourceTag/(.+)")
+
+
+def tag_conditions_hold(cond, tags):
+    """Whether the resource-tag conditions of a statement hold for a resource
+    carrying `tags`. Other conditions are taken as met, which errs towards
+    finding an Allow; a negated or unknown operator on a tag fails the check."""
+    for op, entries in cond.items():
+        for key, wanted in entries.items():
+            m = TAG_KEY.fullmatch(key)
+            if not m:
+                continue
+            value = tags.get(m.group(1))
+            if op == "StringEquals":
+                ok = value in as_list(wanted)
+            elif op == "StringLike":
+                ok = value is not None and any(fnmatchcase(value, w) for w in as_list(wanted))
+            else:
+                ok = False
+            if not ok:
+                return False
+    return True
+
+
+def allows_tagged(policy, action, resource, tags):
+    """allows(), evaluating resource-tag conditions against `tags`."""
+    granted = any(tag_conditions_hold(st.get("Condition", {}), tags)
+                  for st in matching(policy, "Allow", action, resource))
+    denied = any(tag_conditions_hold(st.get("Condition", {}), tags) if "Condition" in st else True
+                 for st in matching(policy, "Deny", action, resource))
+    return granted and not denied
+
+
 def denies(policy, action, resource):
     return any("Condition" not in st for st in matching(policy, "Deny", action, resource))
 
@@ -930,9 +963,23 @@ def sample_arns(env_name):
 # The master user secret RDS creates for a database (manage_master_user_password).
 RDS_SECRET = "arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:rds!db-0123abcd-AbCdEf"
 # Calls that write, restore, destroy or read a secret's value.
+# Calls that write, restore, destroy or read a secret's value, or change who
+# may (resource policy), when it changes (rotation), where it lives
+# (replication) or how it is tagged (tags can feed conditions).
 SECRET_VALUE_CALLS = ("secretsmanager:CreateSecret", "secretsmanager:PutSecretValue", "secretsmanager:UpdateSecret",
                       "secretsmanager:RestoreSecret", "secretsmanager:DeleteSecret", "secretsmanager:GetSecretValue",
-                      "secretsmanager:UpdateSecretVersionStage", "secretsmanager:ReplicateSecretToRegions")
+                      "secretsmanager:UpdateSecretVersionStage", "secretsmanager:ReplicateSecretToRegions",
+                      "secretsmanager:RotateSecret", "secretsmanager:CancelRotateSecret",
+                      "secretsmanager:PutResourcePolicy", "secretsmanager:DeleteResourcePolicy",
+                      "secretsmanager:TagResource", "secretsmanager:UntagResource",
+                      "secretsmanager:StopReplicationToReplica", "secretsmanager:RemoveRegionsFromReplication")
+# RDS tags the master user secret with the database it belongs to. An
+# rds!db-* name says nothing about the owner: the tag is the only scope.
+RDS_SECRET_TAG = "aws:rds:primaryDBInstanceArn"
+
+
+def rds_db_tag(owner):
+    return {RDS_SECRET_TAG: f"arn:aws:rds:us-east-1:<ACCOUNT_ID>:db:{owner}-database"}
 
 
 # IAM actions that accept the iam:PermissionsBoundary condition key: every one
@@ -1386,7 +1433,6 @@ for name, policy in policies.items():
             # RDS master user secret), and no SSM parameters.
             ("ssm:GetParameter", own["param"], False),
             ("secretsmanager:GetSecretValue", own["secret"], True),
-            ("secretsmanager:GetSecretValue", RDS_SECRET, True),
             ("secretsmanager:GetSecretValue", "arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:someone-else/x-AbCdEf", False),
             ("secretsmanager:PutSecretValue", own["secret"], False),
             ("secretsmanager:UpdateSecret", own["secret"], False),
@@ -1400,6 +1446,17 @@ for name, policy in policies.items():
         ):
             check(allows(policy, action, arn) == expected,
                   f"{fname}.json: {action} on {arn} must be {'allowed' if expected else 'refused'}")
+        # The RDS master user secrets of every database in the shared account
+        # are rds!db-*: only the one tagged with this environment's database.
+        # Another environment's, another project's (MeetLab's production
+        # database uses one), or an untagged one: refused.
+        for owner, expected in ((f"<PREFIX>-{environment}", True),
+                                *((f"<PREFIX>-{o}", False) for o in others),
+                                ("meetlab-v2-production", False), ("meetlab-v2", False), (None, False)):
+            tags = rds_db_tag(owner) if owner else {}
+            check(allows_tagged(policy, "secretsmanager:GetSecretValue", RDS_SECRET, tags) == expected,
+                  f"{fname}.json: GetSecretValue on an rds!db secret of {owner or 'an untagged database'} "
+                  f"must be {'allowed' if expected else 'refused'}")
         check(denies(policy, "s3:GetObject", sample_arns(environment)["state"]),
               f"{fname}.json: must explicitly deny the Terraform state to the roles the stack creates")
         for action in ("iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy", "iam:CreatePolicyVersion",
