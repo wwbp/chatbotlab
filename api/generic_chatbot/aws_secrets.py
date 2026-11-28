@@ -53,6 +53,11 @@ def load_into_environ():
             raise RuntimeError(
                 f"secret {app_id} has keys the application does not read: {unknown}"
             )
+        # Only the secret's values: a stale one in the environment must not
+        # stand in for a key the secret leaves out (settings.py then refuses
+        # to start without SECRET_KEY).
+        for key in APP_KEYS:
+            os.environ.pop(key, None)
         os.environ.update(values)
     db_id = os.getenv("DATABASE_SECRET_ID")
     if db_id:

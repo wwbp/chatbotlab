@@ -177,9 +177,7 @@ def test_a_stale_api_key_in_the_environment_is_not_used(monkeypatch):
 
 def test_production_without_its_database_secret_fails_at_start(monkeypatch):
     production(monkeypatch)
-    fake_secrets_manager(
-        monkeypatch, [(APP_ID, json.dumps(APP_VALUES)), (DB_ID, None)]
-    )
+    fake_secrets_manager(monkeypatch, [(APP_ID, json.dumps(APP_VALUES)), (DB_ID, None)])
     monkeypatch.setenv("DATABASE_PASSWORD", "an-env-value-must-not-be-used-instead")
 
     with pytest.raises(Exception, match="ResourceNotFoundException"):
