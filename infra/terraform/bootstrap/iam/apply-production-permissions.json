@@ -93,6 +93,9 @@
       "Condition": {
         "Bool": {
           "aws:ViaAWSService": "true"
+        },
+        "StringLike": {
+          "aws:RequestTag/aws:rds:primaryDBInstanceArn": "arn:aws:rds:*:<ACCOUNT_ID>:db:<PREFIX>-production-*"
         }
       }
     },
