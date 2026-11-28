@@ -193,8 +193,7 @@
         "s3:ListBucket",
         "s3:PutObject",
         "secretsmanager:GetSecretValue",
-        "ses:SendEmail",
-        "ses:SendRawEmail"
+        "ses:Send*Email"
       ],
       "Resource": [
         "arn:aws:elasticbeanstalk:*:*:application/<PREFIX>-production",
@@ -206,10 +205,19 @@
         "arn:aws:s3:::elasticbeanstalk-*-<ACCOUNT_ID>",
         "arn:aws:logs:*:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/<PREFIX>-production-*",
         "arn:aws:secretsmanager:*:<ACCOUNT_ID>:secret:<PREFIX>-production/*",
-        "arn:aws:secretsmanager:*:<ACCOUNT_ID>:secret:rds!db-*",
         "arn:aws:ses:*:<ACCOUNT_ID>:identity/<SES_FROM_DOMAIN>",
         "arn:aws:ses:*:<ACCOUNT_ID>:identity/*@<SES_FROM_DOMAIN>"
       ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": "arn:aws:secretsmanager:*:*:secret:rds!db-*",
+      "Condition": {
+        "StringLike": {
+          "aws:ResourceTag/aws:rds:primaryDBInstanceArn": "arn:aws:rds:*:<ACCOUNT_ID>:db:<PREFIX>-production-*"
+        }
+      }
     },
     {
       "Effect": "Allow",

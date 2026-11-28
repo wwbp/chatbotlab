@@ -203,9 +203,18 @@
         "arn:aws:s3:::elasticbeanstalk-*/<PREFIX>-test/*",
         "arn:aws:s3:::elasticbeanstalk-*-<ACCOUNT_ID>",
         "arn:aws:logs:*:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/<PREFIX>-test-*",
-        "arn:aws:secretsmanager:*:<ACCOUNT_ID>:secret:<PREFIX>-test/*",
-        "arn:aws:secretsmanager:*:<ACCOUNT_ID>:secret:rds!db-*"
+        "arn:aws:secretsmanager:*:<ACCOUNT_ID>:secret:<PREFIX>-test/*"
       ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": "arn:aws:secretsmanager:*:*:secret:rds!db-*",
+      "Condition": {
+        "StringLike": {
+          "aws:ResourceTag/aws:rds:primaryDBInstanceArn": "arn:aws:rds:*:<ACCOUNT_ID>:db:<PREFIX>-test-*"
+        }
+      }
     },
     {
       "Effect": "Allow",
