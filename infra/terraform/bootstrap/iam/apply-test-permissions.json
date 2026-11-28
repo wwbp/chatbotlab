@@ -80,6 +80,57 @@
       "Resource": "arn:aws:logs:*:<ACCOUNT_ID>:log-group:/aws/elasticbeanstalk/<PREFIX>-test-*"
     },
     {
+      "Sid": "OwnDnsRecords",
+      "Effect": "Allow",
+      "Action": "route53:ChangeResourceRecordSets",
+      "Resource": "arn:aws:route53:::hostedzone/<ZONE_ID>",
+      "Condition": {
+        "ForAllValues:StringLike": {
+          "route53:ChangeResourceRecordSetsNormalizedRecordNames": [
+            "<PREFIX>-test-origin.<ZONE_NAME>",
+            "_????????????????????????????????.<PREFIX>-test-origin.<ZONE_NAME>"
+          ]
+        },
+        "ForAllValues:StringEquals": {
+          "route53:ChangeResourceRecordSetsRecordTypes": [
+            "A",
+            "AAAA",
+            "CNAME"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyDottedValidationNames",
+      "Effect": "Deny",
+      "Action": "route53:ChangeResourceRecordSets",
+      "Resource": "arn:aws:route53:::hostedzone/<ZONE_ID>",
+      "Condition": {
+        "ForAnyValue:StringLike": {
+          "route53:ChangeResourceRecordSetsNormalizedRecordNames": [
+            "_*.*.<PREFIX>-test-origin.<ZONE_NAME>"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "OwnWebAcl",
+      "Effect": "Allow",
+      "Action": [
+        "wafv2:CreateWebACL",
+        "wafv2:DeleteWebACL",
+        "wafv2:GetWebACL",
+        "wafv2:ListTagsForResource",
+        "wafv2:TagResource",
+        "wafv2:UntagResource",
+        "wafv2:UpdateWebACL"
+      ],
+      "Resource": [
+        "arn:aws:wafv2:us-east-1:<ACCOUNT_ID>:global/webacl/<PREFIX>-test-*/*",
+        "arn:aws:wafv2:us-east-1:<ACCOUNT_ID>:global/managedruleset/*/*"
+      ]
+    },
+    {
       "Sid": "ReadEverythingElse",
       "Effect": "Allow",
       "Action": [
@@ -101,6 +152,8 @@
         "logs:Describe*",
         "rds:Describe*",
         "rds:ListTagsForResource",
+        "route53:Get*",
+        "route53:List*",
         "s3:ListAllMyBuckets",
         "sts:GetCallerIdentity"
       ],

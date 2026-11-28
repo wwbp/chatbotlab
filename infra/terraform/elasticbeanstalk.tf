@@ -93,6 +93,30 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
     name      = "SecurityGroups"
     value     = aws_security_group.load_balancer.id
   }
+  # HTTPS only, as live production: CloudFront connects https-only to the
+  # origin name (dns.tf) and checks this certificate against it. The port 80
+  # listener is off, so nothing reaches the app in clear text; the load
+  # balancer still forwards to the instances on port 80 inside the VPC.
+  setting {
+    namespace = "aws:elbv2:listener:443"
+    name      = "Protocol"
+    value     = "HTTPS"
+  }
+  setting {
+    namespace = "aws:elbv2:listener:443"
+    name      = "SSLCertificateArns"
+    value     = aws_acm_certificate_validation.origin.certificate_arn
+  }
+  setting {
+    namespace = "aws:elbv2:listener:443"
+    name      = "SSLPolicy"
+    value     = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  }
+  setting {
+    namespace = "aws:elbv2:listener:default"
+    name      = "ListenerEnabled"
+    value     = "false"
+  }
 
   # ----- Instances -----------------------------------------------------------
   # DisableIMDSv1=true is the flag that tells EB to use a launch template
@@ -203,8 +227,8 @@ resource "aws_elastic_beanstalk_environment" "chatbot_api" {
   }
 
   # Browsers send Origin on every admin POST. Django compares it against the
-  # request's own origin, which here is http://<eb-cname> — CloudFront reaches
-  # this environment over HTTP and forwards every viewer header except Host —
+  # request's own origin, which here is http://<prefix>-origin.<zone> — the
+  # Host CloudFront sends, and Django sees plain HTTP from the load balancer —
   # while the browser sends https://<cloudfront-domain>. Without the real
   # front-end origin listed, every admin login fails with
   # "CSRF verification failed" and settings.py falls back to the wwbp domains,

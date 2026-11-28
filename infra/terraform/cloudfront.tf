@@ -36,16 +36,18 @@ resource "aws_cloudfront_origin_access_control" "frontend_assets" {
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
-# ACM certificate for custom domain (only created when domain_name is set).
+# ACM certificate for the custom domain (only when domain_name is set).
 #
-# CloudFront requires ACM certs to be in us-east-1 regardless of the rest of
-# the infrastructure region. We use the aws.us_east_1 provider alias from
-# main.tf for this resource and the validation resource below.
+# CloudFront requires ACM certs in us-east-1 whatever the stack's region,
+# hence the aws.us_east_1 provider. Terraform writes the validation record in
+# the Route 53 zone (dns.tf) and waits for the certificate to be issued.
 #
-# On first deploy with a domain: the cert is created and the validation CNAME
-# is printed to the workflow summary. The researcher adds the CNAME at their
-# registrar. aws_acm_certificate_validation then waits (up to 30 min) for DNS
-# to propagate before continuing to wire the cert into CloudFront.
+# The name itself only moves to this distribution at the cutover
+# (cutover_dns, below): a CloudFront alias can be on one distribution at a
+# time, and for bot.wwbp.org the live one (E2Q6P4TGU4GOC) holds it until then.
+# Until cutover_dns, the certificate is attached without the alias, which is
+# what lets an administrator move the alias over without downtime
+# (docs/deployment/data-migration.rst, step 11).
 # -----------------------------------------------------------------------------
 
 resource "aws_acm_certificate" "custom_domain" {
@@ -54,8 +56,8 @@ resource "aws_acm_certificate" "custom_domain" {
   domain_name       = var.domain_name
   validation_method = "DNS"
 
-  # The us_east_1 provider has no default_tags; the apply role's scope
-  # relies on the Environment tag.
+  # Explicit as well as default_tags: the apply role may request a
+  # certificate only with its Environment and Project tags.
   tags = local.common_tags
 
   lifecycle {
@@ -63,13 +65,55 @@ resource "aws_acm_certificate" "custom_domain" {
   }
 }
 
-resource "aws_acm_certificate_validation" "custom_domain" {
+# ACM gives a name in one account the same validation record every time, so
+# for bot.wwbp.org this is the record the live certificate already uses (same
+# name, same value): allow_overwrite adopts it instead of failing.
+#
+# Terraform must never delete it: the live certificate (CloudFront
+# E2Q6P4TGU4GOC and the live ALB) renews through it, and a deleted record
+# makes that renewal fail silently. Before reverting domain_name or
+# destroying the stack, take it out of the state instead:
+#   terraform state rm 'aws_route53_record.custom_domain_validation[0]'
+# (docs/deployment/data-migration.rst, step 11).
+resource "aws_route53_record" "custom_domain_validation" {
   count           = var.domain_name != "" ? 1 : 0
-  provider        = aws.us_east_1
-  certificate_arn = aws_acm_certificate.custom_domain[0].arn
+  zone_id         = data.aws_route53_zone.main.zone_id
+  name            = one(aws_acm_certificate.custom_domain[0].domain_validation_options).resource_record_name
+  type            = one(aws_acm_certificate.custom_domain[0].domain_validation_options).resource_record_type
+  ttl             = 300
+  records         = [one(aws_acm_certificate.custom_domain[0].domain_validation_options).resource_record_value]
+  allow_overwrite = true
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "aws_acm_certificate_validation" "custom_domain" {
+  count                   = var.domain_name != "" ? 1 : 0
+  provider                = aws.us_east_1
+  certificate_arn         = aws_acm_certificate.custom_domain[0].arn
+  validation_record_fqdns = [aws_route53_record.custom_domain_validation[0].fqdn]
 
   timeouts {
     create = "30m"
+  }
+}
+
+# The cutover: the public name's A and AAAA records point at this
+# distribution. allow_overwrite replaces the records that point at the live
+# distribution today.
+resource "aws_route53_record" "site" {
+  for_each        = var.cutover_dns ? toset(["A", "AAAA"]) : toset([])
+  zone_id         = data.aws_route53_zone.main.zone_id
+  name            = var.domain_name
+  type            = each.key
+  allow_overwrite = true
+
+  alias {
+    name                   = aws_cloudfront_distribution.frontend.domain_name
+    zone_id                = aws_cloudfront_distribution.frontend.hosted_zone_id
+    evaluate_target_health = false
   }
 }
 
@@ -116,7 +160,8 @@ resource "aws_cloudfront_distribution" "frontend" {
   default_root_object = "index.html"
   price_class         = "PriceClass_100"
   comment             = "${local.name_prefix} frontend — managed by Terraform"
-  aliases             = var.domain_name != "" ? [var.domain_name] : []
+  aliases             = var.cutover_dns ? [var.domain_name] : []
+  web_acl_id          = var.waf_enabled ? aws_wafv2_web_acl.edge[0].arn : null
 
   origin {
     # I use the regional domain name (not the global one) to avoid redirect
@@ -126,21 +171,28 @@ resource "aws_cloudfront_distribution" "frontend" {
     origin_access_control_id = aws_cloudfront_origin_access_control.frontend_assets.id
   }
 
-  # The EB CNAME is the ALB endpoint. CloudFront routes /api/* and /ws/* here.
-  # HTTP-only because the EB CNAME has no TLS cert — traffic is on AWS backbone.
+  # The load balancer, under this stack's own name (dns.tf), over HTTPS: its
+  # listener presents a certificate for that name, as live production's
+  # does for bot.wwbp.org. The record's name (not the CNAME) also makes
+  # CloudFront wait for the record.
   origin {
-    domain_name = aws_elastic_beanstalk_environment.chatbot_api.cname
+    domain_name = aws_route53_record.origin.name
     origin_id   = "EB-${aws_elastic_beanstalk_environment.chatbot_api.name}"
 
     custom_origin_config {
       http_port              = 80
       https_port             = 443
-      origin_protocol_policy = "http-only"
+      origin_protocol_policy = "https-only"
       origin_ssl_protocols   = ["TLSv1.2"]
     }
   }
 
-  # /api/* — Django REST API. No caching, all methods, all headers forwarded.
+  # /api/* — Django REST API. No caching, all methods, all headers forwarded
+  # but Host. Live production forwards Host because its load balancer's
+  # certificate is for bot.wwbp.org; this one's is for the origin name, and
+  # CloudFront checks the certificate against the Host it sends. Django needs
+  # no viewer Host: links come from SITE_URL, ALLOWED_HOSTS is "*", and CSRF
+  # checks the Origin against CSRF_TRUSTED_ORIGINS (tests/edge.tftest.hcl).
   # Managed policy IDs from https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-policies.html
   ordered_cache_behavior {
     path_pattern           = "/api/*"

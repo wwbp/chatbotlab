@@ -264,7 +264,45 @@ Steps 1 to 3 are preparation and can be done ahead of time. The window (app offl
 
 11. **Switch.** Point the public name (``dev.bot.wwbp.org``, later ``bot.wwbp.org``) at the new stack. Leave the old environment blocked, not terminated.
 
-    *Rollback:* point the name back and restore the old security group rule. **Anything participants wrote to the new database after the switch is not in the old one.** Decide before the window who makes that call and until when; after real participants have written new data, prefer fixing forward.
+    A CloudFront alias can be on only one distribution at a time, and the old distribution (``E2Q6P4TGU4GOC``, ``d2ssfi5pq27xs0.cloudfront.net``, for ``bot.wwbp.org``) holds it. The order:
+
+    0. **Before a: the shared validation record.** ACM gives ``bot.wwbp.org`` the same validation record in one account for every certificate, so the new certificate reuses the live one's (``96218d86``, used by ``E2Q6P4TGU4GOC`` and the live load balancer, renewed by ACM from about 60 days before 2027-05-31). Terraform adopts that record and must write the same value. Check, as an administrator::
+
+          aws sts get-caller-identity --query Account          # must be 848180123498
+          aws acm describe-certificate --region us-east-1 --certificate-arn <arn of 96218d86> \
+            --query 'Certificate.DomainValidationOptions[0].ResourceRecord'
+
+       The stack must be in account ``848180123498``: in another account ACM gives another value, and writing it would break the live certificate's renewal at once. After step a, ``terraform state show 'aws_route53_record.custom_domain_validation[0]'`` must show the same name and value. Terraform refuses to delete the record (``prevent_destroy``). Before reverting ``domain_name`` or destroying production, take it out of the state so it stays in the zone::
+
+          terraform state rm 'aws_route53_record.custom_domain_validation[0]'
+
+    a. **Ahead of the window:** ``domain_name = "bot.wwbp.org"`` in ``environments/production.tfvars`` (``cutover_dns`` stays ``false``), merged and applied. Terraform requests the certificate in us-east-1, adopts the validation record (step 0) and attaches the certificate to the new distribution, without the alias. ``https://bot.wwbp.org`` still reaches the old site. Also open a pull request that sets ``cutover_dns = true``, reviewed but not merged.
+
+    b. **Move the alias** (an administrator: the apply roles are denied the live distribution). Needs ``cloudfront:AssociateAlias`` on the new distribution, ``cloudfront:UpdateDistribution`` on ``E2Q6P4TGU4GOC``, and ``route53:ChangeResourceRecordSets`` on the zone for the TXT record. Without downtime, with CloudFront's alias move: create a TXT record ``_bot.wwbp.org`` whose value is the **target** (new) distribution's domain (``terraform output cloudfront_domain_name``), then::
+
+          aws cloudfront associate-alias --target-distribution-id <new distribution id> --alias bot.wwbp.org
+
+       CloudFront takes the alias off the old distribution and serves ``bot.wwbp.org`` from the new one, whichever distribution the DNS record still names. Delete the TXT record afterwards. If ``associate-alias`` is refused, remove ``bot.wwbp.org`` from the old distribution's alternate domain names instead (the site is down until c is applied).
+
+    c. **Merge the** ``cutover_dns = true`` **pull request and apply, immediately after b.** Run no other production apply between b and c: until c, the configuration still says the distribution has no alias, so any apply would take it off again and ``bot.wwbp.org`` would be served by neither distribution. The new distribution keeps the alias in its Terraform configuration, and the ``bot.wwbp.org`` A/AAAA records point at it (replacing the A record for ``d2ssfi5pq27xs0.cloudfront.net``). Check: ``dig +short bot.wwbp.org`` and ``scripts/smoke.sh https://bot.wwbp.org``.
+
+    Nothing else in the zone changes: SES's DKIM, MAIL FROM and DMARC records stay as they are.
+
+    *Rollback:* in this order, so the name always has a distribution and Terraform never deletes a record that is in use:
+
+    1. An administrator moves the alias back. Create a TXT record ``_bot.wwbp.org`` whose value is the target, now the **old** distribution's domain ``d2ssfi5pq27xs0.cloudfront.net`` (it still carries the ``bot.wwbp.org`` certificate), then::
+
+          aws cloudfront associate-alias --target-distribution-id E2Q6P4TGU4GOC --alias bot.wwbp.org
+
+    2. The administrator points the records back: UPSERT the ``bot.wwbp.org`` A alias record to ``d2ssfi5pq27xs0.cloudfront.net`` and delete the AAAA record (live production never had one).
+    3. Take the records out of Terraform's state, so the next apply does not delete them::
+
+          terraform state rm 'aws_route53_record.site["A"]' 'aws_route53_record.site["AAAA"]'
+
+    4. Set ``cutover_dns = false`` in ``environments/production.tfvars``, merge and apply (this removes only the new distribution's alias, already gone).
+    5. Delete the TXT record.
+
+    Then restore the old security group rule. **Anything participants wrote to the new database after the switch is not in the old one.** Decide before the window who makes that call and until when; after real participants have written new data, prefer fixing forward.
 
 12. **Check and close the window.** ::
 

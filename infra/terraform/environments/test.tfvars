@@ -25,3 +25,7 @@ backup_retention_period = 1
 force_destroy_buckets   = true
 
 domain_name = ""
+
+# The web ACL (waf.tf) costs about $11 a month; the test stack goes without
+# it. Set true to rehearse with production's rules.
+waf_enabled = false

@@ -209,13 +209,47 @@ variable "db_instance_class" {
 }
 
 variable "domain_name" {
-  description = "Optional custom domain to serve the chatbot from (e.g. chatbot.mylab.org). Leave empty to use the auto-assigned CloudFront URL (https://xxxx.cloudfront.net). If set, I create an SSL certificate and you must add a DNS validation record at your registrar — the deploy workflow prints it to the run summary."
+  description = "Optional custom domain to serve the chatbot from (e.g. chatbot.mylab.org), a name in dns_zone_name. Leave empty to use the auto-assigned CloudFront URL (https://xxxx.cloudfront.net). If set, I create a certificate in us-east-1, validate it with a record in the Route 53 zone and attach it to the distribution. The distribution claims the name and the public DNS record moves to it only with cutover_dns."
   type        = string
   default     = ""
+  validation {
+    condition     = var.domain_name == "" || endswith(var.domain_name, ".${var.dns_zone_name}")
+    error_message = "domain_name must be a name in dns_zone_name: Terraform writes its certificate and alias records there."
+  }
 }
 
 variable "create_github_oidc_provider" {
   description = "Set to false if a GitHub Actions OIDC provider already exists in this AWS account. Each account allows exactly one OIDC provider per URL — creating a second one for token.actions.githubusercontent.com will fail. Check with: aws iam list-open-id-connect-providers"
   type        = bool
   default     = true
+}
+
+# -----------------------------------------------------------------------
+# Edge: CloudFront's web ACL and DNS
+# -----------------------------------------------------------------------
+
+variable "waf_enabled" {
+  description = "Put the web ACL in waf.tf (the live production distribution's rules) in front of CloudFront. It costs about $11 a month plus $0.60 per million requests. Must stay true for production; the test stack may turn it off."
+  type        = bool
+  default     = true
+  validation {
+    condition     = var.waf_enabled || var.environment == "test"
+    error_message = "Only the test stack may turn the web ACL off."
+  }
+}
+
+variable "dns_zone_name" {
+  description = "The public Route 53 hosted zone, already in this account, that holds this stack's DNS records: <prefix>-origin.<zone> (CloudFront's name for the load balancer) and, with domain_name, the certificate validation and alias records. Terraform reads the zone and adds only those names; it never manages the zone or its other records."
+  type        = string
+  default     = "wwbp.org"
+}
+
+variable "cutover_dns" {
+  description = "Move domain_name to this stack: the distribution claims it as an alias, and its A/AAAA records in the zone point here (replacing what is there). Set only at the cutover, after the old distribution has given up the alias (docs/deployment/data-migration.rst, step 11)."
+  type        = bool
+  default     = false
+  validation {
+    condition     = !var.cutover_dns || var.domain_name != ""
+    error_message = "cutover_dns needs domain_name: it moves that name to this stack."
+  }
 }

@@ -824,7 +824,7 @@ STAR_ALLOWLIST = {
     "elasticache:Describe*", "elasticache:ListTagsForResource", "elasticbeanstalk:DescribeA*",
     "elasticbeanstalk:DescribeE*", "elasticbeanstalk:DescribeI*", "elasticbeanstalk:DescribeP*",
     "elasticbeanstalk:List*", "elasticloadbalancing:Describe*", "iam:Get*", "iam:List*", "logs:Describe*",
-    "rds:Describe*", "rds:ListTagsForResource", "s3:ListAllMyBuckets", "sts:GetCallerIdentity",
+    "rds:Describe*", "rds:ListTagsForResource", "route53:Get*", "route53:List*", "s3:ListAllMyBuckets", "sts:GetCallerIdentity",
     "bedrock:Converse*", "bedrock:InvokeModel*", "cloudwatch:PutMetricData",
 }
 # Statements that may only appear tag-scoped (own aws:ResourceTag or
@@ -1095,7 +1095,8 @@ check(
 # at setup time.
 def iam_size(path):
     text = json.dumps(json.loads(path.read_text()), separators=(",", ":"))
-    return len(text.replace("<PREFIX>", "x" * 24).replace("<SES_FROM_DOMAIN>", "x" * 30))
+    return len(text.replace("<PREFIX>", "x" * 24).replace("<SES_FROM_DOMAIN>", "x" * 30).replace("<SITE_DOMAIN>", "x" * 30)
+            .replace("<ZONE_NAME>", "x" * 30).replace("<ZONE_ID>", "x" * 32))
 
 
 for path in sorted(IAM.glob("*.json")) if IAM.exists() else []:
@@ -1363,6 +1364,110 @@ check(
     "README.md: must say to attach the boundary to existing stack roles before granting the apply policy",
 )
 
+
+# --- Edge: DNS records in the shared Route 53 zone, and the web ACL ------------
+# The zone (wwbp.org) holds the live deployment's records, SES's DKIM, MAIL
+# FROM and DMARC records and other projects'. Each apply role may change only
+# its own names: <PREFIX>-<env>-origin.<zone>, production's site name
+# (<SITE_DOMAIN>, at the cutover) and their ACM validation records
+# (_<32 hex>.<name>), and only those record types.
+ACM_LABEL = "_" + "0123456789abcdef" * 2
+ZONE_ARN = "arn:aws:route53:::hostedzone/<ZONE_ID>"
+OTHER_ZONE_ARN = "arn:aws:route53:::hostedzone/Z0OTHERPROJECTZONE"
+
+
+def _record_condition_matches(cond, names, rtype):
+    """Evaluate the record-name and record-type condition keys for one
+    ChangeBatch changing `names` (a list: IAM sees all of a batch's names at
+    once). None when the statement has a condition this does not know."""
+    known = {"ForAllValues:StringLike", "ForAnyValue:StringLike", "ForAllValues:StringEquals"}
+    if set(cond) - known:
+        return None
+    ok = True
+    for op, values in cond.items():
+        for key, patterns in values.items():
+            batch = {"route53:ChangeResourceRecordSetsNormalizedRecordNames": names,
+                     "route53:ChangeResourceRecordSetsRecordTypes": [rtype]}.get(key)
+            if batch is None:
+                return None
+            hits = [any(fnmatchcase(v, x) for x in as_list(patterns)) for v in batch]
+            ok = ok and (all(hits) if op.startswith("ForAllValues") else any(hits))
+    return ok
+
+
+def changes_record(policy, names, rtype="CNAME", zone=ZONE_ARN):
+    """True when an Allow lets one route53:ChangeResourceRecordSets batch
+    change `names` (a name or a list) in `zone` and no Deny (conditions
+    evaluated) refuses it."""
+    names = as_list(names)
+    action = "route53:ChangeResourceRecordSets"
+    # A Deny conditioned on other keys (resource tags) does not concern
+    # record names: the shared zone carries none of those tags.
+    if any(_record_condition_matches(st.get("Condition", {}), names, rtype)
+           for st in matching(policy, "Deny", action, zone)):
+        return False
+    return any(_record_condition_matches(st.get("Condition", {}), names, rtype)
+               for st in matching(policy, "Allow", action, zone))
+
+
+for role in ROLES:
+    environment = role.split("-", 1)[1]
+    policy = policies[role]
+    fname = f"{role}-permissions"
+    origin = f"<PREFIX>-{environment}-origin.<ZONE_NAME>"
+    own = [origin, f"{ACM_LABEL}.{origin}"] + (["<SITE_DOMAIN>", f"{ACM_LABEL}.<SITE_DOMAIN>"] if environment == "production" else [])
+    for name in own:
+        check(changes_record(policy, name), f"{fname}.json: must allow route53:ChangeResourceRecordSets on its own record {name}")
+        check(not changes_record(policy, name, zone=OTHER_ZONE_ARN),
+              f"{fname}.json: route53 changes must be limited to the one hosted zone <ZONE_ID>, not {OTHER_ZONE_ARN}")
+    check(environment != "production" or changes_record(policy, "<SITE_DOMAIN>", "AAAA"),
+          f"{fname}.json: must allow the site's AAAA alias record")
+    dotted_label = "_0123456789abcdef.0123456789abcde"  # 32 characters after "_", one a dot
+    foreign = ["<ZONE_NAME>", "dev.bot.<ZONE_NAME>", "_dmarc.<SITE_DOMAIN>", "mail.<SITE_DOMAIN>",
+               "gclnjpce._domainkey.<SITE_DOMAIN>", f"x.{origin}", "meetlab.<ZONE_NAME>",
+               f"<PREFIX>-{environment}-origin.<SITE_DOMAIN>", f"<PREFIX>-{environment}-origin.meetlab.<ZONE_NAME>",
+               f"{ACM_LABEL}.<PREFIX>-{environment}-origin.meetlab.<ZONE_NAME>",
+               f"{dotted_label}.{origin}", f"{dotted_label}.<SITE_DOMAIN>",
+               *(f"<PREFIX>-{o}-origin.<ZONE_NAME>" for o in OTHER[environment])]
+    if environment == "test":
+        foreign += ["<SITE_DOMAIN>", f"{ACM_LABEL}.<SITE_DOMAIN>"]
+    for name in foreign:
+        check(not changes_record(policy, name), f"{fname}.json: must not change the record {name} in the shared zone")
+    # One batch pairing an own name with someone else's record.
+    for pair in ([origin, "_dmarc.<SITE_DOMAIN>"], [origin, "_abcdefghijklmnopqrstu._domainkey.<SITE_DOMAIN>"],
+                 [f"{ACM_LABEL}.{origin}", "mail.<SITE_DOMAIN>"]):
+        check(not changes_record(policy, pair), f"{fname}.json: must not change {pair} in one batch")
+    check(not changes_record(policy, origin, "MX") and not changes_record(policy, origin, "TXT"),
+          f"{fname}.json: route53 changes must be limited to A, AAAA and CNAME records")
+    # Any other route53 write would bypass the name scope.
+    for st in policy["Statement"]:
+        if st.get("Effect") == "Allow":
+            for a in as_list(st.get("Action", [])):
+                if a.startswith("route53:") and not re.match(r"route53:(Get|List)", a):
+                    check(a == "route53:ChangeResourceRecordSets", f"{fname}.json: {a} is not allowed (only record changes)")
+    # The web ACL: its own (<PREFIX>-<env>-edge), using AWS's managed groups,
+    # never the live distributions' ACLs or another environment's.
+    acl = "arn:aws:wafv2:us-east-1:<ACCOUNT_ID>:global/webacl/{}/0000"
+    for action in ("wafv2:CreateWebACL", "wafv2:UpdateWebACL", "wafv2:DeleteWebACL", "wafv2:GetWebACL", "wafv2:TagResource"):
+        check(allows(policy, action, acl.format(f"<PREFIX>-{environment}-edge")),
+              f"{fname}.json: must allow {action} on its own web ACL")
+        for other_acl in ("CreatedByCloudFront-036700af", "meetlab-acl", *(f"<PREFIX>-{o}-edge" for o in OTHER[environment])):
+            check(not allows(policy, action, acl.format(other_acl)),
+                  f"{fname}.json: must not allow {action} on the web ACL {other_acl}")
+    check(allows(policy, "wafv2:CreateWebACL", "arn:aws:wafv2:us-east-1:<ACCOUNT_ID>:global/managedruleset/AWS/AWSManagedRulesCommonRuleSet"),
+          f"{fname}.json: CreateWebACL needs AWS's managed rule groups")
+
+# --- The live certificate's validation record ----------------------------------
+# ACM gives bot.wwbp.org the same validation record in this account for the
+# live certificate (CloudFront and the live ALB, renewed by ACM) and for the
+# stack's. Terraform adopts it; it must never delete it, or the live
+# certificate's renewal fails silently.
+cloudfront_tf = (TERRAFORM / "cloudfront.tf").read_text()
+validation_block = re.search(r'resource "aws_route53_record" "custom_domain_validation" \{.*?\n\}', cloudfront_tf, re.S)
+check(bool(validation_block) and re.search(r"lifecycle\s*\{\s*prevent_destroy\s*=\s*true", validation_block.group(0)),
+      "cloudfront.tf: aws_route53_record.custom_domain_validation needs lifecycle { prevent_destroy = true } "
+      "(the live certificate renews through the same record)")
+
 readme = (TERRAFORM / "README.md").read_text()
 check(":pull_request" not in readme, "README.md: no role may trust the pull_request subject")
 check(
@@ -1408,6 +1513,19 @@ check("plan-staging" not in reference and "TF_APPLY_ROLE_ARN" not in reference,
 runbook = (ROOT / "docs" / "deployment" / "data-migration.rst").read_text()
 check("test stack" in runbook and "Follow it for **staging first**" not in runbook,
       "data-migration.rst: the rehearsal runs on the test stack, not on a Terraform staging stack")
+step11 = runbook.split("11. **Switch.**", 1)[-1].split("\n12. ", 1)[0]
+switch, _, rollback = step11.partition("*Rollback:*")
+check("terraform state rm 'aws_route53_record.custom_domain_validation[0]'" in runbook
+      and "describe-certificate" in switch and "848180123498" in switch,
+      "data-migration.rst: step 11 must check the live certificate's validation record and the account before "
+      "domain_name, and keep the shared record out of any revert or destroy with terraform state rm")
+check(0 <= rollback.find("associate-alias --target-distribution-id E2Q6P4TGU4GOC")
+      < rollback.find("terraform state rm 'aws_route53_record.site[\"A\"]'")
+      < rollback.find("cutover_dns = false"),
+      "data-migration.rst: the rollback moves the alias back (associate-alias to E2Q6P4TGU4GOC), repoints the "
+      "records, takes them out of the state, and only then sets cutover_dns = false")
+check("immediately after" in switch and "no other production apply" in switch,
+      "data-migration.rst: step c must be applied right after the alias move, with no other production apply between")
 rehearsal_source = runbook.split("Rehearsal source\n", 1)[-1].split("\nProcedure\n", 1)[0]
 step13 = runbook.split("13. **Rehearsal before production.**", 1)[-1].split("\n14. ", 1)[0]
 # The source sits in the test stack's subnet group but is not in its state:

@@ -29,6 +29,7 @@ variables {
   db_password          = "test-password-not-real"
   admin_panel_password = "test-password-not-real"
   domain_name          = "chat.example.org"
+  dns_zone_name        = "example.org"
   # As in the workflows: the account's OIDC provider exists already, so its
   # ARN (and every trust policy naming it) is known at plan time.
   create_github_oidc_provider = false
@@ -68,6 +69,8 @@ run "names_fit_the_apply_role_scope" {
         aws_iam_role.github_actions_deployment.name,
         aws_iam_instance_profile.eb_instance_profile.name,
         aws_elastic_beanstalk_environment.chatbot_api.name,
+        aws_wafv2_web_acl.edge[0].name,
+        aws_route53_record.origin.name,
       ] : startswith(name, "chatbotlab-test-")
     ]) && aws_elastic_beanstalk_application.chatbot_api.name == "chatbotlab-test"
     error_message = "A resource name falls outside <project>-<environment>-*, which the apply role cannot manage."
