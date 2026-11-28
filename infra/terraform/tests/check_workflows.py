@@ -1394,10 +1394,16 @@ for name, policy in policies.items():
         # the caller's credentials (a forward access session). Only that way:
         # directly, the role could tag or touch any project's RDS secret in the
         # shared account. kms:DescribeKey describes aws/secretsmanager.
+        # And only for this environment's database: RDS puts the
+        # aws:rds:primaryDBInstanceArn tag on the secret it creates.
+        own_db = f"arn:aws:rds:*:<ACCOUNT_ID>:db:<PREFIX>-{environment}-*"
         for action in ("secretsmanager:CreateSecret", "secretsmanager:TagResource"):
             grants = matching(policy, "Allow", action, RDS_SECRET)
-            check(grants and all(st.get("Condition") == {"Bool": {"aws:ViaAWSService": "true"}} for st in grants),
-                  f"{fname}.json: {action} on rds!db-* only with Bool aws:ViaAWSService = true (through RDS)")
+            check(grants and all(st.get("Condition") == {"Bool": {"aws:ViaAWSService": "true"},
+                                                         "StringLike": {f"aws:RequestTag/{RDS_SECRET_TAG}": own_db}}
+                                 for st in grants),
+                  f"{fname}.json: {action} on rds!db-* only with Bool aws:ViaAWSService = true (through RDS) and "
+                  f"StringLike aws:RequestTag/{RDS_SECRET_TAG} = {own_db}")
         for action in ("secretsmanager:DeleteSecret", "secretsmanager:PutSecretValue", "secretsmanager:UpdateSecret",
                        "secretsmanager:GetSecretValue", "secretsmanager:UntagResource"):
             check(not matching(policy, "Allow", action, RDS_SECRET), f"{fname}.json: must not allow {action} on rds!db-*")
