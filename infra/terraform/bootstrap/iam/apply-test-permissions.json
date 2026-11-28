@@ -63,38 +63,6 @@
       "Resource": "arn:aws:elasticache:*:<ACCOUNT_ID>:serverlesscache:<PREFIX>-test-*"
     },
     {
-      "Sid": "LookUpOwnSecrets",
-      "Effect": "Allow",
-      "Action": [
-        "secretsmanager:DescribeSecret",
-        "secretsmanager:GetResourcePolicy"
-      ],
-      "Resource": "arn:aws:secretsmanager:*:<ACCOUNT_ID>:secret:<PREFIX>-test/*"
-    },
-    {
-      "Sid": "RdsCreatesMasterUserSecret",
-      "Effect": "Allow",
-      "Action": [
-        "secretsmanager:CreateSecret",
-        "secretsmanager:TagResource"
-      ],
-      "Resource": "arn:aws:secretsmanager:*:<ACCOUNT_ID>:secret:rds!db-*",
-      "Condition": {
-        "Bool": {
-          "aws:ViaAWSService": "true"
-        },
-        "StringLike": {
-          "aws:RequestTag/aws:rds:primaryDBInstanceArn": "arn:aws:rds:*:<ACCOUNT_ID>:db:<PREFIX>-test-*"
-        }
-      }
-    },
-    {
-      "Sid": "DescribeSecretsManagerKey",
-      "Effect": "Allow",
-      "Action": "kms:DescribeKey",
-      "Resource": "arn:aws:kms:*:<ACCOUNT_ID>:key/*"
-    },
-    {
       "Sid": "ManageOwnElasticBeanstalk",
       "Effect": "Allow",
       "Action": "elasticbeanstalk:*",

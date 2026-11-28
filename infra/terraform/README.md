@@ -394,17 +394,35 @@ twice (with `<env>` = `production`, then `<env>` = `test`):
    (environment `production`, ref `refs/heads/main`) or
    `bootstrap/iam/apply-test-trust.json` (environment `test`, refs
    `refs/heads/main` and `refs/heads/test/*`).
-   Permissions: three customer managed policies (one would exceed IAM's
-   6144-character limit), `bootstrap/iam/apply-<env>-permissions.json`,
-   `-abac.json` and `-guardrails.json`. They scope RDS, ElastiCache, Elastic
+   Permissions: 4 customer managed policies (one would exceed IAM's
+   6144-character limit), each created from its file under exactly this name
+   and attached to the role:
+
+   | Policy name | File (production) | File (test) |
+   |---|---|---|
+   | `<PREFIX>-terraform-apply-<env>-permissions` | `bootstrap/iam/apply-production-permissions.json` | `bootstrap/iam/apply-test-permissions.json` |
+   | `<PREFIX>-terraform-apply-<env>-abac` | `bootstrap/iam/apply-production-abac.json` | `bootstrap/iam/apply-test-abac.json` |
+   | `<PREFIX>-terraform-apply-<env>-guardrails` | `bootstrap/iam/apply-production-guardrails.json` | `bootstrap/iam/apply-test-guardrails.json` |
+   | `<PREFIX>-terraform-apply-<env>-secrets` | `bootstrap/iam/apply-production-secrets.json` | `bootstrap/iam/apply-test-secrets.json` |
+
+   That is `<PREFIX>-terraform-apply-production-permissions`,
+   `<PREFIX>-terraform-apply-production-abac`,
+   `<PREFIX>-terraform-apply-production-guardrails` and
+   `<PREFIX>-terraform-apply-production-secrets` for production, and
+   `<PREFIX>-terraform-apply-test-permissions`,
+   `<PREFIX>-terraform-apply-test-abac`,
+   `<PREFIX>-terraform-apply-test-guardrails` and
+   `<PREFIX>-terraform-apply-test-secrets` for test. The `-secrets` policy
+   is new: create and attach it before the first apply with this change.
+   They scope RDS, ElastiCache, Elastic
    Beanstalk, logs and S3 to `<PREFIX>-<env>` names, and EC2, load
    balancing, Auto Scaling, CloudFormation, CloudFront and ACM to the
    `Environment=<env>` / `Project=<PREFIX>` tags, and deny the other
    environment. If the first test apply fails with AccessDenied, fix the
    test policy narrowly (a name or tag scope, never a broad Allow: the
    account is shared with production) and carry the same fix to production
-   in a pull request. **Re-apply all three policies of both roles, and both
-   boundaries,** from this commit: the apply roles look up `<PREFIX>-<env>/*`
+   in a pull request. **Re-apply all four policies of both roles (creating
+   `-secrets`), and both boundaries,** from this commit: the apply roles look up `<PREFIX>-<env>/*`
    secrets and let RDS create its master user secret (`rds!db-*`, only
    through RDS), the guardrails deny every secret value call, and the
    boundaries let the stack's roles read their own secrets (in place of SSM
